@@ -58,6 +58,32 @@ Out of scope (report to the appropriate party instead):
 - Issues in user-supplied configuration (e.g. choosing a weak master
   password, running NetStacks on a compromised host).
 
+## Known security trade-offs
+
+The following behaviors are deliberate design choices, not bugs.
+Documented here so researchers don't file duplicate reports.
+
+**NetBox API: self-signed certificates accepted.** The Local Agent's
+NetBox HTTP client is built with `danger_accept_invalid_certs(true)`.
+NetBox is typically deployed on internal corporate networks behind an
+internal CA, so chaining to a public CA is not realistic. Affects only
+the `test_netbox_*` and `netbox_proxy_*` handlers in
+`agent/src/api.rs` — SSH, the credential vault, and other network
+paths continue to validate certificates normally. The NetBox URL and
+API token are user-configured per source. A per-source "strict TLS"
+toggle is a reasonable feature request we will accept.
+
+**Controller bootstrap: self-signed certificate accepted on first
+contact.** `fetch_controller_cert` in
+`frontend/src-tauri/src/main.rs` retrieves the Controller's
+self-signed CA before any verified traffic is possible. Mitigations:
+the URL is parsed and must be `https://` with a host present; the
+user then constant-time-compares the SHA-256 fingerprint of the
+returned certificate against a value obtained out-of-band before
+installing it. Standard TOFU bootstrap. Used only in Enterprise mode
+(paid Controller, a separate product); irrelevant in standalone
+Personal Mode.
+
 ## Hall of fame
 
 We thank the reporters who have helped make NetStacks more secure. With
