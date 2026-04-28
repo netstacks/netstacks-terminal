@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or general help
+    url: https://github.com/netstacks/netstacks-terminal/discussions/categories/q-a
+    about: Use Discussions for questions, configuration help, or general usage. The Issues tracker is for confirmed bugs only.
+  - name: Feature suggestion
+    url: https://github.com/netstacks/netstacks-terminal/discussions/categories/ideas
+    about: Suggest a feature in the Ideas category of Discussions. Feature requests filed as Issues will be closed.
+  - name: Show and tell
+    url: https://github.com/netstacks/netstacks-terminal/discussions/categories/show-and-tell
+    about: Share something you built with NetStacks.
+  - name: Security vulnerability
+    url: https://github.com/netstacks/netstacks-terminal/security/advisories/new
+    about: Report a security vulnerability privately via GitHub Security Advisories, or email security@netstacks.net. Do not file security issues publicly.
+  - name: Commercial support
+    url: https://netstacks.net/support
+    about: For response-time guarantees or implementation help, see paid support options.

@@ -1,0 +1,105 @@
+name: Bug report
+description: Report a reproducible bug in NetStacks Terminal or the Local Agent.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please make sure
+        the report includes a minimal reproducer — issues without one will
+        be closed.
+
+        For questions, ideas, or general help, use
+        [Discussions](https://github.com/netstacks/netstacks-terminal/discussions)
+        instead. For security vulnerabilities, email security@netstacks.net
+        — do not file them as public issues.
+
+  - type: input
+    id: version
+    attributes:
+      label: NetStacks version
+      description: "The version shown in About → Version, or the tag of your build."
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: false
+      options:
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Windows 10
+        - Windows 11
+        - Linux (Debian/Ubuntu)
+        - Linux (Fedora/RHEL)
+        - Linux (other)
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "macOS 14.4, Ubuntu 22.04, Windows 11 23H2, etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-source
+    attributes:
+      label: Install source
+      options:
+        - Signed installer from netstacks.net
+        - Built from source
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: |
+        Step-by-step instructions to reproduce the bug. The smaller the
+        reproducer the faster we can fix it.
+      placeholder: |
+        1. Launch NetStacks
+        2. Open Settings → Profiles
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Relevant log output from the agent or the Tauri app. Strip any
+        secrets (passwords, tokens, hostnames you'd rather not share)
+        before pasting.
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, network captures, anything else relevant.

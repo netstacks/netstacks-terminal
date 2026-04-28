@@ -1,0 +1,285 @@
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import type { AuthState, User } from '../types/auth';
+import * as authApi from '../api/auth';
+import { setAuthStateGetter } from '../api/controllerClient';
+import { getCurrentMode } from '../api/client';
+import { useCapabilitiesStore } from './capabilitiesStore';
+
+/**
+ * Auth store for Enterprise mode authentication.
+ * Manages JWT tokens, user info, and auth state.
+ *
+ * Uses Zustand persist middleware to save refresh token to localStorage.
+ * Access token is kept in memory only (more secure).
+ */
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set, get) => ({
+      // Initial state
+      accessToken: null,
+      refreshToken: null,
+      user: null,
+      certInfo: null,
+      isAuthenticated: false,
+      isLoading: false,
+      error: null,
+
+      /**
+       * Log in with username/email and password.
+       * The 'email' parameter is sent as 'username' to match Controller API.
+       */
+      login: async (email: string, password: string) => {
+        set({ isLoading: true, error: null });
+
+        try {
+          // Get agent's public key for cert auto-signing
+          // Only attempt in Tauri (sidecar managed by Tauri); in Vite dev the
+          // proxy targets the sidecar which isn't running in enterprise mode.
+          let publicKey: string | undefined;
+          const mode = getCurrentMode();
+          if (mode === 'enterprise' && window.__TAURI_INTERNALS__) {
+            try {
+              publicKey = await import('../api/cert').then(m => m.getCertPublicKey());
+            } catch {
+              // Agent not running or cert manager not initialized
+            }
+          }
+
+          const response = await authApi.login({
+            username: email,
+            password,
+            public_key: publicKey,
+            client_type: 'terminal',
+          });
+
+          // Set tokens first so the interceptor can use them for /auth/me
+          set({
+            accessToken: response.access_token,
+            refreshToken: response.refresh_token,
+            isAuthenticated: true,
+          });
+
+          // Controller login returns tokens only (no user object).
+          // Fetch full user info from /auth/me to get org_id, roles, etc.
+          const user = response.user ?? await authApi.getCurrentUser();
+
+          set({
+            user,
+            isLoading: false,
+            error: null,
+          });
+
+          // Store SSH certificate if returned (enterprise mode)
+          if (mode === 'enterprise' && response.ssh_certificate) {
+            // Store cert info in auth store for StatusBar display
+            set({ certInfo: response.ssh_certificate });
+
+            // Also try to store on sidecar if available (Tauri only)
+            if (window.__TAURI_INTERNALS__) {
+              try {
+                await import('../api/cert').then(m => m.storeCertificate(response.ssh_certificate!));
+              } catch (err) {
+                console.debug('[authStore] Sidecar cert storage skipped:', err);
+              }
+            }
+          }
+
+          // Fetch capabilities after successful login (enterprise mode)
+          // Per CONTEXT.md: capabilities fetched once at login, not refreshed mid-session
+          if (mode === 'enterprise') {
+            useCapabilitiesStore.getState().fetchCapabilities().catch((err) => {
+              console.warn('[authStore] Failed to fetch capabilities after login:', err);
+              // Don't fail login if capabilities fetch fails - graceful degradation
+            });
+          }
+        } catch (error: unknown) {
+          const message = error instanceof Error
+            ? error.message
+            : 'Login failed. Please check your credentials.';
+
+          // Extract error message from API response if available
+          const apiMessage = (error as { response?: { data?: { error?: string } } })
+            ?.response?.data?.error;
+
+          set({
+            isLoading: false,
+            error: apiMessage || message,
+          });
+
+          throw error;
+        }
+      },
+
+      /**
+       * Log out and clear all auth state.
+       * Calls Controller to revoke tokens and free license seat.
+       */
+      logout: async () => {
+        const mode = getCurrentMode();
+
+        // Only call server logout for Enterprise mode
+        // Controller logout handler:
+        // 1. Deletes active_session record (frees license seat)
+        // 2. Revokes all refresh tokens for the user
+        if (mode === 'enterprise') {
+          try {
+            await authApi.logout();
+          } catch (error) {
+            // Logout should succeed locally even if server call fails
+            console.warn('[authStore] Server logout failed, continuing local logout:', error);
+          }
+        }
+
+        // Clear all local state regardless of server response
+        set({
+          accessToken: null,
+          refreshToken: null,
+          user: null,
+          certInfo: null,
+          isAuthenticated: false,
+          isLoading: false,
+          error: null,
+        });
+      },
+
+      /**
+       * Clear all auth state explicitly.
+       * Used for mode isolation cleanup and testing.
+       */
+      clearAllState: () => {
+        set({
+          accessToken: null,
+          refreshToken: null,
+          user: null,
+          certInfo: null,
+          isAuthenticated: false,
+          isLoading: false,
+          error: null,
+        });
+      },
+
+      /**
+       * Refresh access token using stored refresh token.
+       * Called automatically by axios interceptor on 401.
+       */
+      doRefreshToken: async () => {
+        const { refreshToken } = get();
+
+        if (!refreshToken) {
+          throw new Error('No refresh token available');
+        }
+
+        try {
+          const response = await authApi.refreshToken({
+            refresh_token: refreshToken,
+          });
+
+          set({
+            accessToken: response.access_token,
+            refreshToken: response.refresh_token,
+          });
+        } catch (error) {
+          // Refresh failed - clear auth state completely
+          set({
+            accessToken: null,
+            refreshToken: null,
+            user: null,
+            certInfo: null,
+            isAuthenticated: false,
+            isLoading: false,
+          });
+          throw error;
+        }
+      },
+
+      /**
+       * Check if current auth state is valid.
+       * Attempts to fetch current user to verify token.
+       */
+      checkAuth: async () => {
+        const { refreshToken } = get();
+
+        // No refresh token means not authenticated
+        if (!refreshToken) {
+          set({ isAuthenticated: false, isLoading: false });
+          return;
+        }
+
+        set({ isLoading: true });
+
+        try {
+          // Try to get current user - this will trigger token refresh if needed
+          const user = await authApi.getCurrentUser();
+
+          set({
+            user,
+            isAuthenticated: true,
+            isLoading: false,
+          });
+
+          // Fetch capabilities after successful auth check (enterprise mode)
+          // Per CONTEXT.md: capabilities fetched once at login, not refreshed mid-session
+          const mode = getCurrentMode();
+          if (mode === 'enterprise') {
+            useCapabilitiesStore.getState().fetchCapabilities().catch((err) => {
+              console.warn('[authStore] Failed to fetch capabilities after auth check:', err);
+              // Don't fail auth check if capabilities fetch fails - graceful degradation
+            });
+          }
+        } catch (error) {
+          // Auth check failed - clear state (including error so login screen starts clean)
+          console.warn('[authStore] Auth check failed:', error);
+          set({
+            accessToken: null,
+            refreshToken: null,
+            user: null,
+            certInfo: null,
+            isAuthenticated: false,
+            isLoading: false,
+            error: null,
+          });
+        }
+      },
+
+      /**
+       * Clear error message.
+       */
+      clearError: () => {
+        set({ error: null });
+      },
+
+      /**
+       * Update user info (e.g., after profile edit).
+       */
+      setUser: (user: User) => {
+        set({ user });
+      },
+
+      setCertInfo: (certInfo) => {
+        set({ certInfo });
+      },
+    }),
+    {
+      name: 'netstacks-terminal-auth',
+      // Only persist refresh token to localStorage
+      // Access token stays in memory for security
+      partialize: (state) => ({
+        refreshToken: state.refreshToken,
+      }),
+    }
+  )
+);
+
+/**
+ * Connect auth store to Controller client for JWT interceptors.
+ * Must be called after both are initialized.
+ */
+export function connectAuthStoreToClient(): void {
+  setAuthStateGetter(() => ({
+    accessToken: useAuthStore.getState().accessToken,
+    doRefreshToken: useAuthStore.getState().doRefreshToken,
+    logout: useAuthStore.getState().logout,
+    user: useAuthStore.getState().user,
+  }));
+}

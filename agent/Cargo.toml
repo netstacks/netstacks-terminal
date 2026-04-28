@@ -1,0 +1,103 @@
+[package]
+name = "netstacks-agent"
+version = "0.0.20"
+edition = "2021"
+description = "Local Agent for NetStacks Terminal — SSH/Telnet/SFTP, credential vault, and AI assistant for Personal Mode."
+license = "Apache-2.0"
+repository = "https://github.com/netstacks/netstacks-terminal"
+homepage = "https://netstacks.net"
+authors = ["NetStacks <hello@netstacks.net>"]
+
+[dependencies]
+# Web server
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# SSH client (0.55+ has proper RFC 8332 rsa-sha2-256/512 support)
+russh = "0.55"
+russh-sftp = "2.1"
+
+# PTY for local shell
+portable-pty = "0.8"
+
+# Session management
+uuid = { version = "1", features = ["v4"] }
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite"] }
+
+# Async utilities
+futures = "0.3"
+tokio-util = "0.7"
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Environment
+dotenvy = "0.15"
+
+# SSH key management
+ssh-key = { version = "0.6", features = ["ed25519"] }
+
+# Base64 encoding
+base64 = "0.22"
+
+# Credential vault (audited, open-source — see github.com/netstacks/netstacks-crypto)
+# Pinned to a tagged release so release builds don't depend on a sibling checkout.
+netstacks-credential-vault = { git = "https://github.com/netstacks/netstacks-crypto.git", tag = "v0.1.0" }
+
+# Encryption (still needed for SSH/TLS bits outside the vault)
+sha2 = { version = "0.10", features = ["oid"] }
+rand = "0.8"
+subtle = "2"
+
+# Async trait
+async-trait = "0.1"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Directories
+dirs = "5"
+
+# System information
+hostname = "0.4"
+
+# HTTP client (rustls-tls for cross-platform TLS without system dependencies)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# URL encoding
+urlencoding = "2.1"
+
+# Template rendering (Jinja2-compatible)
+minijinja = { version = "2", features = ["json"] }
+
+# Regex for sanitization patterns
+regex = "1"
+
+# ANSI escape sequence stripping (for PTY output cleanup)
+strip-ansi-escapes = "0.2"
+snmp2 = { version = "0.4.14", features = ["tokio", "heap_buffers"] }
+
+# MCP Protocol client (Model Context Protocol)
+rmcp = { version = "0.14", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+
+# Email sending
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+[dev-dependencies]
+tempfile = "3"
