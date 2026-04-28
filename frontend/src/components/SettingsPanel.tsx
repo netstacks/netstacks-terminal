@@ -38,7 +38,7 @@ interface Setting {
   options?: { label: string; value: string }[]
 }
 
-export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'account' | 'myCredentials' | 'sshCerts'
+export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts'
 
 interface SettingsPanelProps {
   onSettingChange?: (id: string, value: unknown) => void
@@ -63,6 +63,7 @@ const TAB_SEARCH_INDEX: { tab: SettingsTab; label: string; keywords: string[] }[
   { tab: 'integrations', label: 'Integrations', keywords: ['integration', 'netbox', 'netdisco', 'librenms'] },
   { tab: 'apiResources', label: 'API Resources', keywords: ['api', 'resource', 'quick', 'action', 'endpoint', 'solarwinds', 'prtg', 'http', 'rest'] },
   { tab: 'troubleshooting', label: 'Troubleshooting', keywords: ['troubleshoot', 'recording', 'session', 'capture'] },
+  { tab: 'enterprise', label: 'Enterprise', keywords: ['enterprise', 'controller', 'team', 'url', 'connect', 'tls', 'certificate', 'netstacks'] },
   { tab: 'account', label: 'Account', keywords: ['account', 'controller', 'username', 'sign out', 'logout'] },
   { tab: 'myCredentials', label: 'My Credentials', keywords: ['credential', 'password', 'secret'] },
   { tab: 'sshCerts', label: 'SSH Certificates', keywords: ['ssh', 'certificate', 'cert', 'ca', 'public key'] },
@@ -411,6 +412,12 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
           Troubleshooting
         </button>
         )}
+        <button
+          className={`settings-nav-item ${activeTab === 'enterprise' ? 'active' : ''}${matchingTabs && !matchingTabs.has('enterprise') ? ' dimmed' : ''}`}
+          onClick={() => setActiveTab('enterprise')}
+        >
+          Enterprise
+        </button>
         {isEnterprise && (
           <button
             className={`settings-nav-item ${activeTab === 'account' ? 'active' : ''}${matchingTabs && !matchingTabs.has('account') ? ' dimmed' : ''}`}
@@ -551,6 +558,74 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         {/* Troubleshooting settings tab */}
         {activeTab === 'troubleshooting' && (
           <SettingsTroubleshooting />
+        )}
+
+        {/* Enterprise tab — visible in both modes */}
+        {activeTab === 'enterprise' && (
+          <div className="settings-content">
+            {isEnterprise ? (
+              <div className="settings-category">
+                <h3 className="settings-category-title">Enterprise Controller</h3>
+                <div className="settings-account-info" style={{ marginBottom: '16px' }}>
+                  <div className="settings-account-row">
+                    <span className="settings-account-label">Status</span>
+                    <span className="settings-account-value" style={{ color: '#4caf50' }}>Connected</span>
+                  </div>
+                </div>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.6' }}>
+                  You are connected to a NetStacks Controller. Your team's devices, credentials, and configurations are managed centrally.
+                  To switch controllers or return to standalone mode, update the URL below and restart the app.
+                </p>
+                <SettingsConnection />
+              </div>
+            ) : (
+              <>
+                <div className="settings-category">
+                  <h3 className="settings-category-title">NetStacks Enterprise</h3>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.7', marginBottom: '20px' }}>
+                    <p style={{ marginBottom: '12px' }}>
+                      NetStacks Terminal is free and open source. When your team is ready to scale, the <strong style={{ color: 'var(--text-primary)' }}>NetStacks Enterprise Controller</strong> adds:
+                    </p>
+                    <ul style={{ paddingLeft: '20px', margin: '0 0 16px 0', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <li>Centralized device inventory and credential management</li>
+                      <li>Role-based access control (RBAC) and audit logging</li>
+                      <li>Shared network topologies and documentation</li>
+                      <li>Method of Procedure (MOP) workflows and change management</li>
+                      <li>Service stacks and scheduled automation</li>
+                      <li>Shared AI prompts and team knowledge base</li>
+                    </ul>
+                    <a
+                      href="https://netstacks.net"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        color: 'var(--accent)',
+                        textDecoration: 'none',
+                        fontWeight: 500,
+                        fontSize: '13px',
+                      }}
+                    >
+                      Learn more at netstacks.net
+                      <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12">
+                        <path d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z"/>
+                        <path d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z"/>
+                      </svg>
+                    </a>
+                  </div>
+                </div>
+                <div className="settings-category">
+                  <h3 className="settings-category-title">Connect to a Controller</h3>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.6' }}>
+                    If your team has a NetStacks Controller deployed, enter its URL below. The app will restart in enterprise mode.
+                  </p>
+                  <SettingsConnection />
+                </div>
+              </>
+            )}
+          </div>
         )}
 
         {/* My Credentials tab (Enterprise mode only) */}

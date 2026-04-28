@@ -11,6 +11,7 @@ import TaskApprovalModal from './components/TaskApprovalModal';
 import { TokenUsageProvider } from './contexts/TokenUsageContext';
 import { initializeClient } from './api/client';
 import { setSidecarAuthToken } from './api/localClient';
+import { useCapabilitiesStore } from './stores/capabilitiesStore';
 import PopoutTerminal from './components/PopoutTerminal';
 import SharedTerminal from './components/SharedTerminal';
 
@@ -106,6 +107,13 @@ async function bootstrap() {
 
   const result = await initializeClient();
   console.log(`[main] App mode: ${result.mode}, requires auth: ${result.requiresAuth}`);
+
+  // Populate capabilities before the app renders so all sidebar tabs are visible.
+  // In standalone mode this resolves synchronously with STANDALONE_CAPABILITIES;
+  // in enterprise mode it fetches from the Controller after login instead.
+  if (result.mode !== 'enterprise') {
+    await useCapabilitiesStore.getState().fetchCapabilities();
+  }
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
