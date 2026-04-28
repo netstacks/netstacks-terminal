@@ -1,0 +1,8723 @@
+//! API route handlers for NetStacks
+//!
+//! Exposes the DataProvider via REST API endpoints.
+
+use axum::{
+    extract::{Path, Query, Request, State},
+    http::StatusCode,
+    middleware::Next,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use std::error::Error as StdError;
+use std::sync::Arc;
+
+use crate::ai;
+use crate::models::*;
+use crate::providers::{DataProvider, ProviderError};
+use crate::sftp::{FileEntry, SftpAuth, SftpConfig, SftpError, SftpManager};
+use crate::ssh::{self, BulkCommandRequest, BulkCommandResponse, SshConfig, build_ssh_config_from_session};
+
+/// Server-side state for AI "config mode" (AUDIT FIX EXEC-002).
+///
+/// Previously the AI's `agent-chat` request body carried an
+/// `allow_config_changes: bool` that lifted the in-prompt safety rules. That
+/// is a self-asserted toggle from a (potentially XSS-compromised) frontend.
+/// We now require the user to call `POST /api/ai/config-mode/enable` with
+/// the current master password; that flips a short-lived server-side flag
+/// (default 5 min) that the chat handler consults instead of trusting the
+/// request body.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigModeState {
+    /// Wall-clock instant after which the state must be treated as off.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Shared application state
+pub struct AppState {
+    pub provider: Arc<dyn DataProvider>,
+    pub auth_token: String,
+    /// Cached sanitizer for AI data scrubbing (None = needs rebuild from settings)
+    pub sanitizer: Arc<tokio::sync::RwLock<Option<ai::sanitizer::Sanitizer>>>,
+    // Phase 02: Task management
+    pub task_store: crate::tasks::TaskStore,
+    pub task_registry: Arc<crate::tasks::TaskRegistry>,
+    pub task_executor: Arc<crate::tasks::AgentTaskExecutor>,
+    pub progress_broadcaster: crate::tasks::ProgressBroadcaster,
+    // Phase 06: MCP client management (wrapped in RwLock for task executor access)
+    pub mcp_client_manager: Arc<tokio::sync::RwLock<crate::integrations::McpClientManager>>,
+    // SSH certificate authentication
+    pub cert_manager: Option<Arc<crate::cert_manager::CertManager>>,
+    // Database pool for direct queries (docs creation from logging/recording)
+    pub pool: sqlx::sqlite::SqlitePool,
+    // SSH tunnel manager
+    pub tunnel_manager: Arc<crate::tunnels::TunnelManager>,
+    /// AI config-mode override (AUDIT FIX EXEC-002).
+    pub config_mode: Arc<tokio::sync::RwLock<Option<ConfigModeState>>>,
+    /// AUDIT FIX (REMOTE-001): pending host-key fingerprint prompts. When
+    /// the SSH handshake hits an unknown or changed host key, the russh
+    /// `check_server_key` callback inserts a pending entry here and blocks
+    /// on a oneshot channel waiting for the user to click Accept or
+    /// Reject in the modal. The frontend polls
+    /// `GET /api/host-keys/prompts` and resolves via the approve/reject
+    /// endpoints below.
+    pub host_key_approvals: Arc<crate::ssh::approvals::HostKeyApprovalService>,
+}
+
+/// Default duration the config-mode override stays active after the user
+/// re-authenticates. Picked to be long enough for an interactive conversation
+/// but short enough that an unattended app does not stay in a destructive
+/// state for hours.
+pub const CONFIG_MODE_TTL_SECS: i64 = 300;
+
+/// Check whether AI config mode is currently active.
+///
+/// Read-locks the state, expires it lazily if the deadline has passed, and
+/// returns true only when both the flag is set AND `expires_at > now()`.
+pub async fn is_config_mode_active(state: &AppState) -> bool {
+    let now = chrono::Utc::now();
+    let snapshot = *state.config_mode.read().await;
+    match snapshot {
+        Some(s) if s.expires_at > now => true,
+        Some(_) => {
+            // Expired — clear lazily so the next caller sees the cleared
+            // state without paying the lazy-clear cost again.
+            let mut w = state.config_mode.write().await;
+            if let Some(s) = *w {
+                if s.expires_at <= chrono::Utc::now() {
+                    *w = None;
+                }
+            }
+            false
+        }
+        None => false,
+    }
+}
+
+/// Auth middleware that validates Bearer token on all API routes (except /api/health).
+///
+/// Extracts the `Authorization: Bearer <token>` header and compares it to the
+/// per-session auth token stored in AppState using a constant-time comparison.
+/// Returns 401 for missing or invalid tokens.
+///
+/// AUDIT FIX (AUTH-001): The exemption is an exact-path match on `/api/health`.
+/// The previous `ends_with("/health")` test let any parameterized route ending
+/// in the literal string `health` (e.g. `PUT /api/settings/health`,
+/// `DELETE /api/sessions/health`, `GET /api/lookup/dns/health`) bypass auth.
+///
+/// AUDIT FIX (CRYPTO-007 partial / AUTH-006 partial): token comparison uses
+/// `subtle::ConstantTimeEq` to avoid timing-based byte-by-byte leaks.
+pub async fn auth_middleware(
+    State(app_state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    use subtle::ConstantTimeEq;
+
+    // Exempt health endpoint from auth — exact match only.
+    if request.uri().path() == "/api/health" {
+        return next.run(request).await;
+    }
+
+    // Extract Authorization header
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(header) if header.starts_with("Bearer ") => {
+            let token = &header[7..];
+            if token.as_bytes().ct_eq(app_state.auth_token.as_bytes()).into() {
+                next.run(request).await
+            } else {
+                (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "unauthorized"}))).into_response()
+            }
+        }
+        _ => {
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "unauthorized"}))).into_response()
+        }
+    }
+}
+
+/// API error response
+#[derive(Debug, Serialize)]
+pub struct ApiError {
+    pub error: String,
+    pub code: String,
+}
+
+/// Convert ProviderError to HTTP response
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let status = match self.code.as_str() {
+            "NOT_FOUND" => StatusCode::NOT_FOUND,
+            "VAULT_LOCKED" => StatusCode::FORBIDDEN,
+            "INVALID_PASSWORD" => StatusCode::UNAUTHORIZED,
+            "ACCESS_DENIED" => StatusCode::FORBIDDEN,
+            "VALIDATION" => StatusCode::BAD_REQUEST,
+            "CONFLICT" => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        (status, Json(self)).into_response()
+    }
+}
+
+impl From<crate::db::DbError> for ApiError {
+    fn from(err: crate::db::DbError) -> Self {
+        let error = err.to_string();
+        let code = if error.contains("RowNotFound") {
+            "NOT_FOUND"
+        } else {
+            "DATABASE_ERROR"
+        };
+        ApiError { error, code: code.to_string() }
+    }
+}
+
+impl From<ProviderError> for ApiError {
+    fn from(err: ProviderError) -> Self {
+        let (code, error) = match &err {
+            ProviderError::NotFound(msg) => ("NOT_FOUND".to_string(), msg.clone()),
+            ProviderError::VaultLocked => (
+                "VAULT_LOCKED".to_string(),
+                "Vault is locked - unlock with master password first".to_string(),
+            ),
+            ProviderError::InvalidPassword => (
+                "INVALID_PASSWORD".to_string(),
+                "Invalid master password".to_string(),
+            ),
+            ProviderError::_AccessDenied => ("ACCESS_DENIED".to_string(), "Access denied".to_string()),
+            ProviderError::Validation(msg) => ("VALIDATION".to_string(), msg.clone()),
+            ProviderError::Conflict(msg) => ("CONFLICT".to_string(), msg.clone()),
+            ProviderError::Database(msg) => ("DATABASE_ERROR".to_string(), msg.clone()),
+            ProviderError::Encryption(msg) => ("ENCRYPTION_ERROR".to_string(), msg.clone()),
+        };
+
+        ApiError { error, code }
+    }
+}
+
+// === Health & Info Endpoints ===
+
+/// Health check endpoint
+pub async fn health() -> &'static str {
+    "ok"
+}
+
+/// Application info
+#[derive(Serialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub mode: String,
+}
+
+pub async fn app_info(State(state): State<Arc<AppState>>) -> Json<AppInfo> {
+    let mode = match state.provider.connection_mode() {
+        ConnectionMode::Local => "Local",
+        ConnectionMode::Controller { .. } => "Controller",
+    };
+
+    Json(AppInfo {
+        name: "NetStacks".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: mode.to_string(),
+    })
+}
+
+// === Session Endpoints ===
+
+/// List all sessions
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Session>>, ApiError> {
+    let sessions = state.provider.list_sessions().await?;
+    Ok(Json(sessions))
+}
+
+/// Get a single session
+pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Session>, ApiError> {
+    let session = state.provider.get_session(&id).await?;
+    Ok(Json(session))
+}
+
+/// Create a new session
+pub async fn create_session(
+    State(state): State<Arc<AppState>>,
+    Json(new_session): Json<NewSession>,
+) -> Result<(StatusCode, Json<Session>), ApiError> {
+    let session = state.provider.create_session(new_session).await?;
+    Ok((StatusCode::CREATED, Json(session)))
+}
+
+/// Update an existing session
+pub async fn update_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateSession>,
+) -> Result<Json<Session>, ApiError> {
+    let session = state.provider.update_session(&id, update).await?;
+    Ok(Json(session))
+}
+
+/// Delete a session
+pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_session(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Bulk delete request
+#[derive(Debug, Deserialize)]
+pub struct BulkDeleteRequest {
+    pub ids: Vec<String>,
+}
+
+/// Bulk delete response
+#[derive(Debug, Serialize)]
+pub struct BulkDeleteResponse {
+    pub deleted: usize,
+    pub failed: usize,
+}
+
+/// Bulk delete multiple sessions
+pub async fn bulk_delete_sessions(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<Json<BulkDeleteResponse>, ApiError> {
+    let mut deleted = 0;
+    let mut failed = 0;
+
+    for id in req.ids {
+        match state.provider.delete_session(&id).await {
+            Ok(_) => deleted += 1,
+            Err(e) => {
+                eprintln!("Failed to delete session {}: {:?}", id, e);
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(Json(BulkDeleteResponse { deleted, failed }))
+}
+
+// === Folder Endpoints ===
+
+/// List all folders
+pub async fn list_folders(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Folder>>, ApiError> {
+    let folders = state.provider.list_folders().await?;
+    Ok(Json(folders))
+}
+
+/// Get a single folder
+pub async fn get_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Folder>, ApiError> {
+    let folder = state.provider.get_folder(&id).await?;
+    Ok(Json(folder))
+}
+
+/// Create a new folder
+pub async fn create_folder(
+    State(state): State<Arc<AppState>>,
+    Json(new_folder): Json<NewFolder>,
+) -> Result<(StatusCode, Json<Folder>), ApiError> {
+    let folder = state.provider.create_folder(new_folder).await?;
+    Ok((StatusCode::CREATED, Json(folder)))
+}
+
+/// Update an existing folder
+pub async fn update_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateFolder>,
+) -> Result<Json<Folder>, ApiError> {
+    let folder = state.provider.update_folder(&id, update).await?;
+    Ok(Json(folder))
+}
+
+/// Delete a folder
+pub async fn delete_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_folder(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Vault/Credential Endpoints ===
+
+/// Get vault status
+pub async fn vault_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<VaultStatus>, ApiError> {
+    let has_master_password = state.provider.has_master_password().await?;
+    let unlocked = state.provider.is_unlocked();
+
+    Ok(Json(VaultStatus {
+        unlocked,
+        has_master_password,
+    }))
+}
+
+/// Request body for setting master password
+#[derive(Deserialize)]
+pub struct SetPasswordRequest {
+    pub password: String,
+}
+
+impl std::fmt::Debug for SetPasswordRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetPasswordRequest")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Set master password (first time setup)
+pub async fn set_master_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetPasswordRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.set_master_password(&req.password).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for unlocking vault
+#[derive(Deserialize)]
+pub struct UnlockRequest {
+    pub password: String,
+}
+
+impl std::fmt::Debug for UnlockRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockRequest")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Unlock the vault
+pub async fn unlock_vault(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UnlockRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.unlock(&req.password).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lock the vault
+pub async fn lock_vault(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.provider.lock();
+    StatusCode::NO_CONTENT
+}
+
+/// Store credential for a session
+pub async fn store_credential(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(credential): Json<NewCredential>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .provider
+        .store_credential(&session_id, credential)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete credential for a session
+pub async fn delete_credential(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_credential(&session_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Mapped Keys Endpoints (Global) ===
+
+/// List all mapped keys
+pub async fn list_mapped_keys(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<MappedKey>>, ApiError> {
+    let keys = state.provider.list_mapped_keys().await?;
+    Ok(Json(keys))
+}
+
+/// Create a mapped key
+pub async fn create_mapped_key(
+    State(state): State<Arc<AppState>>,
+    Json(new_key): Json<NewMappedKey>,
+) -> Result<(StatusCode, Json<MappedKey>), ApiError> {
+    let key = state.provider.create_mapped_key(new_key).await?;
+    Ok((StatusCode::CREATED, Json(key)))
+}
+
+/// Update a mapped key
+pub async fn update_mapped_key(
+    State(state): State<Arc<AppState>>,
+    Path(key_id): Path<String>,
+    Json(update): Json<UpdateMappedKey>,
+) -> Result<Json<MappedKey>, ApiError> {
+    let key = state.provider.update_mapped_key(&key_id, update).await?;
+    Ok(Json(key))
+}
+
+/// Delete a mapped key
+pub async fn delete_mapped_key(
+    State(state): State<Arc<AppState>>,
+    Path(key_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_mapped_key(&key_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Custom Command Endpoints ===
+
+/// List all custom commands
+pub async fn list_custom_commands(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<CustomCommand>>, ApiError> {
+    let cmds = state.provider.list_custom_commands().await?;
+    Ok(Json(cmds))
+}
+
+/// Create a custom command
+pub async fn create_custom_command(
+    State(state): State<Arc<AppState>>,
+    Json(new_cmd): Json<NewCustomCommand>,
+) -> Result<(StatusCode, Json<CustomCommand>), ApiError> {
+    let cmd = state.provider.create_custom_command(new_cmd).await?;
+    Ok((StatusCode::CREATED, Json(cmd)))
+}
+
+/// Update a custom command
+pub async fn update_custom_command(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateCustomCommand>,
+) -> Result<Json<CustomCommand>, ApiError> {
+    let cmd = state.provider.update_custom_command(&id, update).await?;
+    Ok(Json(cmd))
+}
+
+/// Delete a custom command
+pub async fn delete_custom_command(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_custom_command(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Snippet Endpoints ===
+
+/// List snippets for a session
+pub async fn list_session_snippets(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<Snippet>>, ApiError> {
+    let snippets = state.provider.list_snippets(Some(&session_id)).await?;
+    Ok(Json(snippets))
+}
+
+/// Create a snippet for a session
+pub async fn create_session_snippet(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(new_snippet): Json<NewSnippet>,
+) -> Result<(StatusCode, Json<Snippet>), ApiError> {
+    let snippet = state.provider.create_snippet(Some(&session_id), new_snippet).await?;
+    Ok((StatusCode::CREATED, Json(snippet)))
+}
+
+/// Delete a snippet from a session
+pub async fn delete_session_snippet(
+    State(state): State<Arc<AppState>>,
+    Path((_session_id, snippet_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_snippet(&snippet_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// List global snippets
+pub async fn list_global_snippets(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Snippet>>, ApiError> {
+    let snippets = state.provider.list_snippets(None).await?;
+    Ok(Json(snippets))
+}
+
+/// Create a global snippet
+pub async fn create_global_snippet(
+    State(state): State<Arc<AppState>>,
+    Json(new_snippet): Json<NewSnippet>,
+) -> Result<(StatusCode, Json<Snippet>), ApiError> {
+    let snippet = state.provider.create_snippet(None, new_snippet).await?;
+    Ok((StatusCode::CREATED, Json(snippet)))
+}
+
+/// Delete a global snippet
+pub async fn delete_global_snippet(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_snippet(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Connection History Endpoints ===
+
+/// List recent connection history
+pub async fn list_history(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ConnectionHistory>>, ApiError> {
+    let history = state.provider.list_history(10).await?;
+    Ok(Json(history))
+}
+
+/// Create a connection history entry
+pub async fn create_history(
+    State(state): State<Arc<AppState>>,
+    Json(entry): Json<NewConnectionHistory>,
+) -> Result<(StatusCode, Json<ConnectionHistory>), ApiError> {
+    let history = state.provider.create_history(entry).await?;
+    Ok((StatusCode::CREATED, Json(history)))
+}
+
+/// Delete a connection history entry
+pub async fn delete_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_history(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Export/Import Endpoints ===
+
+/// Export all sessions and folders
+pub async fn export_all(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ExportData>, ApiError> {
+    let data = state.provider.export_all().await?;
+    Ok(Json(data))
+}
+
+/// Export a folder and its contents
+pub async fn export_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ExportData>, ApiError> {
+    let data = state.provider.export_folder(&id).await?;
+    Ok(Json(data))
+}
+
+/// Export a single session
+pub async fn export_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ExportData>, ApiError> {
+    let data = state.provider.export_session(&id).await?;
+    Ok(Json(data))
+}
+
+/// Import sessions and folders
+pub async fn import_sessions(
+    State(state): State<Arc<AppState>>,
+    Json(data): Json<ExportData>,
+) -> Result<Json<ImportResult>, ApiError> {
+    let result = state.provider.import_data(data).await?;
+    Ok(Json(result))
+}
+
+// === Move/Reorder Endpoints ===
+
+/// Request body for moving a session
+#[derive(Debug, Deserialize)]
+pub struct MoveSessionRequest {
+    pub folder_id: Option<String>,
+    pub sort_order: f64,
+}
+
+/// Move a session (change folder and/or sort order)
+pub async fn move_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<MoveSessionRequest>,
+) -> Result<Json<Session>, ApiError> {
+    let update = UpdateSession {
+        folder_id: Some(req.folder_id),
+        sort_order: Some(req.sort_order as i32),
+        ..Default::default()
+    };
+    let session = state.provider.update_session(&id, update).await?;
+    Ok(Json(session))
+}
+
+/// Request body for moving a folder
+#[derive(Debug, Deserialize)]
+pub struct MoveFolderRequest {
+    pub parent_id: Option<String>,
+    pub sort_order: f64,
+}
+
+/// Move a folder (change parent and/or sort order)
+pub async fn move_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<MoveFolderRequest>,
+) -> Result<Json<Folder>, ApiError> {
+    // First, validate that we're not creating a cycle
+    // (folder can't be moved into itself or its descendants)
+    if let Some(ref parent_id) = req.parent_id {
+        // Check if the target parent is the folder itself
+        if parent_id == &id {
+            return Err(ApiError {
+                error: "Cannot move folder into itself".to_string(),
+                code: "VALIDATION".to_string(),
+            });
+        }
+
+        // Check if the target parent is a descendant of this folder
+        let all_folders = state.provider.list_folders().await?;
+        let mut descendants = std::collections::HashSet::new();
+
+        // Build set of descendant IDs
+        fn collect_descendants(
+            folder_id: &str,
+            folders: &[Folder],
+            descendants: &mut std::collections::HashSet<String>,
+        ) {
+            for folder in folders {
+                if folder.parent_id.as_ref().map(|p| p.as_str()) == Some(folder_id) {
+                    descendants.insert(folder.id.clone());
+                    collect_descendants(&folder.id, folders, descendants);
+                }
+            }
+        }
+
+        collect_descendants(&id, &all_folders, &mut descendants);
+
+        if descendants.contains(parent_id) {
+            return Err(ApiError {
+                error: "Cannot move folder into its own descendant".to_string(),
+                code: "VALIDATION".to_string(),
+            });
+        }
+    }
+
+    let update = UpdateFolder {
+        name: None,
+        parent_id: Some(req.parent_id),
+        sort_order: Some(req.sort_order as i32),
+    };
+    let folder = state.provider.update_folder(&id, update).await?;
+    Ok(Json(folder))
+}
+
+// === Settings Endpoints ===
+
+/// Get a setting value by key
+pub async fn get_setting(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let value = state.provider.get_setting(&key).await?;
+    Ok(Json(value))
+}
+
+/// Set a setting value
+pub async fn set_setting(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(value): Json<serde_json::Value>,
+) -> Result<StatusCode, ApiError> {
+    // AUDIT FIX (REMOTE-002): the `ssh.hostKeyChecking` key is rejected.
+    // It used to flip a global "disable strict host-key checking" flag
+    // for every SSH/SFTP/MOP connection; that flag is gone. Per-session
+    // opt-in is the only remaining escape hatch.
+    if key == "ssh.hostKeyChecking" {
+        return Err(ApiError {
+            error: "ssh.hostKeyChecking is no longer configurable — strict host-key \
+                    checking is always on. Per-session opt-in is the only escape hatch."
+                .to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    state.provider.set_setting(&key, value.clone()).await?;
+
+    // Invalidate sanitizer cache when sanitization config changes
+    if key == "ai.sanitization_config" {
+        let mut cache = state.sanitizer.write().await;
+        *cache = None;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Terminal Logging Endpoints ===
+
+/// Request body for starting logging
+#[derive(Debug, Deserialize)]
+pub struct StartLogRequest {
+    pub format: String, // "raw", "plain", "html"
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub timestamps: bool, // handled client-side, accepted for API compat
+    pub path: Option<String>,
+}
+
+/// Returns the canonical directory under which all terminal-log files must
+/// live. Ensures the directory exists.
+fn terminal_logs_root() -> Result<std::path::PathBuf, ApiError> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let logs_dir = std::path::PathBuf::from(&home)
+        .join("Documents")
+        .join("NetStacks")
+        .join("logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| ApiError {
+        error: format!("Failed to ensure logs directory: {}", e),
+        code: "IO_ERROR".to_string(),
+    })?;
+    logs_dir.canonicalize().map_err(|e| ApiError {
+        error: format!("Failed to canonicalize logs directory: {}", e),
+        code: "IO_ERROR".to_string(),
+    })
+}
+
+/// AUDIT FIX (DATA-002): confine log-file paths to the NetStacks logs
+/// directory. Without this, the write/append/read endpoints accept arbitrary
+/// user-supplied paths and become arbitrary file primitives — a compromised
+/// webview could overwrite ~/.bashrc, drop Launch Agents, etc.
+///
+/// The validation accepts both existing files (write/append/read) and
+/// not-yet-created files (start with a custom path) by canonicalizing the
+/// parent in the latter case.
+fn validate_log_path(supplied: &str) -> Result<std::path::PathBuf, ApiError> {
+    let logs_root = terminal_logs_root()?;
+    let supplied_path = std::path::PathBuf::from(supplied);
+
+    let canonical = if supplied_path.exists() {
+        supplied_path.canonicalize().map_err(|e| ApiError {
+            error: format!("Invalid log path: {}", e),
+            code: "INVALID_PATH".to_string(),
+        })?
+    } else {
+        let parent = supplied_path.parent().ok_or_else(|| ApiError {
+            error: "Log path has no parent directory".to_string(),
+            code: "INVALID_PATH".to_string(),
+        })?;
+        let parent_canon = parent.canonicalize().map_err(|e| ApiError {
+            error: format!("Invalid log path parent: {}", e),
+            code: "INVALID_PATH".to_string(),
+        })?;
+        let file_name = supplied_path.file_name().ok_or_else(|| ApiError {
+            error: "Log path has no file name".to_string(),
+            code: "INVALID_PATH".to_string(),
+        })?;
+        parent_canon.join(file_name)
+    };
+
+    if !canonical.starts_with(&logs_root) {
+        return Err(ApiError {
+            error: "Log path must be within the NetStacks logs directory".to_string(),
+            code: "INVALID_PATH".to_string(),
+        });
+    }
+
+    Ok(canonical)
+}
+
+/// Response for starting logging
+#[derive(Debug, Serialize)]
+pub struct StartLogResponse {
+    pub path: String,
+}
+
+/// Request body for writing log content
+#[derive(Debug, Deserialize)]
+pub struct WriteLogRequest {
+    pub path: String,
+    pub content: String,
+}
+
+/// Start logging for a terminal
+pub async fn start_terminal_log(
+    Path(terminal_id): Path<String>,
+    Json(req): Json<StartLogRequest>,
+) -> Result<Json<StartLogResponse>, ApiError> {
+    let logs_root = terminal_logs_root()?;
+
+    // If the caller supplied a path, confine it to the logs directory.
+    // Otherwise generate a default path inside the logs directory.
+    let path = if let Some(p) = req.path {
+        let validated = validate_log_path(&p)?;
+        validated.to_string_lossy().to_string()
+    } else {
+        let now = chrono::Utc::now();
+        let extension = match req.format.as_str() {
+            "raw" => "raw",
+            "html" => "html",
+            _ => "log",
+        };
+        logs_root
+            .join(format!("terminal-{}_{}.{}", terminal_id, now.format("%Y%m%d_%H%M%S"), extension))
+            .to_string_lossy()
+            .to_string()
+    };
+
+    // Create the log file
+    tokio::fs::File::create(&path).await
+        .map_err(|e| ApiError {
+            error: format!("Failed to create log file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    Ok(Json(StartLogResponse { path }))
+}
+
+/// Write content to a log file
+pub async fn write_terminal_log(
+    Path(terminal_id): Path<String>,
+    Json(req): Json<WriteLogRequest>,
+) -> Result<StatusCode, ApiError> {
+    use tokio::io::AsyncWriteExt;
+
+    let safe_path = validate_log_path(&req.path)?;
+
+    tracing::debug!("Writing log for terminal {}: {} bytes to {}", terminal_id, req.content.len(), safe_path.display());
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&safe_path)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to open log file '{}': {}", safe_path.display(), e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    file.write_all(req.content.as_bytes())
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to write to log file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for stopping a terminal log
+#[derive(Debug, Deserialize)]
+pub struct StopLogRequest {
+    pub path: Option<String>,
+    pub session_id: Option<String>,
+    pub session_name: Option<String>,
+}
+
+/// Response from stopping a terminal log
+#[derive(Debug, Serialize)]
+pub struct StopLogResponse {
+    pub document_id: Option<String>,
+}
+
+/// Stop logging for a terminal and save log content to docs
+pub async fn stop_terminal_log(
+    State(state): State<Arc<AppState>>,
+    Path(terminal_id): Path<String>,
+    body: Option<Json<StopLogRequest>>,
+) -> Result<Json<StopLogResponse>, ApiError> {
+    tracing::debug!("Stopping log for terminal {}", terminal_id);
+
+    let req = body.map(|b| b.0);
+
+    // If a log file path was provided, read it and create a document
+    if let Some(ref req) = req {
+        if let Some(ref path) = req.path {
+            // AUDIT FIX (DATA-002): confine reads to the logs directory.
+            let safe_path = match validate_log_path(path) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("Refusing to read log at '{}': {}", path, e.error);
+                    return Ok(Json(StopLogResponse { document_id: None }));
+                }
+            };
+            match tokio::fs::read_to_string(&safe_path).await {
+                Ok(content) if !content.is_empty() => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let now = crate::models::format_datetime(&chrono::Utc::now());
+                    let name = format!(
+                        "Session Log - {} - {}",
+                        req.session_name.as_deref().unwrap_or(&terminal_id),
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M")
+                    );
+
+                    let result = sqlx::query(
+                        r#"INSERT INTO documents (id, name, category, content_type, content, parent_folder, session_id, created_at, updated_at)
+                           VALUES (?, ?, 'outputs', 'text', ?, 'logs', ?, ?, ?)"#,
+                    )
+                    .bind(&id)
+                    .bind(&name)
+                    .bind(&content)
+                    .bind(req.session_id.as_deref())
+                    .bind(&now)
+                    .bind(&now)
+                    .execute(&state.pool)
+                    .await;
+
+                    match result {
+                        Ok(_) => {
+                            tracing::info!("Created log document '{}' (id: {})", name, id);
+                            return Ok(Json(StopLogResponse { document_id: Some(id) }));
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to create log document: {}", e);
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!("Log file is empty, skipping doc creation");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read log file '{}': {}", path, e);
+                }
+            }
+        }
+    }
+
+    Ok(Json(StopLogResponse { document_id: None }))
+}
+
+/// Append to log file
+#[derive(Debug, Deserialize)]
+pub struct AppendLogRequest {
+    pub path: String,
+    pub content: String,
+}
+
+/// Append content to an existing log file
+pub async fn append_to_log(
+    Json(req): Json<AppendLogRequest>,
+) -> Result<StatusCode, ApiError> {
+    use tokio::io::AsyncWriteExt;
+
+    let safe_path = validate_log_path(&req.path)?;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&safe_path)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to open log file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    file.write_all(req.content.as_bytes())
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to write to log file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Credential Profile Endpoints ===
+
+/// List all credential profiles
+pub async fn list_profiles(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<CredentialProfile>>, ApiError> {
+    let profiles = state.provider.list_profiles().await?;
+    Ok(Json(profiles))
+}
+
+/// Get a single credential profile
+pub async fn get_profile(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<CredentialProfile>, ApiError> {
+    let profile = state.provider.get_profile(&id).await?;
+    Ok(Json(profile))
+}
+
+/// Create a new credential profile
+pub async fn create_profile(
+    State(state): State<Arc<AppState>>,
+    Json(new_profile): Json<NewCredentialProfile>,
+) -> Result<(StatusCode, Json<CredentialProfile>), ApiError> {
+    let profile = state.provider.create_profile(new_profile).await?;
+    Ok((StatusCode::CREATED, Json(profile)))
+}
+
+/// Update an existing credential profile
+pub async fn update_profile(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateCredentialProfile>,
+) -> Result<Json<CredentialProfile>, ApiError> {
+    let profile = state.provider.update_profile(&id, update).await?;
+    Ok(Json(profile))
+}
+
+/// Delete a credential profile
+pub async fn delete_profile(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_profile(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Get credential metadata for a profile (non-secret summary)
+pub async fn get_profile_credential_meta(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let credential = state.provider.get_profile_credential(&profile_id).await?;
+    match credential {
+        Some(cred) => {
+            let snmp_count = cred.snmp_communities.as_ref().map_or(0, |c| c.len());
+            let has_password = cred.password.is_some();
+            let has_key_passphrase = cred.key_passphrase.is_some();
+            Ok(Json(serde_json::json!({
+                "has_password": has_password,
+                "has_key_passphrase": has_key_passphrase,
+                "snmp_community_count": snmp_count,
+            })))
+        }
+        None => Ok(Json(serde_json::json!({
+            "has_password": false,
+            "has_key_passphrase": false,
+            "snmp_community_count": 0,
+        }))),
+    }
+}
+
+/// Store credential for a profile
+pub async fn store_profile_credential(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+    Json(credential): Json<ProfileCredential>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .provider
+        .store_profile_credential(&profile_id, credential)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete credential for a profile
+pub async fn delete_profile_credential(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_profile_credential(&profile_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Jump Hosts Endpoints ===
+
+/// List all jump hosts
+pub async fn list_jump_hosts(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<JumpHost>>, ApiError> {
+    let jump_hosts = state.provider.list_jump_hosts().await?;
+    Ok(Json(jump_hosts))
+}
+
+/// Get a single jump host
+pub async fn get_jump_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<JumpHost>, ApiError> {
+    let jump_host = state.provider.get_jump_host(&id).await?;
+    Ok(Json(jump_host))
+}
+
+/// Create a new jump host
+pub async fn create_jump_host(
+    State(state): State<Arc<AppState>>,
+    Json(new_jump_host): Json<NewJumpHost>,
+) -> Result<(StatusCode, Json<JumpHost>), ApiError> {
+    let jump_host = state.provider.create_jump_host(new_jump_host).await?;
+    Ok((StatusCode::CREATED, Json(jump_host)))
+}
+
+/// Update a jump host
+pub async fn update_jump_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateJumpHost>,
+) -> Result<Json<JumpHost>, ApiError> {
+    let jump_host = state.provider.update_jump_host(&id, update).await?;
+    Ok(Json(jump_host))
+}
+
+/// Delete a jump host
+pub async fn delete_jump_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_jump_host(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Bulk Command Endpoints ===
+
+// === NetBox Sources Endpoints ===
+
+/// List all NetBox sources
+pub async fn list_netbox_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<NetBoxSource>>, ApiError> {
+    let sources = state.provider.list_netbox_sources().await?;
+    Ok(Json(sources))
+}
+
+/// Get a single NetBox source
+pub async fn get_netbox_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<NetBoxSource>, ApiError> {
+    let source = state.provider.get_netbox_source(&id).await?;
+    Ok(Json(source))
+}
+
+/// Create a new NetBox source
+pub async fn create_netbox_source(
+    State(state): State<Arc<AppState>>,
+    Json(new_source): Json<NewNetBoxSource>,
+) -> Result<(StatusCode, Json<NetBoxSource>), ApiError> {
+    let source = state.provider.create_netbox_source(new_source).await?;
+    Ok((StatusCode::CREATED, Json(source)))
+}
+
+/// Update an existing NetBox source
+pub async fn update_netbox_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateNetBoxSource>,
+) -> Result<Json<NetBoxSource>, ApiError> {
+    let source = state.provider.update_netbox_source(&id, update).await?;
+    Ok(Json(source))
+}
+
+/// Delete a NetBox source
+pub async fn delete_netbox_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_netbox_source(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for testing NetBox connection (with source ID)
+#[derive(Debug, Deserialize)]
+pub struct TestNetBoxRequest {
+    /// Optional URL to test (uses source URL if not provided)
+    pub url: Option<String>,
+    /// Optional API token to test (uses stored token if not provided)
+    pub api_token: Option<String>,
+}
+
+/// Request body for testing NetBox connection directly (no source required)
+#[derive(Debug, Deserialize)]
+pub struct TestNetBoxDirectRequest {
+    /// URL to test
+    pub url: String,
+    /// API token to test
+    pub token: String,
+}
+
+/// Response from testing NetBox connection
+#[derive(Debug, Serialize)]
+pub struct TestNetBoxResponse {
+    pub success: bool,
+    pub message: String,
+    pub version: Option<String>,
+}
+
+/// Test NetBox connection
+pub async fn test_netbox_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<TestNetBoxRequest>,
+) -> Result<Json<TestNetBoxResponse>, ApiError> {
+    // Get the source
+    let source = state.provider.get_netbox_source(&id).await?;
+
+    // Use provided URL/token or fall back to stored values
+    let url = req.url.unwrap_or(source.url);
+    let api_token = if let Some(token) = req.api_token {
+        token
+    } else {
+        state
+            .provider
+            .get_netbox_token(&id)
+            .await?
+            .ok_or_else(|| ApiError {
+                error: "No API token found for this source".to_string(),
+                code: "VALIDATION".to_string(),
+            })?
+    };
+
+    // Test the connection (accept self-signed/corporate certificates)
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let api_url = format!("{}/api/status/", url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", api_token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                // Try to parse the response to get the NetBox version
+                let version = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("netbox-version").and_then(|v| v.as_str()).map(String::from));
+
+                Ok(Json(TestNetBoxResponse {
+                    success: true,
+                    message: "Connection successful".to_string(),
+                    version,
+                }))
+            } else {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                Ok(Json(TestNetBoxResponse {
+                    success: false,
+                    message: format!("HTTP {}: {}", status, body),
+                    version: None,
+                }))
+            }
+        }
+        Err(e) => Ok(Json(TestNetBoxResponse {
+            success: false,
+            message: format!("Connection failed: {}", e),
+            version: None,
+        })),
+    }
+}
+
+/// Test NetBox connection directly (no source required)
+pub async fn test_netbox_direct(
+    Json(req): Json<TestNetBoxDirectRequest>,
+) -> Result<Json<TestNetBoxResponse>, ApiError> {
+    // Build client that accepts self-signed/corporate certificates
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let api_url = format!("{}/api/status/", req.url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                let version = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("netbox-version").and_then(|v| v.as_str()).map(String::from));
+
+                Ok(Json(TestNetBoxResponse {
+                    success: true,
+                    message: "Connection successful".to_string(),
+                    version,
+                }))
+            } else {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                Ok(Json(TestNetBoxResponse {
+                    success: false,
+                    message: format!("HTTP {}: {}", status, body),
+                    version: None,
+                }))
+            }
+        }
+        Err(e) => {
+            // Log detailed error for debugging
+            let mut error_details = format!("{}", e);
+            let err: &dyn StdError = &e;
+            if let Some(source) = err.source() {
+                error_details.push_str(&format!(" (caused by: {})", source));
+                if let Some(inner) = source.source() {
+                    error_details.push_str(&format!(" (inner: {})", inner));
+                }
+            }
+            Ok(Json(TestNetBoxResponse {
+                success: false,
+                message: format!("Connection failed: {}", error_details),
+                version: None,
+            }))
+        }
+    }
+}
+
+/// Request body for completing a NetBox sync
+#[derive(Debug, Deserialize)]
+pub struct SyncCompleteRequest {
+    pub filters: SyncFilters,
+    pub result: SyncResult,
+}
+
+/// Response from completing a NetBox sync
+#[derive(Debug, Serialize)]
+pub struct SyncCompleteResponse {
+    pub source: NetBoxSource,
+}
+
+/// Mark a NetBox sync as complete, updating sync metadata
+pub async fn sync_complete_netbox_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SyncCompleteRequest>,
+) -> Result<Json<SyncCompleteResponse>, ApiError> {
+    // Get the source first to verify it exists
+    let _source = state.provider.get_netbox_source(&id).await?;
+
+    // Update the source with sync metadata
+    let update = UpdateNetBoxSource {
+        last_sync_at: Some(Some(chrono::Utc::now())),
+        last_sync_filters: Some(Some(req.filters)),
+        last_sync_result: Some(Some(req.result)),
+        ..Default::default()
+    };
+
+    let updated_source = state.provider.update_netbox_source(&id, update).await?;
+    Ok(Json(SyncCompleteResponse { source: updated_source }))
+}
+
+/// Get API token for a NetBox source (used by frontend for imports)
+pub async fn get_netbox_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<GetNetBoxTokenResponse>, ApiError> {
+    // Verify source exists
+    let _source = state.provider.get_netbox_source(&id).await?;
+
+    // Get token from vault
+    let token = state.provider.get_netbox_token(&id).await?;
+
+    Ok(Json(GetNetBoxTokenResponse { token }))
+}
+
+/// Response from getting a NetBox token
+#[derive(Debug, Serialize)]
+pub struct GetNetBoxTokenResponse {
+    pub token: Option<String>,
+}
+
+// === NetBox Proxy Endpoints (for filter options with SSL bypass) ===
+
+/// Request body for NetBox proxy calls
+#[derive(Debug, Deserialize)]
+pub struct NetBoxProxyRequest {
+    pub url: String,
+    pub token: String,
+}
+
+/// NetBox site response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxSite {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+}
+
+/// NetBox role response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxRole {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+}
+
+/// NetBox manufacturer response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxManufacturer {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+}
+
+/// NetBox platform response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxPlatform {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+}
+
+/// NetBox tag response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxTag {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    pub color: String,
+}
+
+/// NetBox paginated response wrapper
+#[derive(Debug, Deserialize)]
+pub struct NetBoxPaginatedResponse<T> {
+    pub count: i64,
+    pub next: Option<String>,
+    pub results: Vec<T>,
+}
+
+/// Request body for NetBox device count
+#[derive(Debug, Deserialize)]
+pub struct NetBoxCountDevicesRequest {
+    pub url: String,
+    pub token: String,
+    pub name: Option<String>,
+    pub sites: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
+    pub manufacturers: Option<Vec<String>>,
+    pub platforms: Option<Vec<String>>,
+    pub statuses: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// Response for NetBox device count
+#[derive(Debug, Serialize)]
+pub struct NetBoxCountDevicesResponse {
+    pub count: i64,
+}
+
+/// Helper to build NetBox API URL with array params
+fn build_netbox_url(base_url: &str, path: &str, params: &[(&str, &[String])]) -> String {
+    let clean_base = base_url.trim_end_matches('/');
+    let mut url = format!("{}/api{}", clean_base, path);
+
+    let mut query_parts: Vec<String> = vec![];
+    for (key, values) in params {
+        for value in *values {
+            query_parts.push(format!("{}={}", key, urlencoding::encode(value)));
+        }
+    }
+
+    if !query_parts.is_empty() {
+        url.push('?');
+        url.push_str(&query_parts.join("&"));
+    }
+
+    url
+}
+
+/// Fetch sites from NetBox (proxied through backend for SSL bypass)
+pub async fn netbox_proxy_sites(
+    Json(req): Json<NetBoxProxyRequest>,
+) -> Result<Json<Vec<NetBoxSite>>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let api_url = format!("{}/api/dcim/sites/?limit=1000", req.url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<NetBoxPaginatedResponse<NetBoxSite>>().await {
+                    Ok(data) => Ok(Json(data.results)),
+                    Err(e) => Err(ApiError {
+                        error: format!("Failed to parse response: {}", e),
+                        code: "PARSE_ERROR".to_string(),
+                    }),
+                }
+            } else {
+                Err(ApiError {
+                    error: format!("NetBox API error: {}", response.status()),
+                    code: "NETBOX_ERROR".to_string(),
+                })
+            }
+        }
+        Err(e) => Err(ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        }),
+    }
+}
+
+/// Fetch device roles from NetBox
+pub async fn netbox_proxy_roles(
+    Json(req): Json<NetBoxProxyRequest>,
+) -> Result<Json<Vec<NetBoxRole>>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let api_url = format!("{}/api/dcim/device-roles/?limit=100", req.url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<NetBoxPaginatedResponse<NetBoxRole>>().await {
+                    Ok(data) => Ok(Json(data.results)),
+                    Err(e) => Err(ApiError {
+                        error: format!("Failed to parse response: {}", e),
+                        code: "PARSE_ERROR".to_string(),
+                    }),
+                }
+            } else {
+                Err(ApiError {
+                    error: format!("NetBox API error: {}", response.status()),
+                    code: "NETBOX_ERROR".to_string(),
+                })
+            }
+        }
+        Err(e) => Err(ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        }),
+    }
+}
+
+/// Fetch manufacturers from NetBox
+pub async fn netbox_proxy_manufacturers(
+    Json(req): Json<NetBoxProxyRequest>,
+) -> Result<Json<Vec<NetBoxManufacturer>>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let api_url = format!("{}/api/dcim/manufacturers/?limit=500", req.url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<NetBoxPaginatedResponse<NetBoxManufacturer>>().await {
+                    Ok(data) => Ok(Json(data.results)),
+                    Err(e) => Err(ApiError {
+                        error: format!("Failed to parse response: {}", e),
+                        code: "PARSE_ERROR".to_string(),
+                    }),
+                }
+            } else {
+                Err(ApiError {
+                    error: format!("NetBox API error: {}", response.status()),
+                    code: "NETBOX_ERROR".to_string(),
+                })
+            }
+        }
+        Err(e) => Err(ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        }),
+    }
+}
+
+/// Fetch platforms from NetBox
+pub async fn netbox_proxy_platforms(
+    Json(req): Json<NetBoxProxyRequest>,
+) -> Result<Json<Vec<NetBoxPlatform>>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let api_url = format!("{}/api/dcim/platforms/?limit=500", req.url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<NetBoxPaginatedResponse<NetBoxPlatform>>().await {
+                    Ok(data) => Ok(Json(data.results)),
+                    Err(e) => Err(ApiError {
+                        error: format!("Failed to parse response: {}", e),
+                        code: "PARSE_ERROR".to_string(),
+                    }),
+                }
+            } else {
+                Err(ApiError {
+                    error: format!("NetBox API error: {}", response.status()),
+                    code: "NETBOX_ERROR".to_string(),
+                })
+            }
+        }
+        Err(e) => Err(ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        }),
+    }
+}
+
+/// Fetch tags from NetBox
+pub async fn netbox_proxy_tags(
+    Json(req): Json<NetBoxProxyRequest>,
+) -> Result<Json<Vec<NetBoxTag>>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let api_url = format!("{}/api/extras/tags/?limit=500", req.url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<NetBoxPaginatedResponse<NetBoxTag>>().await {
+                    Ok(data) => Ok(Json(data.results)),
+                    Err(e) => Err(ApiError {
+                        error: format!("Failed to parse response: {}", e),
+                        code: "PARSE_ERROR".to_string(),
+                    }),
+                }
+            } else {
+                Err(ApiError {
+                    error: format!("NetBox API error: {}", response.status()),
+                    code: "NETBOX_ERROR".to_string(),
+                })
+            }
+        }
+        Err(e) => Err(ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        }),
+    }
+}
+
+/// Count devices from NetBox with filters
+pub async fn netbox_proxy_count_devices(
+    Json(req): Json<NetBoxCountDevicesRequest>,
+) -> Result<Json<NetBoxCountDevicesResponse>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Build URL with filter params
+    let mut params: Vec<(&str, &[String])> = vec![];
+
+    let name_vec = req.name.map(|n| vec![n]).unwrap_or_default();
+    let sites = req.sites.unwrap_or_default();
+    let roles = req.roles.unwrap_or_default();
+    let manufacturers = req.manufacturers.unwrap_or_default();
+    let platforms = req.platforms.unwrap_or_default();
+    let statuses = req.statuses.unwrap_or_default();
+    let tags = req.tags.unwrap_or_default();
+
+    if !name_vec.is_empty() { params.push(("name", &name_vec)); }
+    if !sites.is_empty() { params.push(("site", &sites)); }
+    if !roles.is_empty() { params.push(("role", &roles)); }
+    if !manufacturers.is_empty() { params.push(("manufacturer", &manufacturers)); }
+    if !platforms.is_empty() { params.push(("platform", &platforms)); }
+    if !statuses.is_empty() { params.push(("status", &statuses)); }
+    if !tags.is_empty() { params.push(("tag", &tags)); }
+
+    let limit_vec = vec!["1".to_string()];
+    params.push(("limit", &limit_vec));
+
+    let api_url = build_netbox_url(&req.url, "/dcim/devices/", &params);
+
+    match client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<NetBoxPaginatedResponse<serde_json::Value>>().await {
+                    Ok(data) => Ok(Json(NetBoxCountDevicesResponse { count: data.count })),
+                    Err(e) => Err(ApiError {
+                        error: format!("Failed to parse response: {}", e),
+                        code: "PARSE_ERROR".to_string(),
+                    }),
+                }
+            } else {
+                Err(ApiError {
+                    error: format!("NetBox API error: {}", response.status()),
+                    code: "NETBOX_ERROR".to_string(),
+                })
+            }
+        }
+        Err(e) => Err(ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        }),
+    }
+}
+
+/// Request body for NetBox device fetch
+#[derive(Debug, Deserialize)]
+pub struct NetBoxFetchDevicesRequest {
+    pub url: String,
+    pub token: String,
+    pub name: Option<String>,
+    pub sites: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
+    pub manufacturers: Option<Vec<String>>,
+    pub platforms: Option<Vec<String>>,
+    pub statuses: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// NetBox device interface
+#[derive(Debug, Serialize, Deserialize)]
+pub struct _NetBoxDeviceInterface {
+    pub id: i64,
+    pub name: String,
+}
+
+/// NetBox device primary IP
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxDevicePrimaryIp {
+    pub id: i64,
+    /// The IP address (e.g., "192.168.1.1/24") - may not be present in all NetBox versions
+    pub address: Option<String>,
+    /// Display string (e.g., "192.168.1.1/24") - fallback if address is not present
+    pub display: Option<String>,
+}
+
+/// NetBox device response (full device details)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetBoxDevice {
+    pub id: i64,
+    pub name: String,
+    pub display: Option<String>,
+    pub device_type: Option<serde_json::Value>,
+    pub role: Option<serde_json::Value>,
+    pub tenant: Option<serde_json::Value>,
+    pub platform: Option<serde_json::Value>,
+    pub serial: Option<String>,
+    pub asset_tag: Option<String>,
+    pub site: Option<serde_json::Value>,
+    pub location: Option<serde_json::Value>,
+    pub rack: Option<serde_json::Value>,
+    pub position: Option<f64>,
+    pub face: Option<serde_json::Value>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub status: Option<serde_json::Value>,
+    pub primary_ip: Option<NetBoxDevicePrimaryIp>,
+    pub primary_ip4: Option<NetBoxDevicePrimaryIp>,
+    pub primary_ip6: Option<NetBoxDevicePrimaryIp>,
+    pub oob_ip: Option<serde_json::Value>,
+    pub cluster: Option<serde_json::Value>,
+    pub virtual_chassis: Option<serde_json::Value>,
+    pub vc_position: Option<i32>,
+    pub vc_priority: Option<i32>,
+    pub description: Option<String>,
+    pub comments: Option<String>,
+    pub config_template: Option<serde_json::Value>,
+    pub local_context_data: Option<serde_json::Value>,
+    pub tags: Option<Vec<serde_json::Value>>,
+    pub custom_fields: Option<serde_json::Value>,
+    pub created: Option<String>,
+    pub last_updated: Option<String>,
+    pub console_port_count: Option<i32>,
+    pub console_server_port_count: Option<i32>,
+    pub power_port_count: Option<i32>,
+    pub power_outlet_count: Option<i32>,
+    pub interface_count: Option<i32>,
+    pub front_port_count: Option<i32>,
+    pub rear_port_count: Option<i32>,
+    pub device_bay_count: Option<i32>,
+    pub module_bay_count: Option<i32>,
+    pub inventory_item_count: Option<i32>,
+}
+
+/// Fetch devices from NetBox with filters (proxied for SSL bypass)
+/// Handles pagination to fetch ALL devices, not just the first page
+pub async fn netbox_proxy_devices(
+    Json(req): Json<NetBoxFetchDevicesRequest>,
+) -> Result<Json<Vec<NetBoxDevice>>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Build URL with filter params
+    let mut params: Vec<(&str, &[String])> = vec![];
+
+    let name_vec = req.name.map(|n| vec![n]).unwrap_or_default();
+    let sites = req.sites.unwrap_or_default();
+    let roles = req.roles.unwrap_or_default();
+    let manufacturers = req.manufacturers.unwrap_or_default();
+    let platforms = req.platforms.unwrap_or_default();
+    let statuses = req.statuses.unwrap_or_default();
+    let tags = req.tags.unwrap_or_default();
+
+    if !name_vec.is_empty() { params.push(("name", &name_vec)); }
+    if !sites.is_empty() { params.push(("site", &sites)); }
+    if !roles.is_empty() { params.push(("role", &roles)); }
+    if !manufacturers.is_empty() { params.push(("manufacturer", &manufacturers)); }
+    if !platforms.is_empty() { params.push(("platform", &platforms)); }
+    if !statuses.is_empty() { params.push(("status", &statuses)); }
+    if !tags.is_empty() { params.push(("tag", &tags)); }
+
+    let limit_vec = vec!["1000".to_string()];
+    params.push(("limit", &limit_vec));
+
+    let initial_url = build_netbox_url(&req.url, "/dcim/devices/", &params);
+    let token = req.token.clone();
+
+    // Collect all devices across all pages
+    let mut all_devices: Vec<NetBoxDevice> = vec![];
+    let mut next_url: Option<String> = Some(initial_url);
+    let mut page_count = 0;
+
+    while let Some(api_url) = next_url {
+        page_count += 1;
+        eprintln!("[DEBUG] Fetching NetBox devices page {} from: {}", page_count, api_url);
+
+        let response = client
+            .get(&api_url)
+            .header("Authorization", format!("Token {}", token))
+            .header("Accept", "application/json")
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| ApiError {
+                error: format!("Request failed: {}", e),
+                code: "REQUEST_ERROR".to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            return Err(ApiError {
+                error: format!("NetBox API error: {}", response.status()),
+                code: "NETBOX_ERROR".to_string(),
+            });
+        }
+
+        let raw_text = response.text().await.map_err(|e| ApiError {
+            error: format!("Failed to read response: {}", e),
+            code: "READ_ERROR".to_string(),
+        })?;
+
+        let data: NetBoxPaginatedResponse<NetBoxDevice> = serde_json::from_str(&raw_text)
+            .map_err(|e| ApiError {
+                error: format!("Failed to parse response: {}", e),
+                code: "PARSE_ERROR".to_string(),
+            })?;
+
+        eprintln!("[DEBUG] Page {} returned {} devices (total count: {})", page_count, data.results.len(), data.count);
+        all_devices.extend(data.results);
+
+        // Check for next page
+        next_url = data.next;
+    }
+
+    // Log summary
+    let with_ip = all_devices.iter().filter(|d| d.primary_ip.is_some()).count();
+    eprintln!("[DEBUG] Total devices fetched across {} pages: {} (with primary_ip: {})",
+              page_count, all_devices.len(), with_ip);
+
+    Ok(Json(all_devices))
+}
+
+/// Request body for NetBox IP address search
+#[derive(Debug, Deserialize)]
+pub struct NetBoxSearchIpRequest {
+    pub url: String,
+    pub token: String,
+    pub address: String,
+}
+
+/// Search NetBox IPAM for an IP address (proxied for SSL bypass)
+/// Returns the IP address record with assigned device/interface info
+pub async fn netbox_proxy_ip_addresses(
+    Json(req): Json<NetBoxSearchIpRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Strip CIDR mask if present, NetBox search by host address
+    let address = req.address.split('/').next().unwrap_or(&req.address);
+    let address_vec = vec![address.to_string()];
+    let params: Vec<(&str, &[String])> = vec![("address", &address_vec)];
+    let api_url = build_netbox_url(&req.url, "/ipam/ip-addresses/", &params);
+
+    eprintln!("[DEBUG] NetBox IP address search: {}", api_url);
+
+    let response = client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", req.token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Request failed: {}", e),
+            code: "REQUEST_ERROR".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("NetBox API error: {}", response.status()),
+            code: "NETBOX_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse response: {}", e),
+        code: "PARSE_ERROR".to_string(),
+    })?;
+
+    // Return the first result if any
+    if let Some(results) = data.get("results").and_then(|r| r.as_array()) {
+        if let Some(first) = results.first() {
+            return Ok(Json(first.clone()));
+        }
+    }
+
+    // Return null/empty if no results
+    Ok(Json(serde_json::Value::Null))
+}
+
+// === LibreNMS Sources Endpoints (Phase 22) ===
+
+/// List all LibreNMS sources
+pub async fn list_librenms_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<LibreNmsSource>>, ApiError> {
+    let sources = state.provider.list_librenms_sources().await?;
+    Ok(Json(sources))
+}
+
+/// Get a single LibreNMS source
+pub async fn get_librenms_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<LibreNmsSource>, ApiError> {
+    let source = state.provider.get_librenms_source(&id).await?;
+    Ok(Json(source))
+}
+
+/// Create a new LibreNMS source
+pub async fn create_librenms_source(
+    State(state): State<Arc<AppState>>,
+    Json(new_source): Json<NewLibreNmsSource>,
+) -> Result<(StatusCode, Json<LibreNmsSource>), ApiError> {
+    let source = state.provider.create_librenms_source(new_source).await?;
+    Ok((StatusCode::CREATED, Json(source)))
+}
+
+/// Delete a LibreNMS source
+pub async fn delete_librenms_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_librenms_source(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for testing LibreNMS connection directly
+#[derive(Debug, Deserialize)]
+pub struct TestLibreNmsDirectRequest {
+    pub url: String,
+    pub token: String,
+}
+
+/// Response from testing LibreNMS connection
+#[derive(Debug, Serialize)]
+pub struct TestLibreNmsResponse {
+    pub success: bool,
+    pub message: String,
+    pub version: Option<String>,
+}
+
+/// Test LibreNMS connection (using stored source)
+pub async fn test_librenms_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<TestLibreNmsResponse>, ApiError> {
+    let source = state.provider.get_librenms_source(&id).await?;
+    let token = state
+        .provider
+        .get_librenms_token(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "No API token found for this source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    test_librenms_api(&source.url, &token).await
+}
+
+/// Test LibreNMS connection directly (no source required)
+pub async fn test_librenms_direct(
+    Json(req): Json<TestLibreNmsDirectRequest>,
+) -> Result<Json<TestLibreNmsResponse>, ApiError> {
+    test_librenms_api(&req.url, &req.token).await
+}
+
+/// Helper function to test LibreNMS API connectivity
+async fn test_librenms_api(url: &str, token: &str) -> Result<Json<TestLibreNmsResponse>, ApiError> {
+    let client = reqwest::Client::new();
+    // LibreNMS API v0 uses /api/v0/system endpoint for basic info
+    let api_url = format!("{}/api/v0/system", url.trim_end_matches('/'));
+
+    match client
+        .get(&api_url)
+        .header("X-Auth-Token", token)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                let version = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| {
+                        v.get("system")
+                            .and_then(|s| s.get(0))
+                            .and_then(|s| s.get("local_ver"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    });
+
+                Ok(Json(TestLibreNmsResponse {
+                    success: true,
+                    message: "Connection successful".to_string(),
+                    version,
+                }))
+            } else {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                Ok(Json(TestLibreNmsResponse {
+                    success: false,
+                    message: format!("HTTP {}: {}", status, body),
+                    version: None,
+                }))
+            }
+        }
+        Err(e) => Ok(Json(TestLibreNmsResponse {
+            success: false,
+            message: format!("Connection failed: {}", e),
+            version: None,
+        })),
+    }
+}
+
+/// Response from LibreNMS devices endpoint
+#[derive(Debug, Serialize)]
+pub struct LibreNmsDevicesApiResponse {
+    pub devices: Vec<LibreNmsDevice>,
+}
+
+/// Response from LibreNMS links endpoint
+#[derive(Debug, Serialize)]
+pub struct LibreNmsLinksApiResponse {
+    pub links: Vec<LibreNmsLink>,
+}
+
+/// Get all devices from a LibreNMS source
+pub async fn get_librenms_devices(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<LibreNmsDevicesApiResponse>, ApiError> {
+    let source = state.provider.get_librenms_source(&id).await?;
+    let token = state
+        .provider
+        .get_librenms_token(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "No API token found for this source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v0/devices", source.url.trim_end_matches('/'));
+
+    let response = client
+        .get(&api_url)
+        .header("X-Auth-Token", &token)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to connect to LibreNMS: {}", e),
+            code: "CONNECTION".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError {
+            error: format!("LibreNMS API error ({}): {}", status, body),
+            code: "API_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse LibreNMS response: {}", e),
+        code: "PARSE_ERROR".to_string(),
+    })?;
+
+    // Parse devices from response
+    let devices: Vec<LibreNmsDevice> = data
+        .get("devices")
+        .and_then(|d| serde_json::from_value(d.clone()).ok())
+        .unwrap_or_default();
+
+    Ok(Json(LibreNmsDevicesApiResponse { devices }))
+}
+
+/// Get links/neighbors for a specific device
+pub async fn get_librenms_device_links(
+    State(state): State<Arc<AppState>>,
+    Path((id, hostname)): Path<(String, String)>,
+) -> Result<Json<LibreNmsLinksApiResponse>, ApiError> {
+    let source = state.provider.get_librenms_source(&id).await?;
+    let token = state
+        .provider
+        .get_librenms_token(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "No API token found for this source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!(
+        "{}/api/v0/devices/{}/links",
+        source.url.trim_end_matches('/'),
+        hostname
+    );
+
+    let response = client
+        .get(&api_url)
+        .header("X-Auth-Token", &token)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to connect to LibreNMS: {}", e),
+            code: "CONNECTION".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError {
+            error: format!("LibreNMS API error ({}): {}", status, body),
+            code: "API_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse LibreNMS response: {}", e),
+        code: "PARSE_ERROR".to_string(),
+    })?;
+
+    let links: Vec<LibreNmsLink> = data
+        .get("links")
+        .and_then(|l| serde_json::from_value(l.clone()).ok())
+        .unwrap_or_default();
+
+    Ok(Json(LibreNmsLinksApiResponse { links }))
+}
+
+/// Get all links from a LibreNMS source
+pub async fn get_librenms_all_links(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<LibreNmsLinksApiResponse>, ApiError> {
+    let source = state.provider.get_librenms_source(&id).await?;
+    let token = state
+        .provider
+        .get_librenms_token(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "No API token found for this source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v0/links", source.url.trim_end_matches('/'));
+
+    let response = client
+        .get(&api_url)
+        .header("X-Auth-Token", &token)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to connect to LibreNMS: {}", e),
+            code: "CONNECTION".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError {
+            error: format!("LibreNMS API error ({}): {}", status, body),
+            code: "API_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse LibreNMS response: {}", e),
+        code: "PARSE_ERROR".to_string(),
+    })?;
+
+    let links: Vec<LibreNmsLink> = data
+        .get("links")
+        .and_then(|l| serde_json::from_value(l.clone()).ok())
+        .unwrap_or_default();
+
+    Ok(Json(LibreNmsLinksApiResponse { links }))
+}
+
+// === API Key Vault Endpoints ===
+
+/// Request body for storing an API key
+#[derive(Deserialize)]
+pub struct StoreApiKeyRequest {
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for StoreApiKeyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreApiKeyRequest")
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Response from checking if API key exists
+#[derive(Debug, Serialize)]
+pub struct HasApiKeyResponse {
+    pub exists: bool,
+}
+
+/// Response from getting API key
+#[derive(Debug, Serialize)]
+pub struct GetApiKeyResponse {
+    pub api_key: Option<String>,
+}
+
+/// Check if an API key exists in vault
+pub async fn has_api_key(
+    State(state): State<Arc<AppState>>,
+    Path(key_type): Path<String>,
+) -> Result<Json<HasApiKeyResponse>, ApiError> {
+    let exists = state.provider.has_api_key(&key_type).await?;
+    Ok(Json(HasApiKeyResponse { exists }))
+}
+
+/// Get an API key from vault
+pub async fn get_api_key(
+    State(state): State<Arc<AppState>>,
+    Path(key_type): Path<String>,
+) -> Result<Json<GetApiKeyResponse>, ApiError> {
+    let api_key = state.provider.get_api_key(&key_type).await?;
+    Ok(Json(GetApiKeyResponse { api_key }))
+}
+
+/// Store an API key in vault
+pub async fn store_api_key(
+    State(state): State<Arc<AppState>>,
+    Path(key_type): Path<String>,
+    Json(req): Json<StoreApiKeyRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.store_api_key(&key_type, &req.api_key).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete an API key from vault
+pub async fn delete_api_key(
+    State(state): State<Arc<AppState>>,
+    Path(key_type): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_api_key(&key_type).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Recording Endpoints ===
+
+/// Optional query params for listing recordings
+#[derive(Debug, Deserialize)]
+pub struct ListRecordingsQuery {
+    /// Filter by session ID
+    pub session_id: Option<String>,
+}
+
+/// List all recordings
+pub async fn list_recordings(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<ListRecordingsQuery>,
+) -> Result<Json<Vec<Recording>>, ApiError> {
+    let recordings = state.provider.list_recordings(query.session_id.as_deref()).await?;
+    Ok(Json(recordings))
+}
+
+/// Get a single recording
+pub async fn get_recording(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Recording>, ApiError> {
+    let recording = state.provider.get_recording(&id).await?;
+    Ok(Json(recording))
+}
+
+/// Create a new recording
+pub async fn create_recording(
+    State(state): State<Arc<AppState>>,
+    Json(new_recording): Json<NewRecording>,
+) -> Result<(StatusCode, Json<Recording>), ApiError> {
+    let recording = state.provider.create_recording(new_recording).await?;
+    Ok((StatusCode::CREATED, Json(recording)))
+}
+
+/// Update a recording
+pub async fn update_recording(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateRecording>,
+) -> Result<Json<Recording>, ApiError> {
+    let recording = state.provider.update_recording(&id, update).await?;
+    Ok(Json(recording))
+}
+
+/// Delete a recording
+pub async fn delete_recording(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_recording(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Get recording data (stream the asciicast file)
+pub async fn get_recording_data(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let recording = state.provider.get_recording(&id).await?;
+
+    // Read the recording file
+    let content = tokio::fs::read_to_string(&recording.file_path)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to read recording file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/x-asciicast")],
+        content,
+    ))
+}
+
+/// Append data to a recording file
+#[derive(Debug, Deserialize)]
+pub struct AppendRecordingRequest {
+    pub data: String,
+}
+
+/// Append data to a recording
+pub async fn append_recording_data(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AppendRecordingRequest>,
+) -> Result<StatusCode, ApiError> {
+    let recording = state.provider.get_recording(&id).await?;
+
+    // Append to the recording file
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&recording.file_path)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to open recording file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    file.write_all(req.data.as_bytes())
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to write to recording file: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for saving a recording to docs
+#[derive(Debug, Deserialize)]
+pub struct SaveRecordingToDocsRequest {
+    pub session_id: Option<String>,
+}
+
+/// Response from saving a recording to docs
+#[derive(Debug, Serialize)]
+pub struct SaveRecordingToDocsResponse {
+    pub document_id: String,
+}
+
+/// Save a recording reference as a document in the docs system
+pub async fn save_recording_to_docs(
+    State(state): State<Arc<AppState>>,
+    Path(recording_id): Path<String>,
+    Json(req): Json<SaveRecordingToDocsRequest>,
+) -> Result<(StatusCode, Json<SaveRecordingToDocsResponse>), ApiError> {
+    // Get the recording metadata
+    let recording = state.provider.get_recording(&recording_id).await?;
+
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    let now = crate::models::format_datetime(&chrono::Utc::now());
+
+    // Create JSON content referencing the recording
+    let content = serde_json::json!({
+        "recording_id": recording.id,
+        "name": recording.name,
+        "duration_ms": recording.duration_ms,
+        "terminal_cols": recording.terminal_cols,
+        "terminal_rows": recording.terminal_rows,
+    })
+    .to_string();
+
+    sqlx::query(
+        r#"INSERT INTO documents (id, name, category, content_type, content, parent_folder, session_id, created_at, updated_at)
+           VALUES (?, ?, 'outputs', 'recording', ?, 'recordings', ?, ?, ?)"#,
+    )
+    .bind(&doc_id)
+    .bind(&recording.name)
+    .bind(&content)
+    .bind(req.session_id.as_deref().or(recording.session_id.as_deref()))
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Failed to create recording document: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    tracing::info!(
+        "Created recording document '{}' (doc_id: {}, recording_id: {})",
+        recording.name,
+        doc_id,
+        recording_id
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SaveRecordingToDocsResponse { document_id: doc_id }),
+    ))
+}
+
+// === Highlight Rules Endpoints ===
+
+/// Optional query params for listing highlight rules
+#[derive(Debug, Deserialize)]
+pub struct ListHighlightRulesQuery {
+    /// Filter by session ID (optional)
+    pub session_id: Option<String>,
+}
+
+/// List all highlight rules
+pub async fn list_highlight_rules(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<ListHighlightRulesQuery>,
+) -> Result<Json<Vec<HighlightRule>>, ApiError> {
+    let rules = state.provider.list_highlight_rules(query.session_id.as_deref()).await?;
+    Ok(Json(rules))
+}
+
+/// Get a single highlight rule
+pub async fn get_highlight_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<HighlightRule>, ApiError> {
+    let rule = state.provider.get_highlight_rule(&id).await?;
+    Ok(Json(rule))
+}
+
+/// Create a new highlight rule
+pub async fn create_highlight_rule(
+    State(state): State<Arc<AppState>>,
+    Json(new_rule): Json<NewHighlightRule>,
+) -> Result<(StatusCode, Json<HighlightRule>), ApiError> {
+    let rule = state.provider.create_highlight_rule(new_rule).await?;
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+/// Update a highlight rule
+pub async fn update_highlight_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateHighlightRule>,
+) -> Result<Json<HighlightRule>, ApiError> {
+    let rule = state.provider.update_highlight_rule(&id, update).await?;
+    Ok(Json(rule))
+}
+
+/// Delete a highlight rule
+pub async fn delete_highlight_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_highlight_rule(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Get effective highlight rules for a session (merged global + session-specific)
+pub async fn get_effective_highlight_rules(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<HighlightRule>>, ApiError> {
+    let rules = state.provider.get_effective_highlight_rules(&session_id).await?;
+    Ok(Json(rules))
+}
+
+// === Bulk Command Endpoints ===
+
+/// Execute a command on multiple SSH sessions
+pub async fn bulk_command(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkCommandRequest>,
+) -> Result<Json<BulkCommandResponse>, ApiError> {
+    // Validate request
+    if req.session_ids.is_empty() {
+        return Err(ApiError {
+            error: "session_ids must not be empty".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    if req.command.is_empty() {
+        return Err(ApiError {
+            error: "command must not be empty".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    // AUDIT FIX (EXEC-018): emit a warn-level audit log for every bulk
+    // command. The endpoint is not an AI tool surface today, but it has
+    // fleet-wide blast radius; an audit trail is the minimum viable defence.
+    tracing::warn!(
+        target: "audit",
+        session_count = req.session_ids.len(),
+        command_len = req.command.len(),
+        command_first_token = %req.command.split_whitespace().next().unwrap_or(""),
+        "bulk_command issued across {} session(s)",
+        req.session_ids.len()
+    );
+
+    let timeout_secs = req.timeout_secs.unwrap_or(30);
+    if timeout_secs < 1 || timeout_secs > 300 {
+        return Err(ApiError {
+            error: "timeout_secs must be between 1 and 300".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    // Build SSH configs for each session
+    let mut configs: Vec<(SshConfig, String, String)> = Vec::new();
+
+    for session_id in &req.session_ids {
+        // Get session from provider
+        let session = match state.provider.get_session(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to get session {}: {}", session_id, e);
+                continue;
+            }
+        };
+
+        // Get the profile for this session (required)
+        let profile = match state.provider.get_profile(&session.profile_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to get profile for session {} ({}): {}", session_id, session.name, e);
+                continue;
+            }
+        };
+
+        // Get credentials from vault (profile credentials)
+        let credential = state
+            .provider
+            .get_profile_credential(&session.profile_id)
+            .await
+            .ok()
+            .flatten();
+
+        // Build SSH config from session + profile + credential
+        let config = match build_ssh_config_from_session(&session, &profile, credential.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Skipping session {} ({}): {}", session_id, session.name, e);
+                continue;
+            }
+        };
+
+        configs.push((config, session_id.clone(), session.name.clone()));
+    }
+
+    if configs.is_empty() {
+        return Err(ApiError {
+            error: "No valid sessions found for bulk command execution".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    // Execute bulk command
+    let response = ssh::execute_bulk_command(configs, req.command, timeout_secs).await;
+
+    Ok(Json(response))
+}
+
+// === AI SSH Execute Endpoint ===
+
+/// Request for AI to execute a command on a single session
+#[derive(Debug, Deserialize)]
+pub struct AiSshExecuteRequest {
+    pub session_id: String,
+    pub command: String,
+    #[serde(default = "default_ai_timeout")]
+    pub timeout_secs: Option<u64>,
+}
+
+fn default_ai_timeout() -> Option<u64> {
+    Some(30)
+}
+
+/// Response from AI SSH execute
+#[derive(Debug, Serialize)]
+pub struct AiSshExecuteResponse {
+    pub success: bool,
+    pub output: String,
+    pub error: Option<String>,
+    pub execution_time_ms: u64,
+}
+
+/// Execute a command on a single SSH session for AI enrichment
+///
+/// This endpoint allows the AI to SSH directly to devices using their
+/// saved session credentials, without requiring an open terminal tab.
+///
+/// AUDIT FIX (EXEC-001): every command is checked against the read-only
+/// `CommandFilter` before reaching the device. The previous implementation
+/// dispatched the command unfiltered, which made this endpoint a one-call
+/// device-takeover for any prompt-injected AI response. The same filter is
+/// used by the agent ReAct loop's `SshCommandTool`.
+pub async fn ai_ssh_execute(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AiSshExecuteRequest>,
+) -> Result<Json<AiSshExecuteResponse>, ApiError> {
+    use crate::tasks::tools::filter::CommandFilter;
+
+    // Validate request
+    if req.command.is_empty() {
+        return Err(ApiError {
+            error: "command must not be empty".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    // Read-only command filter — apply BEFORE any device contact.
+    let filter = CommandFilter::new();
+    if let Err(e) = filter.is_allowed(&req.command) {
+        tracing::warn!(
+            session_id = %req.session_id,
+            command = %req.command,
+            "ai_ssh_execute: blocked by CommandFilter ({})",
+            e
+        );
+        return Err(ApiError {
+            error: format!("Command rejected by read-only filter: {}", e),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    let timeout_secs = req.timeout_secs.unwrap_or(30);
+    if timeout_secs < 1 || timeout_secs > 300 {
+        return Err(ApiError {
+            error: "timeout_secs must be between 1 and 300".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    // Get session from provider
+    let session = state
+        .provider
+        .get_session(&req.session_id)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Session not found: {}", e),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    // Get the profile for this session (required)
+    let profile = state
+        .provider
+        .get_profile(&session.profile_id)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Profile not found for session '{}': {}", session.name, e),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    // Get credentials from vault (profile credentials)
+    let credential = state
+        .provider
+        .get_profile_credential(&session.profile_id)
+        .await
+        .ok()
+        .flatten();
+
+    // Build SSH config from session + profile + credential
+    let config = build_ssh_config_from_session(&session, &profile, credential.as_ref())
+        .map_err(|e| ApiError {
+            error: e,
+            code: "AUTH_MISSING".to_string(),
+        })?;
+
+    // Execute command. AUDIT FIX (REMOTE-001): pass the approval service
+    // so unknown host keys surface a UI prompt instead of silent TOFU.
+    let result = ssh::execute_command_on_session_with_approvals(
+        config,
+        req.session_id.clone(),
+        session.name.clone(),
+        req.command,
+        std::time::Duration::from_secs(timeout_secs),
+        Some(state.host_key_approvals.clone()),
+    )
+    .await;
+
+    // Convert to response
+    let success = result.status == ssh::CommandStatus::Success;
+    let response = AiSshExecuteResponse {
+        success,
+        output: result.output,
+        error: result.error,
+        execution_time_ms: result.execution_time_ms,
+    };
+
+    Ok(Json(response))
+}
+
+// === AI File Operation Endpoints ===
+
+/// Request for AI write_file operation
+#[derive(Debug, Deserialize)]
+pub struct AiWriteFileRequest {
+    pub session_id: String,
+    pub filepath: String,
+    pub content: String,
+}
+
+/// Request for AI edit_file operation
+#[derive(Debug, Deserialize)]
+pub struct AiEditFileRequest {
+    pub session_id: String,
+    pub filepath: String,
+    pub old_text: String,
+    pub new_text: String,
+}
+
+/// Request for AI patch_file operation
+#[derive(Debug, Deserialize)]
+pub struct AiPatchFileRequest {
+    pub session_id: String,
+    pub filepath: String,
+    pub sed_expression: String,
+}
+
+/// Write a file on a remote server via SSH
+pub async fn ai_write_file(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AiWriteFileRequest>,
+) -> Result<Json<AiSshExecuteResponse>, ApiError> {
+    use crate::tasks::tools::write_helpers::{build_write_command, validate_filepath};
+
+    let filepath = validate_filepath(&req.filepath).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let write_cmd = build_write_command(&filepath, &req.content).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let config = build_ssh_config_for_ai(&state, &req.session_id).await?;
+    let session_name = get_session_name(&state, &req.session_id).await;
+
+    let result = ssh::execute_command_on_session(
+        config,
+        req.session_id,
+        session_name,
+        write_cmd,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    let success = result.status == ssh::CommandStatus::Success;
+    Ok(Json(AiSshExecuteResponse {
+        success,
+        output: if success {
+            format!("Successfully wrote {} bytes to {}", req.content.len(), filepath)
+        } else {
+            result.output
+        },
+        error: result.error,
+        execution_time_ms: result.execution_time_ms,
+    }))
+}
+
+/// Edit a file on a remote server via SSH (find and replace)
+pub async fn ai_edit_file(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AiEditFileRequest>,
+) -> Result<Json<AiSshExecuteResponse>, ApiError> {
+    use crate::tasks::tools::write_helpers::{
+        apply_edit, build_read_file_command, build_write_command, validate_filepath,
+        MAX_EDIT_FILE_SIZE,
+    };
+
+    let filepath = validate_filepath(&req.filepath).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let config = build_ssh_config_for_ai(&state, &req.session_id).await?;
+    let session_name = get_session_name(&state, &req.session_id).await;
+
+    // Read the file
+    let read_cmd = build_read_file_command(&filepath).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let read_result = ssh::execute_command_on_session(
+        config.clone(),
+        req.session_id.clone(),
+        session_name.clone(),
+        read_cmd,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    if read_result.status != ssh::CommandStatus::Success {
+        return Ok(Json(AiSshExecuteResponse {
+            success: false,
+            output: read_result.output,
+            error: read_result.error,
+            execution_time_ms: read_result.execution_time_ms,
+        }));
+    }
+
+    if read_result.output.len() > MAX_EDIT_FILE_SIZE {
+        return Err(ApiError {
+            error: format!(
+                "File is too large ({} bytes, max {} bytes)",
+                read_result.output.len(),
+                MAX_EDIT_FILE_SIZE
+            ),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    // Apply edit
+    let new_content = apply_edit(&read_result.output, &req.old_text, &req.new_text)
+        .map_err(|e| ApiError {
+            error: e,
+            code: "VALIDATION".to_string(),
+        })?;
+
+    // Write back
+    let write_cmd = build_write_command(&filepath, &new_content).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let result = ssh::execute_command_on_session(
+        config,
+        req.session_id,
+        session_name,
+        write_cmd,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    let success = result.status == ssh::CommandStatus::Success;
+    Ok(Json(AiSshExecuteResponse {
+        success,
+        output: if success {
+            format!("Successfully edited {}", filepath)
+        } else {
+            result.output
+        },
+        error: result.error,
+        execution_time_ms: result.execution_time_ms,
+    }))
+}
+
+/// Patch a file on a remote server via sed
+pub async fn ai_patch_file(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AiPatchFileRequest>,
+) -> Result<Json<AiSshExecuteResponse>, ApiError> {
+    use crate::tasks::tools::write_helpers::{build_sed_command, validate_filepath};
+
+    let filepath = validate_filepath(&req.filepath).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let sed_cmd = build_sed_command(&filepath, &req.sed_expression).map_err(|e| ApiError {
+        error: e,
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let config = build_ssh_config_for_ai(&state, &req.session_id).await?;
+    let session_name = get_session_name(&state, &req.session_id).await;
+
+    let result = ssh::execute_command_on_session(
+        config,
+        req.session_id,
+        session_name,
+        sed_cmd,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    let success = result.status == ssh::CommandStatus::Success;
+    Ok(Json(AiSshExecuteResponse {
+        success,
+        output: if success {
+            format!("Successfully patched {}", filepath)
+        } else {
+            result.output
+        },
+        error: result.error,
+        execution_time_ms: result.execution_time_ms,
+    }))
+}
+
+/// Build SSH config for AI file operations (reuses ai_ssh_execute pattern)
+async fn build_ssh_config_for_ai(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<ssh::SshConfig, ApiError> {
+    let session = state
+        .provider
+        .get_session(session_id)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Session not found: {}", e),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    let profile = state
+        .provider
+        .get_profile(&session.profile_id)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Profile not found: {}", e),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    let credential = state
+        .provider
+        .get_profile_credential(&session.profile_id)
+        .await
+        .ok()
+        .flatten();
+
+    build_ssh_config_from_session(&session, &profile, credential.as_ref()).map_err(|e| ApiError {
+        error: e,
+        code: "AUTH_MISSING".to_string(),
+    })
+}
+
+/// Get session name for logging
+async fn get_session_name(state: &Arc<AppState>, session_id: &str) -> String {
+    state
+        .provider
+        .get_session(session_id)
+        .await
+        .map(|s| s.name)
+        .unwrap_or_else(|_| session_id.to_string())
+}
+
+// === SFTP Endpoints ===
+
+/// Shared SFTP state
+pub struct SftpState {
+    pub manager: SftpManager,
+    pub app_state: Arc<AppState>,
+}
+
+/// SFTP error response
+impl From<SftpError> for ApiError {
+    fn from(err: SftpError) -> Self {
+        let (code, error) = match &err {
+            SftpError::ConnectionFailed(msg) => ("CONNECTION_FAILED".to_string(), msg.clone()),
+            SftpError::AuthFailed(msg) => ("AUTH_FAILED".to_string(), msg.clone()),
+            SftpError::KeyError(msg) => ("KEY_ERROR".to_string(), msg.clone()),
+            SftpError::ChannelError(msg) => ("CHANNEL_ERROR".to_string(), msg.clone()),
+            SftpError::SftpError(msg) => ("SFTP_ERROR".to_string(), msg.clone()),
+            SftpError::_NotFound(msg) => ("NOT_FOUND".to_string(), msg.clone()),
+            SftpError::_PermissionDenied(msg) => ("PERMISSION_DENIED".to_string(), msg.clone()),
+            SftpError::SessionNotFound => ("SESSION_NOT_FOUND".to_string(), "SFTP session not found".to_string()),
+            SftpError::_SessionClosed => ("SESSION_CLOSED".to_string(), "SFTP session closed".to_string()),
+        };
+
+        ApiError { error, code }
+    }
+}
+
+/// Request to connect SFTP to a session
+#[derive(Debug, Deserialize)]
+pub struct SftpConnectRequest {
+    /// Optional session ID - if provided, uses vault credentials
+    pub session_id: Option<String>,
+}
+
+/// Response from SFTP connect
+#[derive(Debug, Serialize)]
+pub struct SftpConnectResponse {
+    pub connected: bool,
+    pub home_dir: Option<String>,
+}
+
+/// Connect to SFTP for a session
+pub async fn sftp_connect(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    Json(req): Json<SftpConnectRequest>,
+) -> Result<Json<SftpConnectResponse>, ApiError> {
+    // Get session info if session_id provided
+    let session_id = req.session_id.as_ref().unwrap_or(&sftp_id);
+
+    let session = state.app_state.provider.get_session(session_id).await?;
+
+    // Get the profile for this session (required)
+    let profile = state
+        .app_state
+        .provider
+        .get_profile(&session.profile_id)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Profile not found for session: {}", e),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    // Get credentials from vault (profile credentials)
+    let credential = state
+        .app_state
+        .provider
+        .get_profile_credential(&session.profile_id)
+        .await
+        .ok()
+        .flatten();
+
+    // Build SFTP auth from profile
+    let auth = match profile.auth_type {
+        AuthType::Password => {
+            let password = credential
+                .as_ref()
+                .and_then(|c| c.password.clone())
+                .ok_or_else(|| ApiError {
+                    error: format!("No password found for session via profile '{}'", profile.name),
+                    code: "AUTH_FAILED".to_string(),
+                })?;
+            SftpAuth::Password(password)
+        }
+        AuthType::Key => {
+            let key_path = profile.key_path.clone().ok_or_else(|| ApiError {
+                error: format!("No key path found for session via profile '{}'", profile.name),
+                code: "AUTH_FAILED".to_string(),
+            })?;
+            let passphrase = credential.as_ref().and_then(|c| c.key_passphrase.clone());
+            SftpAuth::KeyFile {
+                path: key_path,
+                passphrase,
+            }
+        }
+    };
+
+    let config = SftpConfig {
+        host: session.host.clone(),
+        port: session.port,
+        username: profile.username.clone(),
+        auth,
+    };
+
+    // Connect
+    state.manager.create_session(sftp_id.clone(), config).await?;
+
+    // Get home directory
+    let home_dir = if let Some(sftp_session) = state.manager.get_session(&sftp_id).await {
+        let session = sftp_session.lock().await;
+        session.pwd().await.ok()
+    } else {
+        None
+    };
+
+    Ok(Json(SftpConnectResponse {
+        connected: true,
+        home_dir,
+    }))
+}
+
+/// Disconnect SFTP session
+pub async fn sftp_disconnect(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.manager.remove_session(&sftp_id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query params for listing directory
+#[derive(Debug, Deserialize)]
+pub struct SftpLsQuery {
+    pub path: Option<String>,
+}
+
+/// Response from directory listing
+#[derive(Debug, Serialize)]
+pub struct SftpLsResponse {
+    pub entries: Vec<FileEntry>,
+    pub path: String,
+}
+
+/// List directory contents
+pub async fn sftp_ls(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpLsQuery>,
+) -> Result<Json<SftpLsResponse>, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let path = query.path.unwrap_or_else(|| "/".to_string());
+    let session = sftp_session.lock().await;
+    let entries = session.list_dir(&path).await?;
+
+    Ok(Json(SftpLsResponse { entries, path }))
+}
+
+/// Query params for download
+#[derive(Debug, Deserialize)]
+pub struct SftpDownloadQuery {
+    pub path: String,
+}
+
+/// Download a file
+pub async fn sftp_download(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpDownloadQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let session = sftp_session.lock().await;
+    let data = session.download(&query.path).await?;
+
+    // Get filename for Content-Disposition
+    let filename = std::path::Path::new(&query.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+    );
+
+    Ok((headers, data))
+}
+
+/// Request for upload
+#[derive(Debug, Deserialize)]
+pub struct SftpUploadQuery {
+    pub path: String,
+}
+
+/// Upload a file
+pub async fn sftp_upload(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpUploadQuery>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let session = sftp_session.lock().await;
+    session.upload(&query.path, &body).await?;
+
+    Ok(StatusCode::CREATED)
+}
+
+/// Query params for mkdir
+#[derive(Debug, Deserialize)]
+pub struct SftpMkdirQuery {
+    pub path: String,
+}
+
+/// Create a directory
+pub async fn sftp_mkdir(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpMkdirQuery>,
+) -> Result<StatusCode, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let session = sftp_session.lock().await;
+    session.mkdir(&query.path).await?;
+
+    Ok(StatusCode::CREATED)
+}
+
+/// Query params for rm
+#[derive(Debug, Deserialize)]
+pub struct SftpRmQuery {
+    pub path: String,
+    /// If true, remove directory (rmdir), else remove file (rm)
+    #[serde(default)]
+    pub is_dir: bool,
+}
+
+/// Remove a file or directory
+pub async fn sftp_rm(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpRmQuery>,
+) -> Result<StatusCode, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let session = sftp_session.lock().await;
+    if query.is_dir {
+        session.rmdir(&query.path).await?;
+    } else {
+        session.rm(&query.path).await?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query params for rename
+#[derive(Debug, Deserialize)]
+pub struct SftpRenameQuery {
+    pub from: String,
+    pub to: String,
+}
+
+/// Rename a file or directory
+pub async fn sftp_rename(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpRenameQuery>,
+) -> Result<StatusCode, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let session = sftp_session.lock().await;
+    session.rename(&query.from, &query.to).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query params for stat
+#[derive(Debug, Deserialize)]
+pub struct SftpStatQuery {
+    pub path: String,
+}
+
+/// Get file/directory info
+pub async fn sftp_stat(
+    State(state): State<Arc<SftpState>>,
+    Path(sftp_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SftpStatQuery>,
+) -> Result<Json<FileEntry>, ApiError> {
+    let sftp_session = state
+        .manager
+        .get_session(&sftp_id)
+        .await
+        .ok_or(SftpError::SessionNotFound)?;
+
+    let session = sftp_session.lock().await;
+    let entry = session.stat(&query.path).await?;
+
+    Ok(Json(entry))
+}
+
+// === Change Control Endpoints ===
+
+/// Query params for listing changes
+#[derive(Debug, Deserialize)]
+pub struct ListChangesQuery {
+    pub session_id: Option<String>,
+}
+
+/// List changes (optionally filtered by session)
+pub async fn list_changes(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<ListChangesQuery>,
+) -> Result<Json<Vec<Change>>, ApiError> {
+    let changes = state
+        .provider
+        .list_changes(query.session_id.as_deref())
+        .await?;
+    Ok(Json(changes))
+}
+
+/// Get a single change
+pub async fn get_change(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Change>, ApiError> {
+    let change = state.provider.get_change(&id).await?;
+    Ok(Json(change))
+}
+
+/// Create a new change
+pub async fn create_change(
+    State(state): State<Arc<AppState>>,
+    Json(new_change): Json<NewChange>,
+) -> Result<(StatusCode, Json<Change>), ApiError> {
+    let change = state.provider.create_change(new_change).await?;
+    Ok((StatusCode::CREATED, Json(change)))
+}
+
+/// Update an existing change
+pub async fn update_change(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateChange>,
+) -> Result<Json<Change>, ApiError> {
+    let change = state.provider.update_change(&id, update).await?;
+    Ok(Json(change))
+}
+
+/// Delete a change
+pub async fn delete_change(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_change(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === MOP Package Export/Import ===
+
+/// Resolve a "name (host)" key to a session ID using cascade matching
+fn resolve_session_from_key(key: &str, sessions: &[Session]) -> Option<String> {
+    // Parse "name (host)" format
+    let (name, host) = if let Some(paren_start) = key.rfind('(') {
+        let name_part = key[..paren_start].trim();
+        let host_part = key[paren_start + 1..].trim_end_matches(')').trim();
+        (name_part, host_part)
+    } else {
+        // No parens - treat as name only
+        (key.trim(), "")
+    };
+
+    // Try exact match on both name and host
+    if !host.is_empty() {
+        if let Some(s) = sessions.iter().find(|s| s.name == name && s.host == host) {
+            return Some(s.id.clone());
+        }
+    }
+
+    // Try host-only match
+    if !host.is_empty() {
+        if let Some(s) = sessions.iter().find(|s| s.host == host) {
+            return Some(s.id.clone());
+        }
+    }
+
+    // Try name-only match
+    if let Some(s) = sessions.iter().find(|s| s.name == name) {
+        return Some(s.id.clone());
+    }
+
+    None
+}
+
+/// Export a MOP (Change) as a portable .mop.json package
+pub async fn export_mop_package(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopPackage>, ApiError> {
+    let change = state.provider.get_change(&id).await?;
+    let sessions = state.provider.list_sessions().await?;
+
+    // Build session_id → "name (host)" map
+    let session_map: std::collections::HashMap<String, String> = sessions
+        .iter()
+        .map(|s| (s.id.clone(), format!("{} ({})", s.name, s.host)))
+        .collect();
+
+    // Convert MopStep → MopPackageStep (strip instance data)
+    let steps: Vec<MopPackageStep> = change
+        .mop_steps
+        .iter()
+        .map(|s| MopPackageStep {
+            order: s.order,
+            step_type: s.step_type.clone(),
+            command: s.command.clone(),
+            description: s.description.clone(),
+            expected_output: s.expected_output.clone(),
+            execution_source: s.execution_source.clone(),
+            quick_action_id: s.quick_action_id.clone(),
+            quick_action_variables: s.quick_action_variables.clone(),
+            script_id: s.script_id.clone(),
+            script_args: s.script_args.clone(),
+            paired_step_id: s.paired_step_id.clone(),
+            output_format: s.output_format.clone(),
+        })
+        .collect();
+
+    // Resolve device_overrides keys from session IDs to "name (host)"
+    let device_overrides = change.device_overrides.map(|overrides| {
+        overrides
+            .into_iter()
+            .map(|(session_id, steps)| {
+                let key = session_map
+                    .get(&session_id)
+                    .cloned()
+                    .unwrap_or_else(|| session_id);
+                let pkg_steps: Vec<MopPackageStep> = steps
+                    .iter()
+                    .map(|s| MopPackageStep {
+                        order: s.order,
+                        step_type: s.step_type.clone(),
+                        command: s.command.clone(),
+                        description: s.description.clone(),
+                        expected_output: s.expected_output.clone(),
+                        execution_source: s.execution_source.clone(),
+                        quick_action_id: s.quick_action_id.clone(),
+                        quick_action_variables: s.quick_action_variables.clone(),
+                        script_id: s.script_id.clone(),
+                        script_args: s.script_args.clone(),
+                        paired_step_id: s.paired_step_id.clone(),
+                        output_format: s.output_format.clone(),
+                    })
+                    .collect();
+                (key, pkg_steps)
+            })
+            .collect()
+    });
+
+    // Fetch embedded document if linked
+    let document = if let Some(ref doc_id) = change.document_id {
+        let row = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT name, content_type, content FROM documents WHERE id = ?",
+        )
+        .bind(doc_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to fetch document: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+        row.map(|(name, content_type, content)| MopPackageDocument {
+            name,
+            content_type,
+            content,
+        })
+    } else {
+        None
+    };
+
+    let package = MopPackage {
+        format: "netstacks-mop".to_string(),
+        version: "1.0".to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        source: "NetStacks Terminal v0.0.2".to_string(),
+        mop: MopPackageProcedure {
+            name: change.name.clone(),
+            description: change.description.clone(),
+            author: change.created_by.clone(),
+            steps,
+            device_overrides,
+            document,
+        },
+        metadata: MopPackageMetadata::default(),
+    };
+
+    // Save to Documents under "mops" category
+    let pkg_json = serde_json::to_string_pretty(&package).map_err(|e| ApiError {
+        error: format!("Failed to serialize package: {}", e),
+        code: "SERIALIZATION_ERROR".to_string(),
+    })?;
+
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    let now = crate::models::format_datetime(&chrono::Utc::now());
+    let doc_name = format!("{}.mop.json", change.name);
+
+    sqlx::query(
+        r#"INSERT INTO documents (id, name, category, content_type, content, parent_folder, session_id, created_at, updated_at)
+           VALUES (?, ?, 'mops', 'json', ?, NULL, NULL, ?, ?)"#,
+    )
+    .bind(&doc_id)
+    .bind(&doc_name)
+    .bind(&pkg_json)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Failed to save MOP document: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    Ok(Json(package))
+}
+
+/// Import a MOP package and create a new Change
+pub async fn import_mop_package(
+    State(state): State<Arc<AppState>>,
+    Json(pkg): Json<MopPackage>,
+) -> Result<(StatusCode, Json<MopImportResult>), ApiError> {
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Validate format
+    if pkg.format != "netstacks-mop" {
+        return Err(ApiError {
+            error: format!("Unknown format: '{}', expected 'netstacks-mop'", pkg.format),
+            code: "INVALID_FORMAT".to_string(),
+        });
+    }
+
+    // Validate version (accept 1.x)
+    if !pkg.version.starts_with("1.") && pkg.version != "1" {
+        return Err(ApiError {
+            error: format!("Unsupported version: '{}', expected 1.x", pkg.version),
+            code: "UNSUPPORTED_VERSION".to_string(),
+        });
+    }
+
+    // Validate steps
+    let valid_step_types = ["pre_check", "change", "post_check", "rollback", "api_action"];
+    for step in &pkg.mop.steps {
+        if step.command.trim().is_empty() {
+            return Err(ApiError {
+                error: format!("Step {} has an empty command", step.order),
+                code: "INVALID_STEP".to_string(),
+            });
+        }
+        if !valid_step_types.contains(&step.step_type.as_str()) {
+            warnings.push(format!(
+                "Step {} has unknown type '{}', importing anyway",
+                step.order, step.step_type
+            ));
+        }
+    }
+
+    // Convert MopPackageStep → MopStep (assign new UUIDs, set status=pending)
+    let mop_steps: Vec<MopStep> = pkg
+        .mop
+        .steps
+        .iter()
+        .map(|s| MopStep {
+            id: uuid::Uuid::new_v4().to_string(),
+            order: s.order,
+            step_type: s.step_type.clone(),
+            command: s.command.clone(),
+            description: s.description.clone(),
+            expected_output: s.expected_output.clone(),
+            status: "pending".to_string(),
+            output: None,
+            executed_at: None,
+            execution_source: s.execution_source.clone(),
+            quick_action_id: s.quick_action_id.clone(),
+            quick_action_variables: s.quick_action_variables.clone(),
+            script_id: s.script_id.clone(),
+            script_args: s.script_args.clone(),
+            paired_step_id: s.paired_step_id.clone(),
+            output_format: s.output_format.clone(),
+            ai_feedback: None,
+        })
+        .collect();
+    let steps_imported = mop_steps.len();
+
+    // Resolve device override keys from "name (host)" → session IDs
+    let sessions = state.provider.list_sessions().await?;
+    let mut overrides_imported = 0usize;
+    let device_overrides = pkg.mop.device_overrides.map(|overrides| {
+        let mut resolved: std::collections::HashMap<String, Vec<MopStep>> =
+            std::collections::HashMap::new();
+        for (key, pkg_steps) in overrides {
+            if let Some(session_id) = resolve_session_from_key(&key, &sessions) {
+                let steps: Vec<MopStep> = pkg_steps
+                    .iter()
+                    .map(|s| MopStep {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        order: s.order,
+                        step_type: s.step_type.clone(),
+                        command: s.command.clone(),
+                        description: s.description.clone(),
+                        expected_output: s.expected_output.clone(),
+                        status: "pending".to_string(),
+                        output: None,
+                        executed_at: None,
+                        execution_source: s.execution_source.clone(),
+                        quick_action_id: s.quick_action_id.clone(),
+                        quick_action_variables: s.quick_action_variables.clone(),
+                        script_id: s.script_id.clone(),
+                        script_args: s.script_args.clone(),
+                        paired_step_id: s.paired_step_id.clone(),
+                        output_format: s.output_format.clone(),
+                        ai_feedback: None,
+                    })
+                    .collect();
+                overrides_imported += 1;
+                resolved.insert(session_id, steps);
+            } else {
+                warnings.push(format!(
+                    "No matching session for device '{}', overrides skipped",
+                    key
+                ));
+            }
+        }
+        resolved
+    });
+
+    // Create embedded document if present
+    let mut document_created = false;
+    let document_id = if let Some(doc) = &pkg.mop.document {
+        let doc_id = uuid::Uuid::new_v4().to_string();
+        let now = crate::models::format_datetime(&chrono::Utc::now());
+
+        sqlx::query(
+            r#"INSERT INTO documents (id, name, category, content_type, content, parent_folder, session_id, created_at, updated_at)
+               VALUES (?, ?, 'mops', ?, ?, NULL, NULL, ?, ?)"#,
+        )
+        .bind(&doc_id)
+        .bind(&doc.name)
+        .bind(&doc.content_type)
+        .bind(&doc.content)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to create document: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+        document_created = true;
+        Some(doc_id)
+    } else {
+        None
+    };
+
+    // Insert Change directly (bypass provider.create_change which requires valid session_id)
+    let change_id = uuid::Uuid::new_v4().to_string();
+    let now = crate::models::format_datetime(&chrono::Utc::now());
+    let mop_steps_json = serde_json::to_string(&mop_steps).map_err(|e| ApiError {
+        error: format!("Failed to serialize mop_steps: {}", e),
+        code: "SERIALIZATION_ERROR".to_string(),
+    })?;
+    let device_overrides_json = device_overrides
+        .as_ref()
+        .map(|o| serde_json::to_string(o))
+        .transpose()
+        .map_err(|e| ApiError {
+            error: format!("Failed to serialize device_overrides: {}", e),
+            code: "SERIALIZATION_ERROR".to_string(),
+        })?;
+
+    sqlx::query(
+        r#"INSERT INTO changes (
+            id, session_id, name, description, status, mop_steps,
+            device_overrides, document_id, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind(&change_id)
+    .bind(None::<String>)  // session-unbound for imported MOPs
+    .bind(&pkg.mop.name)
+    .bind(&pkg.mop.description)
+    .bind(&mop_steps_json)
+    .bind(&device_overrides_json)
+    .bind(&document_id)
+    .bind(&pkg.mop.author)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Failed to create change: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(MopImportResult {
+            change_id,
+            name: pkg.mop.name,
+            steps_imported,
+            overrides_imported,
+            document_created,
+            warnings,
+        }),
+    ))
+}
+
+/// List snapshots for a change
+pub async fn list_snapshots(
+    State(state): State<Arc<AppState>>,
+    Path(change_id): Path<String>,
+) -> Result<Json<Vec<Snapshot>>, ApiError> {
+    let snapshots = state.provider.list_snapshots(&change_id).await?;
+    Ok(Json(snapshots))
+}
+
+/// Get a single snapshot
+pub async fn get_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Snapshot>, ApiError> {
+    let snapshot = state.provider.get_snapshot(&id).await?;
+    Ok(Json(snapshot))
+}
+
+/// Create a new snapshot
+pub async fn create_snapshot(
+    State(state): State<Arc<AppState>>,
+    Json(new_snapshot): Json<NewSnapshot>,
+) -> Result<(StatusCode, Json<Snapshot>), ApiError> {
+    let snapshot = state.provider.create_snapshot(new_snapshot).await?;
+    Ok((StatusCode::CREATED, Json(snapshot)))
+}
+
+/// Delete a snapshot
+pub async fn delete_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_snapshot(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Session Context Endpoints (Phase 14) ===
+
+/// List context entries for a session
+pub async fn list_session_context(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<SessionContext>>, ApiError> {
+    let contexts = state.provider.list_session_context(&session_id).await?;
+    Ok(Json(contexts))
+}
+
+/// Get a single session context entry
+pub async fn get_session_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionContext>, ApiError> {
+    let context = state.provider.get_session_context(&id).await?;
+    Ok(Json(context))
+}
+
+/// Create a new session context entry
+pub async fn create_session_context(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(mut new_context): Json<NewSessionContext>,
+) -> Result<(StatusCode, Json<SessionContext>), ApiError> {
+    // Ensure session_id in path is used
+    new_context.session_id = session_id;
+    let context = state.provider.create_session_context(new_context).await?;
+    Ok((StatusCode::CREATED, Json(context)))
+}
+
+/// Update a session context entry
+pub async fn update_session_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateSessionContext>,
+) -> Result<Json<SessionContext>, ApiError> {
+    let context = state.provider.update_session_context(&id, update).await?;
+    Ok(Json(context))
+}
+
+/// Delete a session context entry
+pub async fn delete_session_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_session_context(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ============================================
+// Network Lookup Endpoints (Phase 19)
+// ============================================
+
+/// OUI Lookup Response
+#[derive(Debug, Serialize)]
+pub struct OuiLookupResponse {
+    pub mac: String,
+    pub vendor: Option<String>,
+    pub error: Option<String>,
+}
+
+/// OUI lookup - get vendor from MAC address
+pub async fn lookup_oui(Path(mac): Path<String>) -> Json<OuiLookupResponse> {
+    // Normalize MAC - extract first 6 hex chars (OUI portion)
+    let normalized: String = mac
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(6)
+        .collect::<String>()
+        .to_uppercase();
+
+    if normalized.len() < 6 {
+        return Json(OuiLookupResponse {
+            mac: mac.clone(),
+            vendor: None,
+            error: Some("Invalid MAC address format".to_string()),
+        });
+    }
+
+    // Format as XX:XX:XX for API
+    let oui = format!(
+        "{}:{}:{}",
+        &normalized[0..2],
+        &normalized[2..4],
+        &normalized[4..6]
+    );
+
+    // Call macvendors.io API (free, no key required)
+    let client = reqwest::Client::new();
+    let url = format!("https://api.macvendors.com/{}", mac);
+
+    match client
+        .get(&url)
+        .header("User-Agent", "NetStacks/1.0")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.text().await {
+                    Ok(vendor) => Json(OuiLookupResponse {
+                        mac: mac.clone(),
+                        vendor: Some(vendor.trim().to_string()),
+                        error: None,
+                    }),
+                    Err(e) => Json(OuiLookupResponse {
+                        mac: mac.clone(),
+                        vendor: None,
+                        error: Some(format!("Failed to read response: {}", e)),
+                    }),
+                }
+            } else if response.status().as_u16() == 404 {
+                Json(OuiLookupResponse {
+                    mac: mac.clone(),
+                    vendor: Some(format!("Unknown vendor (OUI: {})", oui)),
+                    error: None,
+                })
+            } else {
+                Json(OuiLookupResponse {
+                    mac: mac.clone(),
+                    vendor: None,
+                    error: Some(format!("API error: {}", response.status())),
+                })
+            }
+        }
+        Err(e) => Json(OuiLookupResponse {
+            mac: mac.clone(),
+            vendor: None,
+            error: Some(format!("Network error: {}", e)),
+        }),
+    }
+}
+
+/// DNS Lookup Response
+#[derive(Debug, Serialize)]
+pub struct DnsLookupResponse {
+    pub query: String,
+    pub query_type: String,
+    pub results: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Validate a host/IP query string for the lookup endpoints.
+///
+/// AUDIT FIX (DATA-005): the lookup_* endpoints previously accepted any path
+/// parameter and shelled out (via `Command::arg`, so no shell-injection, but
+/// every input flowed straight to upstream public DNS/WHOIS infrastructure
+/// regardless of garbage). This validator restricts inputs to the union of
+/// IPv4/IPv6 literals and hostnames matching RFC1035 syntax.
+fn validate_lookup_host(query: &str) -> Result<(), String> {
+    let q = query.trim();
+    if q.is_empty() || q.len() > 253 {
+        return Err("query must be 1-253 characters".to_string());
+    }
+    if q.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let valid = q.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err("query must be an IP address or RFC1035 hostname".to_string())
+    }
+}
+
+/// DNS lookup - forward or reverse
+pub async fn lookup_dns(Path(query): Path<String>) -> Json<DnsLookupResponse> {
+    use std::net::ToSocketAddrs;
+
+    if let Err(e) = validate_lookup_host(&query) {
+        return Json(DnsLookupResponse {
+            query: query.clone(),
+            query_type: "rejected".to_string(),
+            results: vec![],
+            error: Some(e),
+        });
+    }
+
+    // Detect if it's an IP (reverse lookup) or hostname (forward lookup)
+    let is_ip = query.parse::<std::net::IpAddr>().is_ok();
+    let query_type = if is_ip { "PTR (reverse)" } else { "A/AAAA (forward)" };
+
+    if is_ip {
+        // Reverse DNS lookup using host command
+        let output = tokio::process::Command::new("host")
+            .arg(&query)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let results: Vec<String> = stdout
+                    .lines()
+                    .filter(|line| line.contains("domain name pointer"))
+                    .filter_map(|line| line.split("domain name pointer ").nth(1))
+                    .map(|s| s.trim_end_matches('.').to_string())
+                    .collect();
+
+                if results.is_empty() {
+                    Json(DnsLookupResponse {
+                        query: query.clone(),
+                        query_type: query_type.to_string(),
+                        results: vec!["No PTR record found".to_string()],
+                        error: None,
+                    })
+                } else {
+                    Json(DnsLookupResponse {
+                        query: query.clone(),
+                        query_type: query_type.to_string(),
+                        results,
+                        error: None,
+                    })
+                }
+            }
+            Err(e) => Json(DnsLookupResponse {
+                query: query.clone(),
+                query_type: query_type.to_string(),
+                results: vec![],
+                error: Some(format!("DNS lookup failed: {}", e)),
+            }),
+        }
+    } else {
+        // Forward DNS lookup
+        match format!("{}:0", query).to_socket_addrs() {
+            Ok(addrs) => {
+                let results: Vec<String> = addrs
+                    .filter_map(|addr| {
+                        let ip = addr.ip();
+                        Some(ip.to_string())
+                    })
+                    .collect();
+
+                if results.is_empty() {
+                    Json(DnsLookupResponse {
+                        query: query.clone(),
+                        query_type: query_type.to_string(),
+                        results: vec!["No records found".to_string()],
+                        error: None,
+                    })
+                } else {
+                    Json(DnsLookupResponse {
+                        query: query.clone(),
+                        query_type: query_type.to_string(),
+                        results,
+                        error: None,
+                    })
+                }
+            }
+            Err(e) => Json(DnsLookupResponse {
+                query: query.clone(),
+                query_type: query_type.to_string(),
+                results: vec![],
+                error: Some(format!("DNS lookup failed: {}", e)),
+            }),
+        }
+    }
+}
+
+/// Whois Lookup Response
+#[derive(Debug, Serialize)]
+pub struct WhoisLookupResponse {
+    pub query: String,
+    pub summary: Option<WhoisSummary>,
+    pub raw: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WhoisSummary {
+    pub organization: Option<String>,
+    pub country: Option<String>,
+    pub network_name: Option<String>,
+    pub cidr: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Whois lookup for IP addresses
+pub async fn lookup_whois(Path(query): Path<String>) -> Json<WhoisLookupResponse> {
+    if let Err(e) = validate_lookup_host(&query) {
+        return Json(WhoisLookupResponse {
+            query: query.clone(),
+            summary: None,
+            raw: None,
+            error: Some(e),
+        });
+    }
+
+    // Run whois command
+    let output = tokio::process::Command::new("whois")
+        .arg(&query)
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+            // Parse common fields from whois output
+            let mut summary = WhoisSummary {
+                organization: None,
+                country: None,
+                network_name: None,
+                cidr: None,
+                description: None,
+            };
+
+            for line in stdout.lines() {
+                let lower = line.to_lowercase();
+                if lower.starts_with("orgname:") || lower.starts_with("org-name:") || lower.starts_with("organization:") {
+                    summary.organization = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("country:") {
+                    summary.country = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("netname:") {
+                    summary.network_name = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("cidr:") {
+                    summary.cidr = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("descr:") && summary.description.is_none() {
+                    summary.description = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                }
+            }
+
+            Json(WhoisLookupResponse {
+                query: query.clone(),
+                summary: Some(summary),
+                raw: Some(stdout),
+                error: None,
+            })
+        }
+        Err(e) => Json(WhoisLookupResponse {
+            query: query.clone(),
+            summary: None,
+            raw: None,
+            error: Some(format!("Whois lookup failed: {}", e)),
+        }),
+    }
+}
+
+/// ASN Lookup Response
+#[derive(Debug, Serialize)]
+pub struct AsnLookupResponse {
+    pub asn: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub country: Option<String>,
+    pub error: Option<String>,
+}
+
+/// ASN lookup
+pub async fn lookup_asn(Path(asn): Path<String>) -> Json<AsnLookupResponse> {
+    // Extract just the number if prefixed with AS
+    let asn_num = asn.trim_start_matches("AS").trim_start_matches("as");
+
+    // AUDIT FIX (DATA-005): require numeric ASN. Without this the path was
+    // `whois "AS<arbitrary string>"` and we leaked any user-supplied tail to
+    // the upstream WHOIS server.
+    if asn_num.is_empty() || !asn_num.chars().all(|c| c.is_ascii_digit()) {
+        return Json(AsnLookupResponse {
+            asn: asn.clone(),
+            name: None,
+            description: None,
+            country: None,
+            error: Some("ASN must be numeric (e.g. '15169' or 'AS15169')".to_string()),
+        });
+    }
+
+    // Run whois on the ASN
+    let output = tokio::process::Command::new("whois")
+        .arg(format!("AS{}", asn_num))
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+            let mut name: Option<String> = None;
+            let mut description: Option<String> = None;
+            let mut country: Option<String> = None;
+
+            for line in stdout.lines() {
+                let lower = line.to_lowercase();
+                if lower.starts_with("as-name:") || lower.starts_with("asname:") {
+                    name = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("descr:") && description.is_none() {
+                    description = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("country:") {
+                    country = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                } else if lower.starts_with("orgname:") && name.is_none() {
+                    name = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                }
+            }
+
+            Json(AsnLookupResponse {
+                asn: format!("AS{}", asn_num),
+                name,
+                description,
+                country,
+                error: None,
+            })
+        }
+        Err(e) => Json(AsnLookupResponse {
+            asn: format!("AS{}", asn_num),
+            name: None,
+            description: None,
+            country: None,
+            error: Some(format!("ASN lookup failed: {}", e)),
+        }),
+    }
+}
+
+// === Saved Topologies Endpoints (Phase 20.1) ===
+
+/// Request to add a device to a topology
+#[derive(Debug, Deserialize)]
+pub struct AddDeviceRequest {
+    /// Session ID - if provided, device is linked to this session
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Device name (required if no session_id)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Device host/IP (required if no session_id)
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Device type (router, switch, etc.)
+    #[serde(default)]
+    pub device_type: Option<String>,
+    /// X position on canvas
+    #[serde(default)]
+    pub x: Option<f64>,
+    /// Y position on canvas
+    #[serde(default)]
+    pub y: Option<f64>,
+    /// Profile ID for SSH/credentials (used for discovered devices)
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// SNMP profile ID for interface stats polling (may differ from SSH profile)
+    #[serde(default)]
+    pub snmp_profile_id: Option<String>,
+}
+
+/// List all topologies
+pub async fn list_topologies(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SavedTopology>>, ApiError> {
+    let topologies = state.provider.list_topologies().await?;
+    Ok(Json(topologies))
+}
+
+/// Create a new topology
+pub async fn create_topology(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateTopologyRequest>,
+) -> Result<(StatusCode, Json<SavedTopology>), ApiError> {
+    // Create the topology
+    let topology = state.provider.create_topology(&req.name).await?;
+
+    // Add devices from session_ids if provided
+    for session_id in &req.session_ids {
+        if let Ok(session) = state.provider.get_session(session_id).await {
+            // Ignore errors adding devices - they may have invalid session IDs
+            state.provider.add_topology_device(&topology.id, &session).await.ok();
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(topology)))
+}
+
+/// Get a single topology with its devices and connections
+pub async fn get_topology(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<TopologyWithDetails>, ApiError> {
+    let topology = state.provider.get_topology(&id).await?
+        .ok_or_else(|| ApiError {
+            error: format!("Topology not found: {}", id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    let devices = state.provider.get_topology_devices(&id).await?;
+    let connections = state.provider.get_topology_connections(&id).await?;
+
+    Ok(Json(TopologyWithDetails {
+        id: topology.id,
+        name: topology.name,
+        devices,
+        connections,
+        created_at: topology.created_at,
+        updated_at: topology.updated_at,
+    }))
+}
+
+/// Update a topology name
+pub async fn update_topology(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateTopologyRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_topology(&id, &req.name).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete a topology
+pub async fn delete_topology(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_topology(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Add a device to a topology
+pub async fn add_topology_device(
+    State(state): State<Arc<AppState>>,
+    Path(topology_id): Path<String>,
+    Json(req): Json<AddDeviceRequest>,
+) -> Result<(StatusCode, Json<TopologyDevice>), ApiError> {
+    tracing::debug!("add_topology_device called: topology_id={}, req={:?}", topology_id, req);
+
+    // Validate topology exists
+    state.provider.get_topology(&topology_id).await?
+        .ok_or_else(|| ApiError {
+            error: format!("Topology not found: {}", topology_id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    // If session_id is provided, link device to session
+    if let Some(session_id) = &req.session_id {
+        let session = state.provider.get_session(session_id).await?;
+        let device = state.provider.add_topology_device(&topology_id, &session).await?;
+        return Ok((StatusCode::CREATED, Json(device)));
+    }
+
+    // Otherwise, create a discovered device with provided fields
+    let name = req.name.ok_or_else(|| ApiError {
+        error: "name is required when session_id is not provided".to_string(),
+        code: "VALIDATION_ERROR".to_string(),
+    })?;
+
+    let device = state.provider.add_discovered_device(
+        &topology_id,
+        &name,
+        req.host.as_deref().unwrap_or(""),
+        req.device_type.as_deref().unwrap_or("unknown"),
+        req.x.unwrap_or(500.0),
+        req.y.unwrap_or(300.0),
+        req.profile_id.as_deref(),
+        req.snmp_profile_id.as_deref(),
+    ).await?;
+
+    Ok((StatusCode::CREATED, Json(device)))
+}
+
+/// Update device position within a topology
+pub async fn update_topology_device_position(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, device_id)): Path<(String, String)>,
+    Json(update): Json<UpdateTopologyPosition>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_topology_device_position(&device_id, update.x, update.y).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Update device type within a topology
+pub async fn update_topology_device_type(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, device_id)): Path<(String, String)>,
+    Json(update): Json<UpdateTopologyDeviceType>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_topology_device_type(&device_id, &update.device_type).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Update device details (AI enrichment)
+pub async fn update_topology_device_details(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, device_id)): Path<(String, String)>,
+    Json(update): Json<UpdateTopologyDeviceDetails>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_topology_device_details(&device_id, &update).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete a device from a topology
+pub async fn delete_topology_device(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, device_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_topology_device(&device_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Create a connection between devices
+pub async fn create_topology_connection(
+    State(state): State<Arc<AppState>>,
+    Path(topology_id): Path<String>,
+    Json(req): Json<CreateConnectionRequest>,
+) -> Result<(StatusCode, Json<TopologyConnection>), ApiError> {
+    let connection = state.provider.create_topology_connection(&topology_id, &req).await?;
+    Ok((StatusCode::CREATED, Json(connection)))
+}
+
+/// Delete a connection
+pub async fn delete_topology_connection(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, connection_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_topology_connection(&connection_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Topology Annotations Endpoints (Phase 27-03) ===
+
+/// List all annotations for a topology
+pub async fn list_topology_annotations(
+    State(state): State<Arc<AppState>>,
+    Path(topology_id): Path<String>,
+) -> Result<Json<Vec<TopologyAnnotation>>, ApiError> {
+    let annotations = state.provider.get_topology_annotations(&topology_id).await?;
+    Ok(Json(annotations))
+}
+
+/// Create a new annotation
+pub async fn create_topology_annotation(
+    State(state): State<Arc<AppState>>,
+    Path(topology_id): Path<String>,
+    Json(req): Json<CreateAnnotationRequest>,
+) -> Result<(StatusCode, Json<TopologyAnnotation>), ApiError> {
+    let annotation = state.provider.create_topology_annotation(&topology_id, &req).await?;
+    Ok((StatusCode::CREATED, Json(annotation)))
+}
+
+/// Update an annotation
+pub async fn update_topology_annotation(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, annotation_id)): Path<(String, String)>,
+    Json(req): Json<UpdateAnnotationRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_topology_annotation(&annotation_id, &req).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete an annotation
+pub async fn delete_topology_annotation(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, annotation_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_topology_annotation(&annotation_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reorder annotations by z-index
+pub async fn reorder_topology_annotations(
+    State(state): State<Arc<AppState>>,
+    Path(topology_id): Path<String>,
+    Json(req): Json<ReorderAnnotationsRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.reorder_topology_annotations(&topology_id, &req.id_order).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Netdisco Sources Endpoints (Phase 22) ===
+
+/// Response from Netdisco source (excludes credential_key for frontend)
+#[derive(Debug, Serialize)]
+pub struct NetdiscoSourceResponse {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<NetdiscoSource> for NetdiscoSourceResponse {
+    fn from(source: NetdiscoSource) -> Self {
+        Self {
+            id: source.id,
+            name: source.name,
+            url: source.url,
+            auth_type: source.auth_type,
+            username: source.username,
+            created_at: source.created_at.to_rfc3339(),
+            updated_at: source.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// List all Netdisco sources
+pub async fn list_netdisco_sources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<NetdiscoSourceResponse>>, ApiError> {
+    let sources = state.provider.list_netdisco_sources().await?;
+    Ok(Json(sources.into_iter().map(Into::into).collect()))
+}
+
+/// Get a single Netdisco source
+pub async fn get_netdisco_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<NetdiscoSourceResponse>, ApiError> {
+    let source = state.provider.get_netdisco_source(&id).await?;
+    Ok(Json(source.into()))
+}
+
+/// Create a new Netdisco source
+pub async fn create_netdisco_source(
+    State(state): State<Arc<AppState>>,
+    Json(new_source): Json<NewNetdiscoSource>,
+) -> Result<(StatusCode, Json<NetdiscoSourceResponse>), ApiError> {
+    let source = state.provider.create_netdisco_source(new_source).await?;
+    Ok((StatusCode::CREATED, Json(source.into())))
+}
+
+/// Update an existing Netdisco source
+pub async fn update_netdisco_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateNetdiscoSource>,
+) -> Result<Json<NetdiscoSourceResponse>, ApiError> {
+    let source = state.provider.update_netdisco_source(&id, update).await?;
+    Ok(Json(source.into()))
+}
+
+/// Delete a Netdisco source
+pub async fn delete_netdisco_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_netdisco_source(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Response from testing Netdisco connection
+#[derive(Debug, Serialize)]
+pub struct TestNetdiscoResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Test Netdisco connection for an existing source
+pub async fn test_netdisco_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<TestNetdiscoResponse>, ApiError> {
+    // Get the source
+    let source = state.provider.get_netdisco_source(&id).await?;
+
+    // Get credential from vault
+    let credential = state.provider.get_api_key(&source.credential_key).await?
+        .ok_or_else(|| ApiError {
+            error: "No credential found for this source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    // Test the connection
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v1/device", source.url.trim_end_matches('/'));
+
+    let request = if source.auth_type == "api_key" {
+        client.get(&api_url)
+            .header("X-API-Key", &credential)
+            .header("Accept", "application/json")
+    } else {
+        // Basic auth
+        let username = source.username.clone().unwrap_or_default();
+        client.get(&api_url)
+            .basic_auth(&username, Some(&credential))
+            .header("Accept", "application/json")
+    };
+
+    match request.timeout(std::time::Duration::from_secs(10)).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                Ok(Json(TestNetdiscoResponse {
+                    success: true,
+                    message: "Connection successful".to_string(),
+                }))
+            } else {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                Ok(Json(TestNetdiscoResponse {
+                    success: false,
+                    message: format!("HTTP {}: {}", status, body),
+                }))
+            }
+        }
+        Err(e) => Ok(Json(TestNetdiscoResponse {
+            success: false,
+            message: format!("Connection failed: {}", e),
+        })),
+    }
+}
+
+/// Request body for testing Netdisco connection directly
+#[derive(Debug, Deserialize)]
+pub struct TestNetdiscoDirectRequest {
+    pub url: String,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub credential: String,
+}
+
+/// Test Netdisco connection directly (no source required)
+pub async fn test_netdisco_direct(
+    Json(req): Json<TestNetdiscoDirectRequest>,
+) -> Result<Json<TestNetdiscoResponse>, ApiError> {
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v1/device", req.url.trim_end_matches('/'));
+
+    let request = if req.auth_type == "api_key" {
+        client.get(&api_url)
+            .header("X-API-Key", &req.credential)
+            .header("Accept", "application/json")
+    } else {
+        // Basic auth
+        let username = req.username.clone().unwrap_or_default();
+        client.get(&api_url)
+            .basic_auth(&username, Some(&req.credential))
+            .header("Accept", "application/json")
+    };
+
+    match request.timeout(std::time::Duration::from_secs(10)).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                Ok(Json(TestNetdiscoResponse {
+                    success: true,
+                    message: "Connection successful".to_string(),
+                }))
+            } else {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                Ok(Json(TestNetdiscoResponse {
+                    success: false,
+                    message: format!("HTTP {}: {}", status, body),
+                }))
+            }
+        }
+        Err(e) => Ok(Json(TestNetdiscoResponse {
+            success: false,
+            message: format!("Connection failed: {}", e),
+        })),
+    }
+}
+
+/// Proxy request to Netdisco API - devices list
+pub async fn netdisco_proxy_devices(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = state.provider.get_netdisco_source(&id).await?;
+    let credential = state.provider.get_api_key(&source.credential_key).await?
+        .ok_or_else(|| ApiError {
+            error: "No credential found".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v1/device", source.url.trim_end_matches('/'));
+
+    let request = if source.auth_type == "api_key" {
+        client.get(&api_url).header("X-API-Key", &credential)
+    } else {
+        let username = source.username.clone().unwrap_or_default();
+        client.get(&api_url).basic_auth(&username, Some(&credential))
+    };
+
+    let response = request
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Request failed: {}", e),
+            code: "PROXY_ERROR".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("Netdisco API error: {}", response.status()),
+            code: "PROXY_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse response: {}", e),
+        code: "PROXY_ERROR".to_string(),
+    })?;
+
+    Ok(Json(data))
+}
+
+/// Proxy request to Netdisco API - device neighbors
+pub async fn netdisco_proxy_neighbors(
+    State(state): State<Arc<AppState>>,
+    Path((id, device_ip)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = state.provider.get_netdisco_source(&id).await?;
+    let credential = state.provider.get_api_key(&source.credential_key).await?
+        .ok_or_else(|| ApiError {
+            error: "No credential found".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v1/device/{}/neighbors", source.url.trim_end_matches('/'), device_ip);
+
+    let request = if source.auth_type == "api_key" {
+        client.get(&api_url).header("X-API-Key", &credential)
+    } else {
+        let username = source.username.clone().unwrap_or_default();
+        client.get(&api_url).basic_auth(&username, Some(&credential))
+    };
+
+    let response = request
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Request failed: {}", e),
+            code: "PROXY_ERROR".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("Netdisco API error: {}", response.status()),
+            code: "PROXY_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse response: {}", e),
+        code: "PROXY_ERROR".to_string(),
+    })?;
+
+    Ok(Json(data))
+}
+
+/// Proxy request to Netdisco API - device links report
+pub async fn netdisco_proxy_devicelinks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = state.provider.get_netdisco_source(&id).await?;
+    let credential = state.provider.get_api_key(&source.credential_key).await?
+        .ok_or_else(|| ApiError {
+            error: "No credential found".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v1/report/devicelinks", source.url.trim_end_matches('/'));
+
+    let request = if source.auth_type == "api_key" {
+        client.get(&api_url).header("X-API-Key", &credential)
+    } else {
+        let username = source.username.clone().unwrap_or_default();
+        client.get(&api_url).basic_auth(&username, Some(&credential))
+    };
+
+    let response = request
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Request failed: {}", e),
+            code: "PROXY_ERROR".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("Netdisco API error: {}", response.status()),
+            code: "PROXY_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse response: {}", e),
+        code: "PROXY_ERROR".to_string(),
+    })?;
+
+    Ok(Json(data))
+}
+
+/// Search devices in Netdisco
+#[derive(Debug, Deserialize)]
+pub struct NetdiscoSearchQuery {
+    pub q: String,
+}
+
+pub async fn netdisco_proxy_search(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<NetdiscoSearchQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = state.provider.get_netdisco_source(&id).await?;
+    let credential = state.provider.get_api_key(&source.credential_key).await?
+        .ok_or_else(|| ApiError {
+            error: "No credential found".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/api/v1/search/device?q={}", source.url.trim_end_matches('/'), urlencoding::encode(&query.q));
+
+    let request = if source.auth_type == "api_key" {
+        client.get(&api_url).header("X-API-Key", &credential)
+    } else {
+        let username = source.username.clone().unwrap_or_default();
+        client.get(&api_url).basic_auth(&username, Some(&credential))
+    };
+
+    let response = request
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Request failed: {}", e),
+            code: "PROXY_ERROR".to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("Netdisco API error: {}", response.status()),
+            code: "PROXY_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse response: {}", e),
+        code: "PROXY_ERROR".to_string(),
+    })?;
+
+    Ok(Json(data))
+}
+
+// ============================================================================
+// Layout handlers (Phase 25)
+// ============================================================================
+
+/// List all saved layouts
+pub async fn list_layouts(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Layout>>, ApiError> {
+    let layouts = state.provider.list_layouts().await?;
+    Ok(Json(layouts))
+}
+
+/// Get a single layout by ID
+pub async fn get_layout(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Layout>, ApiError> {
+    let layout = state.provider.get_layout(&id).await?
+        .ok_or_else(|| ApiError {
+            error: format!("Layout not found: {}", id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+    Ok(Json(layout))
+}
+
+/// Request to create or update a layout
+#[derive(Debug, Deserialize)]
+pub struct CreateLayoutRequest {
+    pub name: String,
+    pub session_ids: Vec<String>,
+    pub tabs: Option<Vec<LayoutTab>>,
+    pub orientation: String,
+    pub sizes: Option<Vec<f64>>,
+}
+
+/// Create a new layout
+pub async fn create_layout(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateLayoutRequest>,
+) -> Result<(StatusCode, Json<Layout>), ApiError> {
+    let layout = Layout {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name,
+        session_ids: req.session_ids,
+        tabs: req.tabs,
+        orientation: req.orientation,
+        sizes: req.sizes,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let created = state.provider.create_layout(layout).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Request to update a layout
+#[derive(Debug, Deserialize)]
+pub struct UpdateLayoutRequest {
+    pub name: Option<String>,
+    pub session_ids: Option<Vec<String>>,
+    pub tabs: Option<Vec<LayoutTab>>,
+    pub orientation: Option<String>,
+    pub sizes: Option<Vec<f64>>,
+}
+
+/// Update an existing layout
+pub async fn update_layout(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateLayoutRequest>,
+) -> Result<Json<Layout>, ApiError> {
+    // Get existing layout
+    let existing = state.provider.get_layout(&id).await?
+        .ok_or_else(|| ApiError {
+            error: format!("Layout not found: {}", id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    // Merge updates
+    let updated = Layout {
+        id: existing.id,
+        name: req.name.unwrap_or(existing.name),
+        session_ids: req.session_ids.unwrap_or(existing.session_ids),
+        tabs: req.tabs.or(existing.tabs),
+        orientation: req.orientation.unwrap_or(existing.orientation),
+        sizes: req.sizes.or(existing.sizes),
+        created_at: existing.created_at,
+        updated_at: chrono::Utc::now(),
+    };
+
+    let result = state.provider.update_layout(updated).await?;
+    Ok(Json(result))
+}
+
+/// Delete a layout
+pub async fn delete_layout(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_layout(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Groups (Plan 1: Tab Groups Redesign) ===
+
+/// List all saved groups
+pub async fn list_groups(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::models::Group>>, ApiError> {
+    let groups = state.provider.list_groups().await?;
+    Ok(Json(groups))
+}
+
+/// Get a single group by ID
+pub async fn get_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::Group>, ApiError> {
+    let group = state
+        .provider
+        .get_group(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Group not found: {}", id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+    Ok(Json(group))
+}
+
+/// Create a new group
+pub async fn create_group(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::models::CreateGroupRequest>,
+) -> Result<(StatusCode, Json<crate::models::Group>), ApiError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let group = crate::models::Group {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name,
+        tabs: req.tabs,
+        topology_id: req.topology_id,
+        default_launch_action: req.default_launch_action,
+        created_at: now.clone(),
+        updated_at: now,
+        last_used_at: None,
+    };
+    let created = state.provider.create_group(group).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Update an existing group
+pub async fn update_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::models::UpdateGroupRequest>,
+) -> Result<Json<crate::models::Group>, ApiError> {
+    let mut existing = state
+        .provider
+        .get_group(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("Group not found: {}", id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    if let Some(name) = req.name {
+        existing.name = name;
+    }
+    if let Some(tabs) = req.tabs {
+        existing.tabs = tabs;
+    }
+    if let Some(topology_id) = req.topology_id {
+        existing.topology_id = topology_id;
+    }
+    if let Some(default_action) = req.default_launch_action {
+        existing.default_launch_action = default_action;
+    }
+    if let Some(last_used) = req.last_used_at {
+        existing.last_used_at = Some(last_used);
+    }
+    existing.updated_at = chrono::Utc::now().to_rfc3339();
+
+    let updated = state.provider.update_group(existing).await?;
+    Ok(Json(updated))
+}
+
+/// Delete a group
+pub async fn delete_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_group(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === API Resources API ===
+
+/// List all API resources
+pub async fn list_api_resources(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ApiResource>>, ApiError> {
+    let resources = state.provider.list_api_resources().await?;
+    Ok(Json(resources))
+}
+
+/// Get a single API resource
+pub async fn get_api_resource(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResource>, ApiError> {
+    let resource = state.provider.get_api_resource(&id).await?
+        .ok_or_else(|| ApiError { error: format!("API resource not found: {}", id), code: "NOT_FOUND".to_string() })?;
+    Ok(Json(resource))
+}
+
+/// Create a new API resource
+pub async fn create_api_resource(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateApiResourceRequest>,
+) -> Result<(StatusCode, Json<ApiResource>), ApiError> {
+    let resource = state.provider.create_api_resource(&req).await?;
+    Ok((StatusCode::CREATED, Json(resource)))
+}
+
+/// Update an API resource
+pub async fn update_api_resource(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateApiResourceRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_api_resource(&id, &req).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete an API resource
+pub async fn delete_api_resource(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_api_resource(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Test an API resource connection
+pub async fn test_api_resource(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<QuickActionResult>, ApiError> {
+    let resource = state.provider.get_api_resource(&id).await?
+        .ok_or_else(|| ApiError { error: format!("API resource not found: {}", id), code: "NOT_FOUND".to_string() })?;
+    let credentials = state.provider.get_api_resource_credentials(&id).await.ok().flatten();
+
+    let result = crate::quick_actions::execute_action(
+        &resource,
+        credentials.as_ref(),
+        "GET",
+        "/",
+        &serde_json::json!({}),
+        None,
+        None,
+        &std::collections::HashMap::new(),
+    ).await;
+
+    Ok(Json(result))
+}
+
+// === Quick Actions API ===
+
+/// List all quick actions
+pub async fn list_quick_actions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<QuickAction>>, ApiError> {
+    let actions = state.provider.list_quick_actions().await?;
+    Ok(Json(actions))
+}
+
+/// Get a single quick action
+pub async fn get_quick_action(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<QuickAction>, ApiError> {
+    let action = state.provider.get_quick_action(&id).await?
+        .ok_or_else(|| ApiError { error: format!("Quick action not found: {}", id), code: "NOT_FOUND".to_string() })?;
+    Ok(Json(action))
+}
+
+/// Create a new quick action
+pub async fn create_quick_action(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateQuickActionRequest>,
+) -> Result<(StatusCode, Json<QuickAction>), ApiError> {
+    let action = state.provider.create_quick_action(&req).await?;
+    Ok((StatusCode::CREATED, Json(action)))
+}
+
+/// Update a quick action
+pub async fn update_quick_action(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateQuickActionRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_quick_action(&id, &req).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete a quick action
+pub async fn delete_quick_action(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_quick_action(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Execute a saved quick action
+pub async fn execute_quick_action(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<ExecuteQuickActionRequest>>,
+) -> Result<Json<QuickActionResult>, ApiError> {
+    let user_variables = body.map(|b| b.0.variables).unwrap_or_default();
+    let action = state.provider.get_quick_action(&id).await?
+        .ok_or_else(|| ApiError { error: format!("Quick action not found: {}", id), code: "NOT_FOUND".to_string() })?;
+    let resource = state.provider.get_api_resource(&action.api_resource_id).await?
+        .ok_or_else(|| ApiError { error: "Referenced API resource not found".to_string(), code: "NOT_FOUND".to_string() })?;
+    let credentials = state.provider.get_api_resource_credentials(&action.api_resource_id).await.ok().flatten();
+
+    let result = crate::quick_actions::execute_action(
+        &resource,
+        credentials.as_ref(),
+        &action.method,
+        &action.path,
+        &action.headers,
+        action.body.as_deref(),
+        action.json_extract_path.as_deref(),
+        &user_variables,
+    ).await;
+
+    Ok(Json(result))
+}
+
+/// Execute a quick action inline (without saving)
+pub async fn execute_inline_quick_action(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExecuteInlineQuickActionRequest>,
+) -> Result<Json<QuickActionResult>, ApiError> {
+    let resource = state.provider.get_api_resource(&req.api_resource_id).await?
+        .ok_or_else(|| ApiError { error: "API resource not found".to_string(), code: "NOT_FOUND".to_string() })?;
+    let credentials = state.provider.get_api_resource_credentials(&req.api_resource_id).await.ok().flatten();
+
+    let result = crate::quick_actions::execute_action(
+        &resource,
+        credentials.as_ref(),
+        &req.method,
+        &req.path,
+        &req.headers,
+        req.body.as_deref(),
+        req.json_extract_path.as_deref(),
+        &std::collections::HashMap::new(),
+    ).await;
+
+    Ok(Json(result))
+}
+
+// === Quick Prompts API ===
+
+/// List all quick prompts
+pub async fn list_quick_prompts(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<QuickPrompt>>, ApiError> {
+    let prompts = state.provider.list_quick_prompts().await?;
+    Ok(Json(prompts))
+}
+
+/// Create a new quick prompt
+pub async fn create_quick_prompt(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateQuickPromptRequest>,
+) -> Result<(StatusCode, Json<QuickPrompt>), ApiError> {
+    let prompt = state.provider.create_quick_prompt(&req).await?;
+    Ok((StatusCode::CREATED, Json(prompt)))
+}
+
+/// Update a quick prompt
+pub async fn update_quick_prompt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateQuickPromptRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_quick_prompt(&id, &req).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete a quick prompt
+pub async fn delete_quick_prompt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_quick_prompt(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Agent Definitions API ===
+
+/// List all agent definitions
+pub async fn list_agent_definitions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AgentDefinition>>, ApiError> {
+    let definitions = state.provider.list_agent_definitions().await?;
+    Ok(Json(definitions))
+}
+
+/// Get a single agent definition
+pub async fn get_agent_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<AgentDefinition>, ApiError> {
+    let definition = state.provider.get_agent_definition(&id).await?
+        .ok_or_else(|| ApiError::from(ProviderError::NotFound(format!("Agent definition not found: {}", id))))?;
+    Ok(Json(definition))
+}
+
+/// Create a new agent definition
+pub async fn create_agent_definition(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateAgentDefinitionRequest>,
+) -> Result<(StatusCode, Json<AgentDefinition>), ApiError> {
+    let definition = state.provider.create_agent_definition(&req).await?;
+    Ok((StatusCode::CREATED, Json(definition)))
+}
+
+/// Update an agent definition
+pub async fn update_agent_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAgentDefinitionRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.update_agent_definition(&id, &req).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Delete an agent definition
+pub async fn delete_agent_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_agent_definition(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Run an agent definition (creates and executes a task using the agent's config)
+#[derive(Debug, Deserialize)]
+pub struct RunAgentRequest {
+    pub prompt: String,
+}
+
+pub async fn run_agent_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RunAgentRequest>,
+) -> Result<Json<crate::tasks::AgentTask>, (StatusCode, String)> {
+    // Verify agent definition exists
+    let _definition = state.provider.get_agent_definition(&id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Agent definition not found: {}", id)))?;
+
+    // Create task with agent_definition_id
+    let task = state
+        .task_store
+        .create_task_with_agent(crate::tasks::CreateTaskRequest { prompt: req.prompt, _failure_policy: None }, Some(id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Spawn for background execution
+    if let Err(e) = state.task_executor.spawn_task(task.id.clone()).await {
+        tracing::warn!("Failed to spawn agent task {}: {}", task.id, e);
+    }
+
+    Ok(Json(task))
+}
+
+// === MOP Templates API (Phase 30) ===
+
+/// List all MOP templates
+pub async fn list_mop_templates(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<MopTemplate>>, ApiError> {
+    let templates = state.provider.list_mop_templates().await?;
+    Ok(Json(templates))
+}
+
+/// Get a MOP template by ID
+pub async fn get_mop_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopTemplate>, ApiError> {
+    let template = state.provider.get_mop_template(&id).await?;
+    Ok(Json(template))
+}
+
+/// Create a new MOP template
+pub async fn create_mop_template(
+    State(state): State<Arc<AppState>>,
+    Json(template): Json<NewMopTemplate>,
+) -> Result<(StatusCode, Json<MopTemplate>), ApiError> {
+    let created = state.provider.create_mop_template(template).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Update a MOP template
+pub async fn update_mop_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateMopTemplate>,
+) -> Result<Json<MopTemplate>, ApiError> {
+    let updated = state.provider.update_mop_template(&id, update).await?;
+    Ok(Json(updated))
+}
+
+/// Delete a MOP template
+pub async fn delete_mop_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_mop_template(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === MOP Executions API (Phase 30) ===
+
+/// List all MOP executions
+pub async fn list_mop_executions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<MopExecution>>, ApiError> {
+    let executions = state.provider.list_mop_executions().await?;
+    Ok(Json(executions))
+}
+
+/// Get a MOP execution by ID
+pub async fn get_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopExecution>, ApiError> {
+    let execution = state.provider.get_mop_execution(&id).await?;
+    Ok(Json(execution))
+}
+
+/// Create a new MOP execution
+pub async fn create_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Json(execution): Json<NewMopExecution>,
+) -> Result<(StatusCode, Json<MopExecution>), ApiError> {
+    let created = state.provider.create_mop_execution(execution).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Update a MOP execution
+pub async fn update_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateMopExecution>,
+) -> Result<Json<MopExecution>, ApiError> {
+    let updated = state.provider.update_mop_execution(&id, update).await?;
+    Ok(Json(updated))
+}
+
+/// Delete a MOP execution
+pub async fn delete_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_mop_execution(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === MOP Execution Control API (Phase 30) ===
+
+/// Start a MOP execution
+pub async fn start_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopExecution>, ApiError> {
+    let update = UpdateMopExecution {
+        status: Some(ExecutionStatus::Running),
+        started_at: Some(Some(chrono::Utc::now())),
+        current_phase: Some(Some("pre_checks".to_string())),
+        ..Default::default()
+    };
+    let execution = state.provider.update_mop_execution(&id, update).await?;
+    Ok(Json(execution))
+}
+
+/// Pause a MOP execution
+pub async fn pause_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopExecution>, ApiError> {
+    // Capture checkpoint before pausing
+    let execution = state.provider.get_mop_execution(&id).await?;
+    let checkpoint = serde_json::to_string(&execution).ok();
+
+    let update = UpdateMopExecution {
+        status: Some(ExecutionStatus::Paused),
+        last_checkpoint: Some(checkpoint),
+        ..Default::default()
+    };
+    let execution = state.provider.update_mop_execution(&id, update).await?;
+    Ok(Json(execution))
+}
+
+/// Resume a paused MOP execution
+pub async fn resume_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopExecution>, ApiError> {
+    let update = UpdateMopExecution {
+        status: Some(ExecutionStatus::Running),
+        ..Default::default()
+    };
+    let execution = state.provider.update_mop_execution(&id, update).await?;
+    Ok(Json(execution))
+}
+
+/// Abort a MOP execution
+pub async fn abort_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MopExecution>, ApiError> {
+    let update = UpdateMopExecution {
+        status: Some(ExecutionStatus::Aborted),
+        completed_at: Some(Some(chrono::Utc::now())),
+        ..Default::default()
+    };
+    let execution = state.provider.update_mop_execution(&id, update).await?;
+    Ok(Json(execution))
+}
+
+/// Complete a MOP execution with AI analysis
+#[derive(Debug, Deserialize)]
+pub struct CompleteExecutionRequest {
+    pub ai_analysis: Option<String>,
+}
+
+pub async fn complete_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CompleteExecutionRequest>,
+) -> Result<Json<MopExecution>, ApiError> {
+    let update = UpdateMopExecution {
+        status: Some(ExecutionStatus::Complete),
+        completed_at: Some(Some(chrono::Utc::now())),
+        ai_analysis: Some(req.ai_analysis),
+        ..Default::default()
+    };
+    let execution = state.provider.update_mop_execution(&id, update).await?;
+    Ok(Json(execution))
+}
+
+// === MOP Execution Devices API (Phase 30) ===
+
+/// List devices for a MOP execution
+pub async fn list_execution_devices(
+    State(state): State<Arc<AppState>>,
+    Path(execution_id): Path<String>,
+) -> Result<Json<Vec<MopExecutionDevice>>, ApiError> {
+    let devices = state.provider.list_mop_execution_devices(&execution_id).await?;
+    Ok(Json(devices))
+}
+
+/// Add a device to a MOP execution
+pub async fn add_execution_device(
+    State(state): State<Arc<AppState>>,
+    Path(execution_id): Path<String>,
+    Json(device): Json<NewMopExecutionDevice>,
+) -> Result<(StatusCode, Json<MopExecutionDevice>), ApiError> {
+    // Ensure execution_id matches the path
+    let device_data = NewMopExecutionDevice {
+        execution_id,
+        session_id: device.session_id,
+        device_order: device.device_order,
+    };
+    let created = state.provider.create_mop_execution_device(device_data).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Skip a device in a MOP execution
+pub async fn skip_execution_device(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, device_id)): Path<(String, String)>,
+) -> Result<Json<MopExecutionDevice>, ApiError> {
+    let update = UpdateMopExecutionDevice {
+        status: Some(DeviceExecutionStatus::Skipped),
+        completed_at: Some(Some(chrono::Utc::now())),
+        ..Default::default()
+    };
+    let device = state.provider.update_mop_execution_device(&device_id, update).await?;
+    Ok(Json(device))
+}
+
+/// Retry a failed device in a MOP execution
+pub async fn retry_execution_device(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, device_id)): Path<(String, String)>,
+) -> Result<Json<MopExecutionDevice>, ApiError> {
+    let update = UpdateMopExecutionDevice {
+        status: Some(DeviceExecutionStatus::Pending),
+        error_message: Some(None),
+        started_at: Some(None),
+        completed_at: Some(None),
+        ..Default::default()
+    };
+    let device = state.provider.update_mop_execution_device(&device_id, update).await?;
+    Ok(Json(device))
+}
+
+/// Rollback a device in a MOP execution
+pub async fn rollback_execution_device(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, device_id)): Path<(String, String)>,
+) -> Result<Json<MopExecutionDevice>, ApiError> {
+    // Mark device for rollback - actual rollback logic handled by frontend/wizard
+    let update = UpdateMopExecutionDevice {
+        status: Some(DeviceExecutionStatus::Running),
+        current_step_id: Some(None), // Will be set to rollback steps
+        ..Default::default()
+    };
+    let device = state.provider.update_mop_execution_device(&device_id, update).await?;
+    Ok(Json(device))
+}
+
+// === MOP Execution Steps API (Phase 30) ===
+
+/// List steps for a device
+pub async fn list_execution_steps(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, device_id)): Path<(String, String)>,
+) -> Result<Json<Vec<MopExecutionStep>>, ApiError> {
+    let steps = state.provider.list_mop_execution_steps(&device_id).await?;
+    Ok(Json(steps))
+}
+
+/// Add steps to a device (bulk create)
+pub async fn add_execution_steps(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, device_id)): Path<(String, String)>,
+    Json(steps): Json<Vec<NewMopExecutionStep>>,
+) -> Result<(StatusCode, Json<Vec<MopExecutionStep>>), ApiError> {
+    // Ensure device_id matches for all steps
+    let steps_data: Vec<NewMopExecutionStep> = steps
+        .into_iter()
+        .map(|s| NewMopExecutionStep {
+            execution_device_id: device_id.clone(),
+            ..s
+        })
+        .collect();
+    let created = state.provider.bulk_create_mop_execution_steps(steps_data).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Resolve runtime context variables in a string.
+/// Supports: {{device.host}}, {{device.name}}, {{device.type}}
+fn resolve_runtime_vars(template: &str, device_host: &str, device_name: &str) -> String {
+    template
+        .replace("{{device.host}}", device_host)
+        .replace("{{device.name}}", device_name)
+        .replace("{{device.type}}", "") // not available in standalone
+}
+
+/// Resolve runtime variables in a JSON value (recurse into string values)
+fn resolve_runtime_vars_json(value: &serde_json::Value, device_host: &str, device_name: &str) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => serde_json::Value::String(resolve_runtime_vars(s, device_host, device_name)),
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), resolve_runtime_vars_json(v, device_host, device_name));
+            }
+            serde_json::Value::Object(new_map)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(|v| resolve_runtime_vars_json(v, device_host, device_name)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Execute a quick action step: fetch action, resolve variables, execute, return output + status + resolved vars
+async fn execute_quick_action_step(
+    provider: &dyn DataProvider,
+    action_id: &str,
+    raw_variables: &Option<serde_json::Value>,
+    device_host: &str,
+    device_name: &str,
+) -> Result<(String, StepExecutionStatus, std::collections::HashMap<String, String>), ApiError> {
+    let action = provider.get_quick_action(action_id).await?
+        .ok_or_else(|| ApiError { error: format!("Quick action not found: {}", action_id), code: "NOT_FOUND".to_string() })?;
+    let resource = provider.get_api_resource(&action.api_resource_id).await?
+        .ok_or_else(|| ApiError { error: "API resource not found".to_string(), code: "NOT_FOUND".to_string() })?;
+    let credentials = provider.get_api_resource_credentials(&action.api_resource_id).await.ok().flatten();
+
+    let raw: std::collections::HashMap<String, String> = raw_variables
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let variables: std::collections::HashMap<String, String> = raw
+        .into_iter()
+        .map(|(k, v)| (k, resolve_runtime_vars(&v, device_host, device_name)))
+        .collect();
+
+    let result = crate::quick_actions::execute_action(
+        &resource,
+        credentials.as_ref(),
+        &action.method,
+        &action.path,
+        &action.headers,
+        action.body.as_deref(),
+        action.json_extract_path.as_deref(),
+        &variables,
+    ).await;
+
+    let output = format_quick_action_output(&result);
+    let status = if result.success {
+        StepExecutionStatus::Passed
+    } else {
+        StepExecutionStatus::Failed
+    };
+
+    Ok((output, status, variables))
+}
+
+/// Format quick action result into display output
+fn format_quick_action_output(result: &QuickActionResult) -> String {
+    if let Some(ref extracted) = result.extracted_value {
+        serde_json::to_string_pretty(extracted).unwrap_or_default()
+    } else if let Some(ref body) = result.raw_body {
+        serde_json::to_string_pretty(body).unwrap_or_default()
+    } else {
+        result.error.clone().unwrap_or_default()
+    }
+}
+
+/// Execute a script step: fetch script, resolve args, execute, return output + status + resolved args
+async fn execute_script_step(
+    provider: &dyn DataProvider,
+    script_id: &str,
+    raw_args: &Option<serde_json::Value>,
+    device_host: &str,
+    device_name: &str,
+) -> Result<(String, StepExecutionStatus, Option<serde_json::Value>), ApiError> {
+    let pool = provider.get_pool();
+    let script = crate::scripts::get_script_by_id(pool, script_id).await
+        .map_err(|e| ApiError { error: e.error, code: e.code })?;
+
+    let resolved_args = raw_args.as_ref().map(|args| {
+        resolve_runtime_vars_json(args, device_host, device_name)
+    });
+    let main_args = resolved_args.as_ref().map(|v| v.to_string());
+
+    let result = crate::scripts::run_script_once(
+        &script.content,
+        None,
+        main_args.as_deref(),
+    ).await;
+
+    let (status, output) = match result {
+        Ok(script_output) => {
+            if script_output.exit_code == 0 {
+                (StepExecutionStatus::Passed, script_output.stdout)
+            } else {
+                let err_output = if script_output.stderr.is_empty() {
+                    script_output.stdout
+                } else {
+                    format!("{}\n\nSTDERR:\n{}", script_output.stdout, script_output.stderr)
+                };
+                (StepExecutionStatus::Failed, err_output)
+            }
+        }
+        Err(e) => (StepExecutionStatus::Failed, format!("Script error: {}", e.error)),
+    };
+
+    Ok((output, status, resolved_args))
+}
+
+/// Update a step execution with completion status, output, and duration
+async fn finalize_step_execution(
+    provider: &dyn DataProvider,
+    step_id: &str,
+    status: StepExecutionStatus,
+    output: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    extra_fields: Option<UpdateMopExecutionStep>,
+) -> Result<MopExecutionStep, ApiError> {
+    let now = chrono::Utc::now();
+    let duration_ms = (now - started_at).num_milliseconds();
+
+    let mut update = extra_fields.unwrap_or_default();
+    update.status = Some(status);
+    update.output = Some(Some(output));
+    update.completed_at = Some(Some(now));
+    update.duration_ms = Some(Some(duration_ms));
+
+    Ok(provider.update_mop_execution_step(step_id, update).await?)
+}
+
+/// Map an SSH shell command result to a step execution status and output string
+fn map_ssh_result_to_step_status(result: &ssh::ShellCommandResult) -> (StepExecutionStatus, String) {
+    match result.status {
+        ssh::CommandStatus::Success => (StepExecutionStatus::Passed, result.transcript.clone()),
+        ssh::CommandStatus::Error => (StepExecutionStatus::Failed,
+            if result.transcript.is_empty() {
+                format!("Error: {}", result.error.as_deref().unwrap_or_default())
+            } else {
+                format!("{}\n\nError: {}", result.transcript, result.error.as_deref().unwrap_or_default())
+            }),
+        ssh::CommandStatus::Timeout => (StepExecutionStatus::Failed,
+            if result.transcript.is_empty() {
+                "Command timed out".to_string()
+            } else {
+                format!("{}\n\n[Command timed out]", result.transcript)
+            }),
+        ssh::CommandStatus::AuthFailed => (StepExecutionStatus::Failed, "Authentication failed - check credentials".to_string()),
+    }
+}
+
+/// Execute a step - actually runs the command on the device via SSH
+pub async fn execute_step(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, step_id)): Path<(String, String)>,
+) -> Result<Json<MopExecutionStep>, ApiError> {
+    let start_time = chrono::Utc::now();
+
+    // Mark step as running
+    let update = UpdateMopExecutionStep {
+        status: Some(StepExecutionStatus::Running),
+        started_at: Some(Some(start_time)),
+        ..Default::default()
+    };
+    let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+
+    // Check if mock mode is enabled
+    if step.mock_enabled {
+        let mock_output = step.mock_output.clone().unwrap_or_else(|| "[MOCKED] No mock output provided".to_string());
+        let now = chrono::Utc::now();
+        let duration_ms = (now - start_time).num_milliseconds();
+
+        let update = UpdateMopExecutionStep {
+            status: Some(StepExecutionStatus::Mocked),
+            output: Some(Some(mock_output)),
+            completed_at: Some(Some(now)),
+            duration_ms: Some(Some(duration_ms)),
+            ..Default::default()
+        };
+        let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+        return Ok(Json(step));
+    }
+
+    // Resolve device context for runtime variable substitution
+    let (device_host, device_name) = {
+        let device = state.provider.get_mop_execution_device(&step.execution_device_id).await.ok();
+        if let Some(ref dev) = device {
+            let session = state.provider.get_session(&dev.session_id).await.ok();
+            (
+                session.as_ref().map(|s| s.host.clone()).unwrap_or_default(),
+                session.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
+            )
+        } else {
+            (String::new(), String::new())
+        }
+    };
+
+    // Handle quick_action execution source (or legacy api_action step type)
+    if step.execution_source == "quick_action" || step.step_type == MopStepType::ApiAction {
+        let action_id = step.quick_action_id.as_deref().unwrap_or(&step.command);
+        let (output, status, variables) = execute_quick_action_step(
+            state.provider.as_ref(),
+            action_id,
+            &step.quick_action_variables,
+            &device_host,
+            &device_name,
+        ).await?;
+
+        let extra = UpdateMopExecutionStep {
+            quick_action_variables: Some(Some(serde_json::to_value(&variables).unwrap_or_default())),
+            ..Default::default()
+        };
+        let step = finalize_step_execution(
+            state.provider.as_ref(), &step_id, status, output, start_time, Some(extra),
+        ).await?;
+        return Ok(Json(step));
+    }
+
+    // Handle script execution source
+    if step.execution_source == "script" {
+        let script_id = step.script_id.as_deref().unwrap_or(&step.command);
+        let (output, status, resolved_args) = execute_script_step(
+            state.provider.as_ref(),
+            script_id,
+            &step.script_args,
+            &device_host,
+            &device_name,
+        ).await?;
+
+        let extra = UpdateMopExecutionStep {
+            script_args: Some(resolved_args),
+            ..Default::default()
+        };
+        let step = finalize_step_execution(
+            state.provider.as_ref(), &step_id, status, output, start_time, Some(extra),
+        ).await?;
+        return Ok(Json(step));
+    }
+
+    // Get the device to find the session_id
+    let device = state.provider.get_mop_execution_device(&step.execution_device_id).await?;
+
+    // Get the session
+    let session = state.provider.get_session(&device.session_id).await?;
+
+    // Get the profile for credentials
+    let profile = state.provider.get_profile(&session.profile_id).await?;
+
+    // Get credential from profile (profile credentials, not session-level)
+    let credential = state
+        .provider
+        .get_profile_credential(&session.profile_id)
+        .await
+        .ok()
+        .flatten();
+
+    // Build SSH config from session + profile + credential
+    let config = match build_ssh_config_from_session(&session, &profile, credential.as_ref()) {
+        Ok(c) => c,
+        Err(e) => {
+            // Update step as failed - missing credentials
+            let update = UpdateMopExecutionStep {
+                status: Some(StepExecutionStatus::Failed),
+                output: Some(Some(e)),
+                completed_at: Some(Some(chrono::Utc::now())),
+                ..Default::default()
+            };
+            let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+            return Ok(Json(step));
+        }
+    };
+
+    // Load auto_commands: session-level override, fallback to profile
+    let auto_commands = if session.auto_commands.is_empty() {
+        profile.auto_commands.clone()
+    } else {
+        session.auto_commands.clone()
+    };
+
+    // Execute single command via shell (opens fresh SSH connection with auto_commands).
+    // AUDIT FIX (REMOTE-003): default to refusing changed host keys.
+    // A future per-execution "expect new host key" toggle would feed in here.
+    let shell_results = ssh::execute_commands_via_shell(
+        config,
+        device.session_id.clone(),
+        session.name.clone(),
+        auto_commands,
+        vec![(step_id.clone(), step.command.clone())],
+        vec![], // no post-commands for single step execution
+        std::time::Duration::from_secs(60),
+        false, // auto_accept_changed_keys
+    ).await;
+
+    // Get the single result
+    let result = shell_results.commands.into_iter().next().unwrap_or(ssh::ShellCommandResult {
+        step_id: step_id.clone(),
+        status: ssh::CommandStatus::Error,
+        output: String::new(),
+        error: Some("No result returned".to_string()),
+        execution_time_ms: 0,
+        transcript: String::new(),
+    });
+
+    let (status, final_output) = map_ssh_result_to_step_status(&result);
+
+    let step = finalize_step_execution(
+        state.provider.as_ref(), &step_id, status, final_output, start_time, None,
+    ).await?;
+
+    Ok(Json(step))
+}
+
+/// Approve a step (mark as passed)
+pub async fn approve_step(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, step_id)): Path<(String, String)>,
+) -> Result<Json<MopExecutionStep>, ApiError> {
+    let step = state.provider.get_mop_execution_step(&step_id).await?;
+    let now = chrono::Utc::now();
+    let duration_ms = step.started_at.map(|start| (now - start).num_milliseconds());
+
+    let update = UpdateMopExecutionStep {
+        status: Some(StepExecutionStatus::Passed),
+        completed_at: Some(Some(now)),
+        duration_ms: Some(duration_ms),
+        ..Default::default()
+    };
+    let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+    Ok(Json(step))
+}
+
+/// Skip a step
+pub async fn skip_step(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, step_id)): Path<(String, String)>,
+) -> Result<Json<MopExecutionStep>, ApiError> {
+    let update = UpdateMopExecutionStep {
+        status: Some(StepExecutionStatus::Skipped),
+        completed_at: Some(Some(chrono::Utc::now())),
+        ..Default::default()
+    };
+    let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+    Ok(Json(step))
+}
+
+/// Update step mock configuration
+#[derive(Debug, Deserialize)]
+pub struct MockConfig {
+    pub mock_enabled: bool,
+    pub mock_output: Option<String>,
+}
+
+pub async fn update_step_mock(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, step_id)): Path<(String, String)>,
+    Json(mock): Json<MockConfig>,
+) -> Result<Json<MopExecutionStep>, ApiError> {
+    let update = UpdateMopExecutionStep {
+        mock_enabled: Some(mock.mock_enabled),
+        mock_output: Some(mock.mock_output),
+        ..Default::default()
+    };
+    let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+    Ok(Json(step))
+}
+
+/// Update step output after execution
+#[derive(Debug, Deserialize)]
+pub struct StepOutputUpdate {
+    pub output: Option<String>,
+    pub status: StepExecutionStatus,
+    pub ai_feedback: Option<String>,
+}
+
+pub async fn update_step_output(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, step_id)): Path<(String, String)>,
+    Json(output): Json<StepOutputUpdate>,
+) -> Result<Json<MopExecutionStep>, ApiError> {
+    let step = state.provider.get_mop_execution_step(&step_id).await?;
+    let now = chrono::Utc::now();
+    let duration_ms = step.started_at.map(|start| (now - start).num_milliseconds());
+
+    let update = UpdateMopExecutionStep {
+        status: Some(output.status),
+        output: Some(output.output),
+        ai_feedback: Some(output.ai_feedback),
+        completed_at: Some(Some(now)),
+        duration_ms: Some(duration_ms),
+        ..Default::default()
+    };
+    let step = state.provider.update_mop_execution_step(&step_id, update).await?;
+    Ok(Json(step))
+}
+
+// === MOP Phase Execution & Snapshot APIs ===
+
+/// Request to execute all steps of a specific type for a device
+#[derive(Debug, Deserialize)]
+pub struct ExecutePhaseRequest {
+    pub step_type: MopStepType, // pre_check, change, post_check
+}
+
+/// Response with phase execution results
+#[derive(Debug, Serialize)]
+pub struct PhaseExecutionResult {
+    pub device_id: String,
+    pub step_type: String,
+    pub steps_executed: usize,
+    pub steps_passed: usize,
+    pub steps_failed: usize,
+    pub snapshot_id: Option<String>,
+    pub combined_output: String,
+}
+
+/// Execute all steps of a phase for a device and capture snapshot
+pub async fn execute_device_phase(
+    State(state): State<Arc<AppState>>,
+    Path((exec_id, device_id)): Path<(String, String)>,
+    Json(req): Json<ExecutePhaseRequest>,
+) -> Result<Json<PhaseExecutionResult>, ApiError> {
+    tracing::info!("execute_device_phase called: exec_id={}, device_id={}, step_type={:?}", exec_id, device_id, req.step_type);
+    // Get the device
+    let device = state.provider.get_mop_execution_device(&device_id).await.map_err(|e| {
+        tracing::error!("execute_device_phase: failed to get device {}: {}", device_id, e);
+        ApiError::from(e)
+    })?;
+
+    // Get all steps for this device
+    let all_steps = state.provider.list_mop_execution_steps(&device_id).await?;
+
+    // Filter to the requested step type
+    let phase_steps: Vec<_> = all_steps.into_iter()
+        .filter(|s| s.step_type == req.step_type)
+        .collect();
+
+    if phase_steps.is_empty() {
+        return Ok(Json(PhaseExecutionResult {
+            device_id: device_id.clone(),
+            step_type: format!("{:?}", req.step_type),
+            steps_executed: 0,
+            steps_passed: 0,
+            steps_failed: 0,
+            snapshot_id: None,
+            combined_output: "No steps to execute".to_string(),
+        }));
+    }
+
+    // Get session info for SSH execution
+    let session = state.provider.get_session(&device.session_id).await?;
+    let profile = state.provider.get_profile(&session.profile_id).await?;
+    let credential = state
+        .provider
+        .get_profile_credential(&session.profile_id)
+        .await
+        .ok()
+        .flatten();
+
+    // Build SSH config from session + profile + credential
+    let config = build_ssh_config_from_session(&session, &profile, credential.as_ref())
+        .map_err(|e| ApiError {
+            error: e,
+            code: "AUTH_MISSING".to_string(),
+        })?;
+
+    // Load auto_commands: session-level override, fallback to profile
+    let mut auto_commands = if session.auto_commands.is_empty() {
+        profile.auto_commands.clone()
+    } else {
+        session.auto_commands.clone()
+    };
+
+    // Auto-enter config mode for change steps (like an engineer would at the CLI)
+    // and auto-save config after changes complete
+    let mut post_commands = Vec::new();
+    if req.step_type == MopStepType::Change {
+        auto_commands.push("configure terminal".to_string());
+        // After change steps: exit config mode, then save config
+        post_commands.push("end".to_string());
+        post_commands.push("write memory".to_string());
+    }
+
+    // Update device status to running
+    let device_update = UpdateMopExecutionDevice {
+        status: Some(DeviceExecutionStatus::Running),
+        started_at: Some(Some(chrono::Utc::now())),
+        ..Default::default()
+    };
+    state.provider.update_mop_execution_device(&device_id, device_update).await?;
+
+    // Handle mocked steps and collect real commands
+    let mut combined_output = String::new();
+    let mut commands_run = Vec::new();
+    let mut steps_passed = 0;
+    let mut steps_failed = 0;
+
+    // Process mocked steps first
+    for step in &phase_steps {
+        if step.mock_enabled {
+            let now = chrono::Utc::now();
+            let mock_out = step.mock_output.clone().unwrap_or_else(|| "[MOCKED]".to_string());
+            let update = UpdateMopExecutionStep {
+                status: Some(StepExecutionStatus::Mocked),
+                output: Some(Some(mock_out.clone())),
+                started_at: Some(Some(now)),
+                completed_at: Some(Some(now)),
+                duration_ms: Some(Some(0)),
+                ..Default::default()
+            };
+            state.provider.update_mop_execution_step(&step.id, update).await?;
+            steps_passed += 1;
+            combined_output.push_str(&format!("\n=== {} ===\n[MOCKED]\n{}\n",
+                step.description.as_deref().unwrap_or("Command"), mock_out));
+            commands_run.push(step.command.clone());
+        }
+    }
+
+    // Separate non-mocked steps by execution source
+    let non_mocked: Vec<_> = phase_steps.iter().filter(|s| !s.mock_enabled).collect();
+    let cli_commands: Vec<(String, String)> = non_mocked.iter()
+        .filter(|s| s.execution_source != "quick_action" && s.execution_source != "script")
+        .map(|s| (s.id.clone(), s.command.clone()))
+        .collect();
+    let qa_steps: Vec<_> = non_mocked.iter()
+        .filter(|s| s.execution_source == "quick_action")
+        .collect();
+    let script_steps: Vec<_> = non_mocked.iter()
+        .filter(|s| s.execution_source == "script")
+        .collect();
+
+    // Device context for runtime variable resolution
+    let device_host = session.host.clone();
+    let device_name = session.name.clone();
+
+    // Execute Quick Action steps
+    for step in &qa_steps {
+        let step_start = chrono::Utc::now();
+        let update = UpdateMopExecutionStep {
+            status: Some(StepExecutionStatus::Running),
+            started_at: Some(Some(step_start)),
+            ..Default::default()
+        };
+        state.provider.update_mop_execution_step(&step.id, update).await?;
+
+        let action_id = step.quick_action_id.as_deref().unwrap_or(&step.command);
+        let (output, status, resolved_vars) = match execute_quick_action_step(
+            state.provider.as_ref(),
+            action_id,
+            &step.quick_action_variables,
+            &device_host,
+            &device_name,
+        ).await {
+            Ok(result) => result,
+            Err(e) => (format!("Quick action error: {}", e.error), StepExecutionStatus::Failed, std::collections::HashMap::new()),
+        };
+
+        let extra = UpdateMopExecutionStep {
+            quick_action_variables: Some(Some(serde_json::to_value(&resolved_vars).unwrap_or_default())),
+            ..Default::default()
+        };
+        finalize_step_execution(
+            state.provider.as_ref(), &step.id, status.clone(), output.clone(), step_start, Some(extra),
+        ).await?;
+        match status {
+            StepExecutionStatus::Passed => steps_passed += 1,
+            StepExecutionStatus::Failed => steps_failed += 1,
+            _ => {}
+        }
+        combined_output.push_str(&format!("\n=== {} [Quick Action] ===\n{}\n",
+            step.description.as_deref().unwrap_or("Quick Action"), output));
+        commands_run.push(step.command.clone());
+    }
+
+    // Execute Script steps
+    for step in &script_steps {
+        let step_start = chrono::Utc::now();
+        let update = UpdateMopExecutionStep {
+            status: Some(StepExecutionStatus::Running),
+            started_at: Some(Some(step_start)),
+            ..Default::default()
+        };
+        state.provider.update_mop_execution_step(&step.id, update).await?;
+
+        let script_id = step.script_id.as_deref().unwrap_or(&step.command);
+        let (output, status, resolved_args) = match execute_script_step(
+            state.provider.as_ref(),
+            script_id,
+            &step.script_args,
+            &device_host,
+            &device_name,
+        ).await {
+            Ok(result) => result,
+            Err(e) => (format!("Script error: {}", e.error), StepExecutionStatus::Failed, None),
+        };
+
+        let extra = UpdateMopExecutionStep {
+            script_args: Some(resolved_args),
+            ..Default::default()
+        };
+        finalize_step_execution(
+            state.provider.as_ref(), &step.id, status.clone(), output.clone(), step_start, Some(extra),
+        ).await?;
+        match status {
+            StepExecutionStatus::Passed => steps_passed += 1,
+            StepExecutionStatus::Failed => steps_failed += 1,
+            _ => {}
+        }
+        combined_output.push_str(&format!("\n=== {} [Script] ===\n{}\n",
+            step.description.as_deref().unwrap_or("Script"), output));
+        commands_run.push(step.command.clone());
+    }
+
+    // Execute CLI steps via SSH shell session (batched)
+    if !cli_commands.is_empty() {
+        for (step_id, _) in &cli_commands {
+            let update = UpdateMopExecutionStep {
+                status: Some(StepExecutionStatus::Running),
+                started_at: Some(Some(chrono::Utc::now())),
+                ..Default::default()
+            };
+            state.provider.update_mop_execution_step(step_id, update).await?;
+        }
+
+        // AUDIT FIX (REMOTE-003): default-refuse changed host keys.
+        let shell_results = ssh::execute_commands_via_shell(
+            config,
+            device.session_id.clone(),
+            session.name.clone(),
+            auto_commands,
+            cli_commands.clone(),
+            post_commands,
+            std::time::Duration::from_secs(60),
+            false, // auto_accept_changed_keys
+        ).await;
+
+        for result in &shell_results.commands {
+            let (status, output) = map_ssh_result_to_step_status(result);
+
+            let now = chrono::Utc::now();
+            let update = UpdateMopExecutionStep {
+                status: Some(status.clone()),
+                output: Some(Some(output)),
+                completed_at: Some(Some(now)),
+                duration_ms: Some(Some(result.execution_time_ms as i64)),
+                ..Default::default()
+            };
+            state.provider.update_mop_execution_step(&result.step_id, update).await?;
+
+            match status {
+                StepExecutionStatus::Passed => steps_passed += 1,
+                StepExecutionStatus::Failed => steps_failed += 1,
+                _ => {}
+            }
+
+            let cmd_text = cli_commands.iter().find(|(id, _)| id == &result.step_id)
+                .map(|(_, cmd)| cmd.as_str()).unwrap_or("");
+            commands_run.push(cmd_text.to_string());
+        }
+        combined_output.push_str(&shell_results.full_transcript);
+    }
+
+    // Update device status based on results
+    let device_status = if steps_failed > 0 {
+        DeviceExecutionStatus::Failed
+    } else {
+        DeviceExecutionStatus::Complete
+    };
+    let device_update = UpdateMopExecutionDevice {
+        status: Some(device_status),
+        completed_at: Some(Some(chrono::Utc::now())),
+        ..Default::default()
+    };
+    state.provider.update_mop_execution_device(&device_id, device_update).await?;
+
+    // Create snapshot for pre_check or post_check phases
+    let snapshot_id = if req.step_type == MopStepType::PreCheck || req.step_type == MopStepType::PostCheck {
+        let snapshot_type = if req.step_type == MopStepType::PreCheck { "pre" } else { "post" };
+        let snapshot = state.provider.create_snapshot(NewSnapshot {
+            change_id: exec_id.clone(), // Use execution ID as the reference
+            snapshot_type: snapshot_type.to_string(),
+            commands: commands_run,
+            output: combined_output.clone(),
+        }).await?;
+
+        // Update device with snapshot reference
+        let snapshot_update = if req.step_type == MopStepType::PreCheck {
+            UpdateMopExecutionDevice {
+                pre_snapshot_id: Some(Some(snapshot.id.clone())),
+                ..Default::default()
+            }
+        } else {
+            UpdateMopExecutionDevice {
+                post_snapshot_id: Some(Some(snapshot.id.clone())),
+                ..Default::default()
+            }
+        };
+        state.provider.update_mop_execution_device(&device_id, snapshot_update).await?;
+
+        Some(snapshot.id)
+    } else {
+        None
+    };
+
+    Ok(Json(PhaseExecutionResult {
+        device_id,
+        step_type: format!("{:?}", req.step_type),
+        steps_executed: phase_steps.len(),
+        steps_passed,
+        steps_failed,
+        snapshot_id,
+        combined_output,
+    }))
+}
+
+/// Diff response between pre and post snapshots
+#[derive(Debug, Serialize)]
+pub struct SnapshotDiff {
+    pub device_id: String,
+    pub pre_snapshot_id: Option<String>,
+    pub post_snapshot_id: Option<String>,
+    pub pre_output: Option<String>,
+    pub post_output: Option<String>,
+    pub has_changes: bool,
+    pub diff_summary: String,
+}
+
+/// Get diff between pre and post snapshots for a device
+pub async fn get_device_snapshot_diff(
+    State(state): State<Arc<AppState>>,
+    Path((_exec_id, device_id)): Path<(String, String)>,
+) -> Result<Json<SnapshotDiff>, ApiError> {
+    let device = state.provider.get_mop_execution_device(&device_id).await?;
+
+    let pre_output = if let Some(ref pre_id) = device.pre_snapshot_id {
+        Some(state.provider.get_snapshot(pre_id).await?.output)
+    } else {
+        None
+    };
+
+    let post_output = if let Some(ref post_id) = device.post_snapshot_id {
+        Some(state.provider.get_snapshot(post_id).await?.output)
+    } else {
+        None
+    };
+
+    // Simple diff check - compare outputs
+    let has_changes = match (&pre_output, &post_output) {
+        (Some(pre), Some(post)) => pre != post,
+        _ => false,
+    };
+
+    // Generate a simple diff summary
+    let diff_summary = match (&pre_output, &post_output) {
+        (Some(pre), Some(post)) => {
+            if pre == post {
+                "No changes detected between pre and post checks.".to_string()
+            } else {
+                // Count line differences
+                let pre_lines: Vec<_> = pre.lines().collect();
+                let post_lines: Vec<_> = post.lines().collect();
+                let added = post_lines.iter().filter(|l| !pre_lines.contains(l)).count();
+                let removed = pre_lines.iter().filter(|l| !post_lines.contains(l)).count();
+                format!("Changes detected: {} lines added, {} lines removed", added, removed)
+            }
+        }
+        (None, Some(_)) => "Post-check captured, no pre-check snapshot available.".to_string(),
+        (Some(_), None) => "Pre-check captured, no post-check snapshot yet.".to_string(),
+        (None, None) => "No snapshots captured yet.".to_string(),
+    };
+
+    Ok(Json(SnapshotDiff {
+        device_id,
+        pre_snapshot_id: device.pre_snapshot_id,
+        post_snapshot_id: device.post_snapshot_id,
+        pre_output,
+        post_output,
+        has_changes,
+        diff_summary,
+    }))
+}
+
+/// AI analysis request for MOP execution
+#[derive(Debug, Deserialize)]
+pub struct MopAiAnalysisRequest {
+    pub include_outputs: bool,
+    pub include_diff: bool,
+}
+
+/// AI analysis response
+#[derive(Debug, Serialize)]
+pub struct MopAiAnalysisResponse {
+    pub execution_id: String,
+    pub analysis: String,
+    pub recommendations: Vec<String>,
+    pub risk_level: String,
+}
+
+/// Generate AI analysis for a MOP execution
+pub async fn analyze_mop_execution(
+    State(state): State<Arc<AppState>>,
+    Path(exec_id): Path<String>,
+    Json(req): Json<MopAiAnalysisRequest>,
+) -> Result<Json<MopAiAnalysisResponse>, ApiError> {
+    let execution = state.provider.get_mop_execution(&exec_id).await?;
+    let devices = state.provider.list_mop_execution_devices(&exec_id).await?;
+
+    let mut context = format!("MOP Execution: {}\nStatus: {:?}\nDevices: {}\n\n",
+        execution.name,
+        execution.status,
+        devices.len()
+    );
+
+    // Gather device information
+    for device in &devices {
+        let session = state.provider.get_session(&device.session_id).await.ok();
+        let session_name = session.map(|s| s.name).unwrap_or_else(|| device.session_id.clone());
+
+        context.push_str(&format!("Device: {} (Status: {:?})\n", session_name, device.status));
+
+        if req.include_outputs {
+            let steps = state.provider.list_mop_execution_steps(&device.id).await?;
+            for step in steps {
+                context.push_str(&format!("  Step: {} - {:?}\n", step.command, step.status));
+                if let Some(ref out) = step.output {
+                    let truncated = if out.len() > 500 { &out[..500] } else { out };
+                    context.push_str(&format!("    Output: {}\n", truncated));
+                }
+            }
+        }
+
+        if req.include_diff {
+            if let (Some(ref pre_id), Some(ref post_id)) = (&device.pre_snapshot_id, &device.post_snapshot_id) {
+                if let (Ok(pre), Ok(post)) = (
+                    state.provider.get_snapshot(pre_id).await,
+                    state.provider.get_snapshot(post_id).await
+                ) {
+                    let pre_lines: Vec<_> = pre.output.lines().collect();
+                    let post_lines: Vec<_> = post.output.lines().collect();
+                    let changes: Vec<_> = post_lines.iter()
+                        .filter(|l| !pre_lines.contains(l))
+                        .take(10)
+                        .collect();
+                    if !changes.is_empty() {
+                        context.push_str("  Changes:\n");
+                        for line in changes {
+                            context.push_str(&format!("    + {}\n", line));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Determine risk level based on status
+    let risk_level = match execution.status {
+        ExecutionStatus::Complete => "LOW",
+        ExecutionStatus::Failed => "HIGH",
+        ExecutionStatus::Aborted => "MEDIUM",
+        _ => "UNKNOWN",
+    }.to_string();
+
+    // Generate basic recommendations
+    let mut recommendations = Vec::new();
+    for device in &devices {
+        if device.status == DeviceExecutionStatus::Failed {
+            let session = state.provider.get_session(&device.session_id).await.ok();
+            let name = session.map(|s| s.name).unwrap_or_else(|| device.session_id.clone());
+            recommendations.push(format!("Review failed device: {}", name));
+            if device.error_message.is_some() {
+                recommendations.push(format!("Check error on {}: {}", name, device.error_message.as_ref().unwrap()));
+            }
+        }
+    }
+
+    if recommendations.is_empty() {
+        recommendations.push("All devices completed successfully.".to_string());
+    }
+
+    // For now, generate a simple analysis (could integrate with AI provider later)
+    let analysis = format!(
+        "MOP execution '{}' completed with status {:?}. {} of {} devices succeeded. {}",
+        execution.name,
+        execution.status,
+        devices.iter().filter(|d| d.status == DeviceExecutionStatus::Complete).count(),
+        devices.len(),
+        if risk_level == "HIGH" { "Manual review recommended." } else { "No critical issues detected." }
+    );
+
+    // Update execution with AI analysis
+    let update = UpdateMopExecution {
+        ai_analysis: Some(Some(analysis.clone())),
+        ..Default::default()
+    };
+    state.provider.update_mop_execution(&exec_id, update).await?;
+
+    Ok(Json(MopAiAnalysisResponse {
+        execution_id: exec_id,
+        analysis,
+        recommendations,
+        risk_level,
+    }))
+}
+
+// === SNMP Endpoints ===
+
+/// SNMP GET request body
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpGetRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub community: String,
+    pub oids: Vec<String>,
+}
+
+/// SNMP WALK request body
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpWalkRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub community: String,
+    pub root_oid: String,
+}
+
+/// SNMP try-communities request body
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpTryCommunityRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub profile_id: String,
+}
+
+/// SNMP GET response (wraps SnmpValueEntry list)
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpGetApiResponse {
+    pub values: Vec<crate::snmp::SnmpValueEntry>,
+}
+
+/// SNMP WALK response
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpWalkApiResponse {
+    pub entries: Vec<crate::snmp::SnmpValueEntry>,
+    pub root_oid: String,
+}
+
+/// SNMP try-communities response
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpTryCommunityApiResponse {
+    pub community: String,
+    pub sys_name: String,
+}
+
+/// Map SnmpError to ApiError with appropriate HTTP status codes
+fn snmp_error_to_api_error(err: crate::snmp::SnmpError) -> ApiError {
+    use crate::snmp::SnmpError;
+    match &err {
+        SnmpError::Timeout(_) => ApiError {
+            error: err.to_string(),
+            code: "SNMP_TIMEOUT".to_string(),
+        },
+        SnmpError::ConnectionFailed { .. } => ApiError {
+            error: err.to_string(),
+            code: "SNMP_CONNECTION_FAILED".to_string(),
+        },
+        SnmpError::AuthError => ApiError {
+            error: "SNMP authentication failed".to_string(),
+            code: "SNMP_AUTH_ERROR".to_string(),
+        },
+        SnmpError::InvalidOid(_) => ApiError {
+            error: err.to_string(),
+            code: "VALIDATION".to_string(),
+        },
+        SnmpError::NoSuchObject(oid) => ApiError {
+            error: format!("No such object at OID {}", oid),
+            code: "NOT_FOUND".to_string(),
+        },
+        SnmpError::NoSuchInstance(oid) => ApiError {
+            error: format!("No such instance at OID {}", oid),
+            code: "NOT_FOUND".to_string(),
+        },
+        SnmpError::InterfaceNotFound(msg) => ApiError {
+            error: msg.clone(),
+            code: "INTERFACE_NOT_FOUND".to_string(),
+        },
+        _ => ApiError {
+            error: err.to_string(),
+            code: "SNMP_ERROR".to_string(),
+        },
+    }
+}
+
+/// Custom IntoResponse for SNMP ApiError that maps codes to HTTP status
+impl ApiError {
+    fn snmp_status(&self) -> StatusCode {
+        match self.code.as_str() {
+            "SNMP_TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
+            "SNMP_CONNECTION_FAILED" => StatusCode::BAD_GATEWAY,
+            "SNMP_AUTH_ERROR" => StatusCode::UNAUTHORIZED,
+            "INTERFACE_NOT_FOUND" => StatusCode::UNPROCESSABLE_ENTITY,
+            _ => match self.code.as_str() {
+                "NOT_FOUND" => StatusCode::NOT_FOUND,
+                "VALIDATION" => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
+        }
+    }
+}
+
+/// SNMP GET endpoint - query one or more OIDs from a device
+///
+/// POST /api/snmp/get
+pub async fn snmp_get(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<SnmpGetRequest>,
+) -> Result<Json<SnmpGetApiResponse>, Response> {
+    let port = req.port.unwrap_or(161);
+
+    tracing::info!("SNMP GET {}:{} OIDs: {:?}", req.host, port, req.oids);
+
+    let oid_refs: Vec<&str> = req.oids.iter().map(|s| s.as_str()).collect();
+    let values = crate::snmp::snmp_get(&req.host, port, &req.community, &oid_refs)
+        .await
+        .map_err(|e| {
+            let api_err = snmp_error_to_api_error(e);
+            let status = api_err.snmp_status();
+            (status, Json(api_err)).into_response()
+        })?;
+
+    Ok(Json(SnmpGetApiResponse { values }))
+}
+
+/// SNMP WALK endpoint - walk a subtree on a device
+///
+/// POST /api/snmp/walk
+pub async fn snmp_walk(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<SnmpWalkRequest>,
+) -> Result<Json<SnmpWalkApiResponse>, Response> {
+    let port = req.port.unwrap_or(161);
+
+    tracing::info!("SNMP WALK {}:{} root: {}", req.host, port, req.root_oid);
+
+    let walk_results = crate::snmp::snmp_walk(&req.host, port, &req.community, &req.root_oid)
+        .await
+        .map_err(|e| {
+            let api_err = snmp_error_to_api_error(e);
+            let status = api_err.snmp_status();
+            (status, Json(api_err)).into_response()
+        })?;
+
+    // Convert (String, SnmpValue) tuples to SnmpValueEntry structs
+    let entries: Vec<crate::snmp::SnmpValueEntry> = walk_results
+        .into_iter()
+        .map(|(oid, value)| {
+            let value_type = match &value {
+                crate::snmp::SnmpValue::Integer(_) => "Integer",
+                crate::snmp::SnmpValue::String(_) => "OctetString",
+                crate::snmp::SnmpValue::OctetString(_) => "OctetString",
+                crate::snmp::SnmpValue::Counter32(_) => "Counter32",
+                crate::snmp::SnmpValue::Counter64(_) => "Counter64",
+                crate::snmp::SnmpValue::Gauge32(_) => "Gauge32",
+                crate::snmp::SnmpValue::TimeTicks(_) => "TimeTicks",
+                crate::snmp::SnmpValue::IpAddress(_) => "IpAddress",
+                crate::snmp::SnmpValue::ObjectId(_) => "ObjectIdentifier",
+                crate::snmp::SnmpValue::Boolean(_) => "Boolean",
+                crate::snmp::SnmpValue::Null => "Null",
+                crate::snmp::SnmpValue::EndOfMibView => "EndOfMibView",
+                crate::snmp::SnmpValue::NoSuchObject => "NoSuchObject",
+                crate::snmp::SnmpValue::NoSuchInstance => "NoSuchInstance",
+                crate::snmp::SnmpValue::Unknown(_) => "Unknown",
+            }
+            .to_string();
+            crate::snmp::SnmpValueEntry {
+                oid,
+                value,
+                value_type,
+            }
+        })
+        .collect();
+
+    Ok(Json(SnmpWalkApiResponse {
+        entries,
+        root_oid: req.root_oid,
+    }))
+}
+
+/// SNMP try-communities endpoint - find working community string from profile vault
+///
+/// POST /api/snmp/try-communities
+pub async fn snmp_try_communities(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SnmpTryCommunityRequest>,
+) -> Result<Json<SnmpTryCommunityApiResponse>, Response> {
+    let port = req.port.unwrap_or(161);
+
+    tracing::info!("SNMP try-communities {}:{} profile: {}", req.host, port, req.profile_id);
+
+    // Resolve SNMP communities with fallback: try requested profile first,
+    // then scan all profiles for one with SNMP communities configured.
+    let mut communities: Vec<String> = Vec::new();
+
+    // Level 1: Try the requested profile
+    if let Ok(Some(cred)) = state.provider.get_profile_credential(&req.profile_id).await {
+        if let Some(ref comms) = cred.snmp_communities {
+            if !comms.is_empty() {
+                communities = comms.clone();
+            }
+        }
+    }
+
+    // Level 2: Scan all profiles for one with SNMP communities
+    if communities.is_empty() {
+        tracing::debug!("Profile {} has no SNMP communities, scanning all profiles", req.profile_id);
+        if let Ok(all_profiles) = state.provider.list_profiles().await {
+            for profile in &all_profiles {
+                if profile.id == req.profile_id {
+                    continue;
+                }
+                if let Ok(Some(cred)) = state.provider.get_profile_credential(&profile.id).await {
+                    if let Some(ref comms) = cred.snmp_communities {
+                        if !comms.is_empty() {
+                            communities = comms.clone();
+                            tracing::info!("Found SNMP communities in profile {} ({})", profile.name, profile.id);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if communities.is_empty() {
+        let api_err = ApiError {
+            error: "No SNMP communities found in any profile".to_string(),
+            code: "VALIDATION".to_string(),
+        };
+        return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
+    }
+
+    let result = crate::snmp::try_communities(&req.host, port, &communities)
+        .await
+        .map_err(|e| {
+            let api_err = snmp_error_to_api_error(e);
+            let status = api_err.snmp_status();
+            (status, Json(api_err)).into_response()
+        })?;
+
+    Ok(Json(SnmpTryCommunityApiResponse {
+        community: result.community,
+        sys_name: result.sys_name,
+    }))
+}
+
+// === SNMP Interface Stats Endpoints ===
+
+/// SNMP interface stats request body (with explicit community)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpInterfaceStatsRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub community: String,
+    pub interface_name: String,
+}
+
+/// SNMP interface stats request body (using profile vault for community)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpTryInterfaceStatsRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub profile_id: String,
+    pub interface_name: String,
+}
+
+/// SNMP interface stats response
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpInterfaceStatsResponse {
+    pub if_index: u64,
+    pub if_descr: String,
+    pub if_alias: String,
+    pub oper_status: u8,
+    pub oper_status_text: String,
+    pub admin_status: u8,
+    pub admin_status_text: String,
+    pub if_type: u64,
+    pub if_type_text: String,
+    pub mtu: u64,
+    pub phys_address: String,
+    pub last_change: u64,
+    pub speed_mbps: u64,
+    pub in_octets: u64,
+    pub out_octets: u64,
+    pub in_errors: u64,
+    pub out_errors: u64,
+    pub in_discards: u64,
+    pub out_discards: u64,
+    pub in_ucast_pkts: u64,
+    pub out_ucast_pkts: u64,
+    pub in_multicast_pkts: u64,
+    pub out_multicast_pkts: u64,
+    pub in_broadcast_pkts: u64,
+    pub out_broadcast_pkts: u64,
+    pub hc_counters: bool,
+}
+
+/// Map IANA ifType integer to readable name
+fn if_type_to_string(if_type: u64) -> String {
+    match if_type {
+        1 => "other".to_string(),
+        6 => "ethernetCsmacd".to_string(),
+        24 => "softwareLoopback".to_string(),
+        53 => "propVirtual".to_string(),
+        131 => "tunnel".to_string(),
+        135 => "l2vlan".to_string(),
+        136 => "l3ipvlan".to_string(),
+        161 => "ieee8023adLag".to_string(),
+        n => format!("ifType({})", n),
+    }
+}
+
+/// Convert InterfaceStats to API response with status text
+fn interface_stats_to_response(stats: crate::snmp::InterfaceStats) -> SnmpInterfaceStatsResponse {
+    let oper_status_text = match stats.oper_status {
+        1 => "up".to_string(),
+        2 => "down".to_string(),
+        3 => "testing".to_string(),
+        n => format!("unknown({})", n),
+    };
+    let admin_status_text = match stats.admin_status {
+        1 => "up".to_string(),
+        2 => "down".to_string(),
+        3 => "testing".to_string(),
+        n => format!("unknown({})", n),
+    };
+    let if_type_text = if_type_to_string(stats.if_type);
+    SnmpInterfaceStatsResponse {
+        if_index: stats.if_index,
+        if_descr: stats.if_descr,
+        if_alias: stats.if_alias,
+        oper_status: stats.oper_status,
+        oper_status_text,
+        admin_status: stats.admin_status,
+        admin_status_text,
+        if_type: stats.if_type,
+        if_type_text,
+        mtu: stats.mtu,
+        phys_address: stats.phys_address,
+        last_change: stats.last_change,
+        speed_mbps: stats.speed_mbps,
+        in_octets: stats.in_octets,
+        out_octets: stats.out_octets,
+        in_errors: stats.in_errors,
+        out_errors: stats.out_errors,
+        in_discards: stats.in_discards,
+        out_discards: stats.out_discards,
+        in_ucast_pkts: stats.in_ucast_pkts,
+        out_ucast_pkts: stats.out_ucast_pkts,
+        in_multicast_pkts: stats.in_multicast_pkts,
+        out_multicast_pkts: stats.out_multicast_pkts,
+        in_broadcast_pkts: stats.in_broadcast_pkts,
+        out_broadcast_pkts: stats.out_broadcast_pkts,
+        hc_counters: stats.hc_counters,
+    }
+}
+
+/// SNMP interface stats endpoint - get all IF-MIB counters for a named interface
+///
+/// POST /api/snmp/interface-stats
+pub async fn snmp_interface_stats(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<SnmpInterfaceStatsRequest>,
+) -> Result<Json<SnmpInterfaceStatsResponse>, Response> {
+    let port = req.port.unwrap_or(161);
+
+    tracing::info!(
+        "SNMP interface-stats {}:{} interface: {}",
+        req.host, port, req.interface_name
+    );
+
+    let stats = crate::snmp::snmp_interface_stats(&req.host, port, &req.community, &req.interface_name)
+        .await
+        .map_err(|e| {
+            let api_err = snmp_error_to_api_error(e);
+            let status = api_err.snmp_status();
+            (status, Json(api_err)).into_response()
+        })?;
+
+    Ok(Json(interface_stats_to_response(stats)))
+}
+
+/// SNMP try-interface-stats endpoint - find working community from profile vault,
+/// then get all IF-MIB counters for a named interface
+///
+/// POST /api/snmp/try-interface-stats
+pub async fn snmp_try_interface_stats(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SnmpTryInterfaceStatsRequest>,
+) -> Result<Json<SnmpInterfaceStatsResponse>, Response> {
+    let port = req.port.unwrap_or(161);
+
+    tracing::info!(
+        "SNMP try-interface-stats {}:{} profile: {} interface: {}",
+        req.host, port, req.profile_id, req.interface_name
+    );
+
+    // Resolve SNMP communities with fallback: try requested profile first,
+    // then scan all profiles for one with SNMP communities configured.
+    let mut communities: Vec<String> = Vec::new();
+
+    // Level 1: Try the requested profile
+    if let Ok(Some(cred)) = state.provider.get_profile_credential(&req.profile_id).await {
+        if let Some(ref comms) = cred.snmp_communities {
+            if !comms.is_empty() {
+                communities = comms.clone();
+                tracing::debug!("Using SNMP communities from requested profile {}", req.profile_id);
+            }
+        }
+    }
+
+    // Level 2: Scan all profiles for one with SNMP communities
+    if communities.is_empty() {
+        tracing::debug!("Profile {} has no SNMP communities, scanning all profiles", req.profile_id);
+        if let Ok(all_profiles) = state.provider.list_profiles().await {
+            for profile in &all_profiles {
+                if profile.id == req.profile_id {
+                    continue; // Already tried
+                }
+                if let Ok(Some(cred)) = state.provider.get_profile_credential(&profile.id).await {
+                    if let Some(ref comms) = cred.snmp_communities {
+                        if !comms.is_empty() {
+                            communities = comms.clone();
+                            tracing::info!("Found SNMP communities in profile {} ({})", profile.name, profile.id);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if communities.is_empty() {
+        let api_err = ApiError {
+            error: "No SNMP communities found in any profile".to_string(),
+            code: "VALIDATION".to_string(),
+        };
+        return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
+    }
+
+    // Try each community with snmp_interface_stats, return first success
+    tracing::info!(
+        "Trying {} SNMP communit(ies) for {}:{} interface: {}",
+        communities.len(), req.host, port, req.interface_name
+    );
+    let mut last_error: Option<crate::snmp::SnmpError> = None;
+    for community in &communities {
+        match crate::snmp::snmp_interface_stats(&req.host, port, community, &req.interface_name).await {
+            Ok(stats) => {
+                tracing::info!("SNMP interface stats success for {}:{}", req.host, port);
+                return Ok(Json(interface_stats_to_response(stats)));
+            }
+            Err(crate::snmp::SnmpError::Timeout(_)) => {
+                tracing::warn!(
+                    "SNMP community timed out for {}:{}, trying next",
+                    req.host, port
+                );
+                last_error = Some(crate::snmp::SnmpError::Timeout(5));
+                continue;
+            }
+            Err(crate::snmp::SnmpError::AuthError) => {
+                tracing::warn!(
+                    "SNMP community rejected by {}:{}, trying next",
+                    req.host, port
+                );
+                last_error = Some(crate::snmp::SnmpError::AuthError);
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "SNMP interface stats error for {}:{} interface {}: {}",
+                    req.host, port, req.interface_name, e
+                );
+                // For non-auth/timeout errors (like InterfaceNotFound), return immediately
+                let api_err = snmp_error_to_api_error(e);
+                let status = api_err.snmp_status();
+                return Err((status, Json(api_err)).into_response());
+            }
+        }
+    }
+
+    // No community worked
+    let err = last_error.unwrap_or(crate::snmp::SnmpError::AuthError);
+    tracing::warn!(
+        "All SNMP communities failed for {}:{} interface {}: {:?}",
+        req.host, port, req.interface_name, err
+    );
+    let api_err = match &err {
+        crate::snmp::SnmpError::AuthError => ApiError {
+            error: "No SNMP community string succeeded for this device".to_string(),
+            code: "SNMP_AUTH_ERROR".to_string(),
+        },
+        _ => snmp_error_to_api_error(err),
+    };
+    let status = api_err.snmp_status();
+    Err((status, Json(api_err)).into_response())
+}
+
+// === Task API Handlers (Phase 02) ===
+
+/// Query parameters for listing tasks
+#[derive(Debug, Deserialize)]
+pub struct ListTasksParams {
+    pub status: Option<String>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+}
+
+/// Response for listing tasks
+#[derive(Debug, Serialize)]
+pub struct ListTasksResponse {
+    pub tasks: Vec<crate::tasks::AgentTask>,
+    pub running_count: usize,
+    pub max_concurrent: usize,
+}
+
+/// Create a new task
+pub async fn create_task(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::tasks::CreateTaskRequest>,
+) -> Result<Json<crate::tasks::AgentTask>, (StatusCode, String)> {
+    let task = state
+        .task_store
+        .create_task(req)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Spawn for background execution
+    if let Err(e) = state.task_executor.spawn_task(task.id.clone()).await {
+        tracing::warn!("Failed to spawn task {}: {}", task.id, e);
+        // Task is created but not running - client can retry
+    }
+
+    Ok(Json(task))
+}
+
+/// List tasks with optional status filter
+pub async fn list_tasks(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListTasksParams>,
+) -> Result<Json<ListTasksResponse>, (StatusCode, String)> {
+    let status = params
+        .status
+        .and_then(|s| crate::tasks::TaskStatus::from_str(&s));
+    let limit = params.limit.unwrap_or(50).min(100);
+    let offset = params.offset.unwrap_or(0);
+
+    let tasks = state
+        .task_store
+        .list_tasks(status, limit, offset)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let running_count = state.task_registry.running_count().await;
+    let max_concurrent = state.task_registry.max_concurrent();
+
+    Ok(Json(ListTasksResponse {
+        tasks,
+        running_count,
+        max_concurrent,
+    }))
+}
+
+/// Get a single task
+pub async fn get_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::tasks::AgentTask>, (StatusCode, String)> {
+    let task = state.task_store.get_task(&id).await.map_err(|e| match e {
+        crate::tasks::TaskStoreError::NotFound(_) => {
+            (StatusCode::NOT_FOUND, "Task not found".to_string())
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    })?;
+
+    Ok(Json(task))
+}
+
+/// Cancel/delete a task
+pub async fn delete_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Cancel if running
+    let _ = state.task_executor.cancel_task(&id).await;
+
+    // Delete from store
+    state.task_store.delete_task(&id).await.map_err(|e| match e {
+        crate::tasks::TaskStoreError::NotFound(_) => {
+            (StatusCode::NOT_FOUND, "Task not found".to_string())
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === SMTP Configuration Endpoints ===
+
+/// SMTP configuration response (without password)
+#[derive(Debug, Serialize)]
+pub struct SmtpConfigResponse {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub use_tls: bool,
+    pub from_email: String,
+    pub from_name: Option<String>,
+    pub has_password: bool,
+}
+
+/// Request to save SMTP configuration
+#[derive(Deserialize)]
+pub struct SaveSmtpConfigRequest {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: Option<String>,
+    pub use_tls: bool,
+    pub from_email: String,
+    pub from_name: Option<String>,
+}
+
+impl std::fmt::Debug for SaveSmtpConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveSmtpConfigRequest")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("use_tls", &self.use_tls)
+            .field("from_email", &self.from_email)
+            .field("from_name", &self.from_name)
+            .finish()
+    }
+}
+
+/// Request to test SMTP connection
+#[derive(Debug, Deserialize)]
+pub struct TestSmtpRequest {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub use_tls: bool,
+    pub from_email: String,
+    pub from_name: Option<String>,
+}
+
+/// Response from SMTP test
+#[derive(Debug, Serialize)]
+pub struct TestSmtpResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Get SMTP configuration
+pub async fn get_smtp_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Option<SmtpConfigResponse>>, ApiError> {
+    // Get pool from provider (LocalDataProvider exposes pool via get_pool method)
+    let pool = state.provider.get_pool();
+
+    // Query smtp_config table
+    let row: Option<(String, i32, String, i32, String, Option<String>)> = sqlx::query_as(
+        "SELECT host, port, username, use_tls, from_email, from_name FROM smtp_config WHERE id = 'default'"
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Database error: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    match row {
+        Some((host, port, username, use_tls, from_email, from_name)) => {
+            // Check if password exists in vault
+            let has_password = state.provider.get_api_key("smtp_password").await?.is_some();
+
+            Ok(Json(Some(SmtpConfigResponse {
+                host,
+                port: port as u16,
+                username,
+                use_tls: use_tls != 0,
+                from_email,
+                from_name,
+                has_password,
+            })))
+        }
+        None => Ok(Json(None)),
+    }
+}
+
+/// Save SMTP configuration
+pub async fn save_smtp_config(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveSmtpConfigRequest>,
+) -> Result<StatusCode, ApiError> {
+    // Validate required fields
+    if req.host.is_empty() {
+        return Err(ApiError {
+            error: "SMTP host is required".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+    if req.username.is_empty() {
+        return Err(ApiError {
+            error: "SMTP username is required".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+    if req.from_email.is_empty() {
+        return Err(ApiError {
+            error: "From email is required".to_string(),
+            code: "VALIDATION".to_string(),
+        });
+    }
+
+    let pool = state.provider.get_pool();
+
+    // Upsert smtp_config (SQLite UPSERT)
+    sqlx::query(
+        r#"INSERT INTO smtp_config (id, host, port, username, use_tls, from_email, from_name, updated_at)
+           VALUES ('default', ?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET
+               host = excluded.host,
+               port = excluded.port,
+               username = excluded.username,
+               use_tls = excluded.use_tls,
+               from_email = excluded.from_email,
+               from_name = excluded.from_name,
+               updated_at = datetime('now')"#
+    )
+    .bind(&req.host)
+    .bind(req.port as i32)
+    .bind(&req.username)
+    .bind(if req.use_tls { 1 } else { 0 })
+    .bind(&req.from_email)
+    .bind(&req.from_name)
+    .execute(pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Database error: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    // Store password in vault if provided
+    if let Some(password) = req.password {
+        if !password.is_empty() {
+            state.provider.store_api_key("smtp_password", &password).await?;
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete SMTP configuration
+pub async fn delete_smtp_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.provider.get_pool();
+
+    // Delete from database
+    sqlx::query("DELETE FROM smtp_config WHERE id = 'default'")
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Database error: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+    // Delete password from vault
+    let _ = state.provider.delete_api_key("smtp_password").await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Test SMTP connection
+pub async fn test_smtp_connection(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<TestSmtpRequest>,
+) -> Json<TestSmtpResponse> {
+    use crate::integrations::smtp::{EmailService, SmtpConfig};
+
+    let config = SmtpConfig {
+        host: req.host,
+        port: req.port,
+        username: req.username,
+        use_tls: req.use_tls,
+        from_email: req.from_email,
+        from_name: req.from_name,
+    };
+
+    let service = EmailService::new(config, req.password);
+
+    match service.test_connection().await {
+        Ok(()) => Json(TestSmtpResponse {
+            success: true,
+            error: None,
+        }),
+        Err(e) => Json(TestSmtpResponse {
+            success: false,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+// === MCP Server Endpoints (Phase 06-03) ===
+
+/// Request to add a new MCP server
+#[derive(Debug, Deserialize)]
+pub struct AddMcpServerRequest {
+    pub name: String,
+    pub transport_type: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub url: Option<String>,
+    pub auth_type: Option<String>,
+    pub auth_token: Option<String>,
+    pub server_type: Option<String>,
+}
+
+/// MCP server response
+#[derive(Debug, Serialize)]
+pub struct McpServerResponse {
+    pub id: String,
+    pub name: String,
+    pub transport_type: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub url: Option<String>,
+    pub auth_type: String,
+    pub server_type: String,
+    pub enabled: bool,
+    pub connected: bool,
+    pub tools: Vec<McpToolResponse>,
+}
+
+/// MCP tool response
+#[derive(Debug, Serialize)]
+pub struct McpToolResponse {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub input_schema: serde_json::Value,
+}
+
+/// List all configured MCP servers
+pub async fn list_mcp_servers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<McpServerResponse>>, ApiError> {
+    let pool = state.provider.get_pool();
+
+    // Query all servers from database
+    let rows: Vec<(String, String, String, String, String, i32, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT id, name, transport_type, command, args, enabled, url, auth_type, server_type FROM mcp_servers ORDER BY name"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Database error: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    let mut responses = Vec::new();
+    for (id, name, transport_type, command, args_json, enabled, url, auth_type, server_type) in rows {
+        let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+        let connected = state.mcp_client_manager.read().await.is_connected(&id).await;
+
+        // Get tools for this server from database
+        let tool_rows: Vec<(String, String, Option<String>, i32, String)> = sqlx::query_as(
+            "SELECT id, name, description, enabled, COALESCE(input_schema, '{}') FROM mcp_tools WHERE server_id = ? ORDER BY name"
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Database error: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+        let tools: Vec<McpToolResponse> = tool_rows
+            .into_iter()
+            .map(|(tool_id, tool_name, description, tool_enabled, schema_str)| McpToolResponse {
+                id: tool_id,
+                name: tool_name,
+                description,
+                enabled: tool_enabled != 0,
+                input_schema: serde_json::from_str(&schema_str).unwrap_or(serde_json::json!({})),
+            })
+            .collect();
+
+        responses.push(McpServerResponse {
+            id,
+            name,
+            transport_type,
+            command,
+            args,
+            url,
+            auth_type,
+            server_type,
+            enabled: enabled != 0,
+            connected,
+            tools,
+        });
+    }
+
+    Ok(Json(responses))
+}
+
+/// Add a new MCP server configuration
+///
+/// AUDIT FIX (CRYPTO-002): if the request includes an `auth_token`, the
+/// vault must be unlocked so we can encrypt it. The plaintext column is no
+/// longer written to.
+pub async fn add_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddMcpServerRequest>,
+) -> Result<(StatusCode, Json<McpServerResponse>), ApiError> {
+    let pool = state.provider.get_pool();
+    let id = uuid::Uuid::new_v4().to_string();
+    let transport_type = req.transport_type.unwrap_or_else(|| "stdio".to_string());
+    let command = req.command.unwrap_or_default();
+    let args = req.args.unwrap_or_default();
+    let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string());
+    let auth_type = req.auth_type.unwrap_or_else(|| "none".to_string());
+    let server_type = req.server_type.unwrap_or_else(|| "custom".to_string());
+
+    if req.auth_token.is_some() && !state.provider.is_unlocked() {
+        return Err(ApiError {
+            error: "Unlock the vault before saving an MCP auth token".to_string(),
+            code: "VAULT_LOCKED".to_string(),
+        });
+    }
+
+    // Insert with NULL auth_token / auth_token_encrypted; we set the
+    // encrypted token in a follow-up call so the encryption logic is in one
+    // place (`store_mcp_auth_token`).
+    sqlx::query(
+        "INSERT INTO mcp_servers (id, name, transport_type, command, args, url, auth_type, auth_token, auth_token_encrypted, server_type, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0)"
+    )
+    .bind(&id)
+    .bind(&req.name)
+    .bind(&transport_type)
+    .bind(&command)
+    .bind(&args_json)
+    .bind(&req.url)
+    .bind(&auth_type)
+    .bind(&server_type)
+    .execute(pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Database error: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    if let Some(token) = req.auth_token.as_deref() {
+        if !token.is_empty() {
+            state
+                .provider
+                .store_mcp_auth_token(&id, token)
+                .await
+                .map_err(|e| ApiError {
+                    error: format!("Failed to encrypt MCP auth token: {}", e),
+                    code: "VAULT_ERROR".to_string(),
+                })?;
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(McpServerResponse {
+        id,
+        name: req.name,
+        transport_type,
+        command,
+        args,
+        url: req.url,
+        auth_type,
+        server_type,
+        enabled: false,
+        connected: false,
+        tools: vec![],
+    })))
+}
+
+/// Delete an MCP server configuration
+pub async fn delete_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.provider.get_pool();
+
+    // Disconnect if connected
+    let _ = state.mcp_client_manager.read().await.disconnect(&id).await;
+
+    // AUDIT FIX (CRYPTO-002): defence-in-depth — explicitly clear any
+    // encrypted/legacy auth token before the row goes away. The DELETE on
+    // the row would also remove these columns, but going through the vault
+    // helper keeps every credential-clear path uniform.
+    if state.provider.is_unlocked()
+        && state.provider.mcp_server_has_token(&id).await.unwrap_or(false)
+    {
+        let _ = state.provider.delete_mcp_auth_token(&id).await;
+    }
+
+    // Delete from database (tools will cascade delete)
+    let result = sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Database error: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError {
+            error: "MCP server not found".to_string(),
+            code: "NOT_FOUND".to_string(),
+        });
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Connect to an MCP server and discover tools
+pub async fn connect_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<McpServerResponse>, ApiError> {
+    let pool = state.provider.get_pool();
+
+    // Load server config from database (no auth_token here — we fetch that
+    // separately through the vault helper, see CRYPTO-002).
+    let row: Option<(String, String, String, String, String, i32, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT id, name, transport_type, command, args, enabled, url, auth_type, server_type FROM mcp_servers WHERE id = ?"
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Database error: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    let (server_id, name, transport_type, command, args_json, enabled, url, auth_type, server_type) = row.ok_or_else(|| ApiError {
+        error: "MCP server not found".to_string(),
+        code: "NOT_FOUND".to_string(),
+    })?;
+
+    let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+
+    // AUDIT FIX (CRYPTO-002): pull the token through the vault. If the
+    // server was registered with a token but the vault is currently locked,
+    // we surface a clear 403 instead of silently using a missing token.
+    let auth_token = match state.provider.get_mcp_auth_token(&server_id).await {
+        Ok(t) => t,
+        Err(crate::providers::ProviderError::VaultLocked) => {
+            return Err(ApiError {
+                error: "Unlock the vault before connecting to this MCP server".to_string(),
+                code: "VAULT_LOCKED".to_string(),
+            });
+        }
+        Err(e) => {
+            return Err(ApiError {
+                error: format!("Failed to load MCP auth token: {}", e),
+                code: "VAULT_ERROR".to_string(),
+            });
+        }
+    };
+
+    let config = crate::integrations::McpServerConfig {
+        id: server_id.clone(),
+        name: name.clone(),
+        transport_type: transport_type.clone(),
+        command: command.clone(),
+        args: args.clone(),
+        url: url.clone(),
+        auth_type: auth_type.clone(),
+        auth_token,
+        server_type: server_type.clone(),
+        enabled: enabled != 0,
+    };
+
+    // Connect and discover tools
+    let mcp_tools = state.mcp_client_manager.read().await.connect(config).await
+        .map_err(|e| ApiError {
+            error: e.to_string(),
+            code: "CONNECTION_FAILED".to_string(),
+        })?;
+
+    // Mark server as enabled
+    sqlx::query("UPDATE mcp_servers SET enabled = 1 WHERE id = ?")
+        .bind(&server_id)
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Database error: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+    // Upsert discovered tools to database
+    for tool in &mcp_tools {
+        let schema_json = serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
+
+        sqlx::query(
+            r#"INSERT INTO mcp_tools (id, server_id, name, description, input_schema, enabled)
+               VALUES (?, ?, ?, ?, ?, 0)
+               ON CONFLICT(server_id, name) DO UPDATE SET
+                 description = excluded.description,
+                 input_schema = excluded.input_schema,
+                 updated_at = datetime('now')"#
+        )
+        .bind(&tool.id)
+        .bind(&tool.server_id)
+        .bind(&tool.name)
+        .bind(&tool.description)
+        .bind(&schema_json)
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Database error: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+    }
+
+    // Return updated server response with tools
+    let tools: Vec<McpToolResponse> = mcp_tools
+        .into_iter()
+        .map(|t| McpToolResponse {
+            id: t.id,
+            name: t.name,
+            description: t.description,
+            enabled: t.enabled,
+            input_schema: t.input_schema,
+        })
+        .collect();
+
+    Ok(Json(McpServerResponse {
+        id: server_id,
+        name,
+        transport_type,
+        command,
+        args,
+        url,
+        auth_type,
+        server_type,
+        enabled: true,
+        connected: true,
+        tools,
+    }))
+}
+
+/// Disconnect from an MCP server
+pub async fn disconnect_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.provider.get_pool();
+
+    // Disconnect
+    state.mcp_client_manager.read().await.disconnect(&id).await
+        .map_err(|e| ApiError {
+            error: e.to_string(),
+            code: "DISCONNECT_FAILED".to_string(),
+        })?;
+
+    // Mark server as disabled
+    sqlx::query("UPDATE mcp_servers SET enabled = 0 WHERE id = ?")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Database error: {}", e),
+            code: "DATABASE_ERROR".to_string(),
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request to set tool enabled status
+#[derive(Debug, Deserialize)]
+pub struct SetToolEnabledRequest {
+    pub enabled: bool,
+}
+
+/// Set MCP tool enabled status (per-tool approval)
+pub async fn set_mcp_tool_enabled(
+    State(state): State<Arc<AppState>>,
+    Path(tool_id): Path<String>,
+    Json(req): Json<SetToolEnabledRequest>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.provider.get_pool();
+
+    let result: sqlx::sqlite::SqliteQueryResult = sqlx::query(
+        "UPDATE mcp_tools SET enabled = ?, updated_at = datetime('now') WHERE id = ?"
+    )
+    .bind(if req.enabled { 1 } else { 0 })
+    .bind(&tool_id)
+    .execute(pool)
+    .await
+    .map_err(|e: sqlx::Error| ApiError {
+        error: e.to_string(),
+        code: "DB_ERROR".to_string(),
+    })?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError {
+            error: "MCP tool not found".to_string(),
+            code: "NOT_FOUND".to_string(),
+        });
+    }
+
+    tracing::info!(
+        tool_id = %tool_id,
+        enabled = %req.enabled,
+        "MCP tool enabled status updated"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request to execute an MCP tool
+#[derive(Debug, Deserialize)]
+pub struct ExecuteMcpToolRequest {
+    pub arguments: serde_json::Value,
+}
+
+/// Response from executing an MCP tool
+#[derive(Debug, Serialize)]
+pub struct ExecuteMcpToolResponse {
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// Execute an MCP tool by its database ID
+pub async fn execute_mcp_tool(
+    State(state): State<Arc<AppState>>,
+    Path(tool_id): Path<String>,
+    Json(req): Json<ExecuteMcpToolRequest>,
+) -> Result<Json<ExecuteMcpToolResponse>, ApiError> {
+    let pool = state.provider.get_pool();
+
+    // Look up the tool to get server_id and name
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT server_id, name FROM mcp_tools WHERE id = ? AND enabled = 1"
+    )
+    .bind(&tool_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError {
+        error: format!("Database error: {}", e),
+        code: "DATABASE_ERROR".to_string(),
+    })?;
+
+    let (server_id, tool_name) = row.ok_or_else(|| ApiError {
+        error: "MCP tool not found or not enabled".to_string(),
+        code: "NOT_FOUND".to_string(),
+    })?;
+
+    // Call the tool via MCP client manager
+    let result = state.mcp_client_manager.read().await
+        .call_tool(&server_id, &tool_name, req.arguments).await
+        .map_err(|e| ApiError {
+            error: format!("MCP tool execution failed: {}", e),
+            code: "TOOL_EXECUTION_FAILED".to_string(),
+        })?;
+
+    // Extract text content from the result
+    let content = result.content.iter()
+        .filter_map(|c| {
+            match c.raw {
+                rmcp::model::RawContent::Text(ref text) => Some(text.text.to_string()),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(Json(ExecuteMcpToolResponse {
+        content,
+        is_error: result.is_error.unwrap_or(false),
+    }))
+}
+
+// === SSH Certificate Auth ===
+
+/// GET /api/cert/status - Get certificate status
+pub async fn cert_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    match &state.cert_manager {
+        Some(cm) => Json(serde_json::to_value(cm.get_status().await).unwrap()),
+        None => Json(serde_json::json!({ "valid": false, "error": "Certificate auth not initialized" })),
+    }
+}
+
+/// GET /api/cert/public-key - Get the agent's public key for signing
+pub async fn cert_public_key(
+    State(state): State<Arc<AppState>>,
+) -> Result<String, StatusCode> {
+    let cm = state.cert_manager.as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    cm.get_public_key().await
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// POST /api/cert/store - Store a signed certificate (called by frontend after login)
+pub async fn cert_store(
+    State(state): State<Arc<AppState>>,
+    Json(cert_info): Json<crate::cert_manager::SignedCertInfo>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let cm = state.cert_manager.as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    cm.store_certificate(&cert_info).await
+        .map_err(|e| {
+            tracing::error!("Failed to store certificate: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(serde_json::to_value(cm.get_status().await).unwrap()))
+}
+
+/// POST /api/cert/renew - Trigger certificate renewal
+///
+/// AUDIT FIX (CRYPTO-011): the previous implementation silently returned
+/// `cert_status()` and pretended renewal had succeeded. The cert-manager
+/// activation path (`cert_manager.rs::_initialize`/`_generate_keypair`) was
+/// never wired in, so users would lose SSH cert auth at expiry without
+/// warning. Until the activation path is wired, return 501 Not Implemented
+/// so callers know the renewal didn't happen and don't get false confidence.
+pub async fn cert_renew(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let _cm = state.cert_manager.as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    tracing::warn!(
+        target: "audit",
+        "cert_renew was called but the renewal pipeline is not yet implemented; returning 501"
+    );
+    Err(StatusCode::NOT_IMPLEMENTED)
+}
+
+// === Discovery API Endpoints (Phase 27: Topology Discovery v2) ===
+
+/// POST /api/discovery/batch - Batch neighbor discovery
+///
+/// Accepts a list of targets with SNMP/SSH profiles and runs discovery
+/// in parallel with bounded concurrency (max 10 simultaneous targets).
+/// For each target: tries SNMP first, falls back to CLI, then nmap.
+pub async fn discovery_batch(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<crate::discovery::BatchDiscoveryRequest>,
+) -> Result<Json<Vec<crate::discovery::TargetDiscoveryResult>>, (StatusCode, String)> {
+    tracing::info!(
+        "Discovery batch request: {} targets",
+        request.targets.len()
+    );
+
+    let results =
+        crate::discovery::orchestrator::run_batch_discovery(request, &state.provider).await;
+
+    Ok(Json(results))
+}
+
+/// POST /api/discovery/traceroute-resolve - Resolve traceroute hops
+///
+/// Resolves a list of traceroute hop IPs to parent devices using
+/// NetBox/Netdisco/LibreNMS integrations, then runs SNMP neighbor
+/// discovery on resolved management IPs. Falls back to direct
+/// SNMP/SSH/nmap on unresolved hops.
+pub async fn discovery_traceroute_resolve(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<crate::discovery::TracerouteResolveRequest>,
+) -> Result<Json<Vec<crate::discovery::HopResolutionResult>>, (StatusCode, String)> {
+    tracing::info!(
+        "Traceroute resolve request: {} hops",
+        request.hops.len()
+    );
+
+    let results =
+        crate::discovery::orchestrator::resolve_traceroute_hops(request, &state.provider).await;
+
+    Ok(Json(results))
+}
+
+/// GET /api/discovery/capabilities - Check available discovery methods
+///
+/// Reports whether nmap is available, whether sudo is available for
+/// OS detection, and confirms SNMP support.
+pub async fn discovery_capabilities() -> Json<crate::discovery::DiscoveryCapabilities> {
+    let caps = crate::discovery::orchestrator::check_capabilities().await;
+    Json(caps)
+}
+
+// === MOP Diff ===
+
+#[derive(Deserialize)]
+pub struct MopDiffRequest {
+    a: String,
+    b: String,
+    format: String, // "json" or "text"
+}
+
+#[derive(Serialize)]
+pub struct DiffChange {
+    path: String,
+    old: serde_json::Value,
+    new: serde_json::Value,
+    #[serde(rename = "type")]
+    change_type: String,
+}
+
+#[derive(Serialize)]
+pub struct DiffSummary {
+    changed: usize,
+    added: usize,
+    removed: usize,
+}
+
+#[derive(Serialize)]
+pub struct StepDiff {
+    format: String,
+    changes: Vec<DiffChange>,
+    summary: DiffSummary,
+}
+
+/// POST /api/mop/diff - Compare two strings and return a structured diff
+///
+/// Supports JSON mode (deep object comparison with JSON paths) and
+/// text mode (line-level diff).
+pub async fn mop_diff(
+    Json(req): Json<MopDiffRequest>,
+) -> Result<Json<StepDiff>, ApiError> {
+    match req.format.as_str() {
+        "json" => mop_diff_json(&req.a, &req.b),
+        "text" => Ok(Json(mop_diff_text(&req.a, &req.b))),
+        other => Err(ApiError {
+            error: format!("Unknown diff format: '{}', expected 'json' or 'text'", other),
+            code: "VALIDATION".to_string(),
+        }),
+    }
+}
+
+fn mop_diff_json(a: &str, b: &str) -> Result<Json<StepDiff>, ApiError> {
+    let val_a: serde_json::Value = serde_json::from_str(a).map_err(|e| ApiError {
+        error: format!("Failed to parse 'a' as JSON: {}", e),
+        code: "VALIDATION".to_string(),
+    })?;
+    let val_b: serde_json::Value = serde_json::from_str(b).map_err(|e| ApiError {
+        error: format!("Failed to parse 'b' as JSON: {}", e),
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let mut changes = Vec::new();
+    diff_json_values("$", &val_a, &val_b, &mut changes);
+
+    let summary = DiffSummary {
+        changed: changes.iter().filter(|c| c.change_type == "changed").count(),
+        added: changes.iter().filter(|c| c.change_type == "added").count(),
+        removed: changes.iter().filter(|c| c.change_type == "removed").count(),
+    };
+
+    Ok(Json(StepDiff {
+        format: "json".to_string(),
+        changes,
+        summary,
+    }))
+}
+
+fn diff_json_values(
+    path: &str,
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    changes: &mut Vec<DiffChange>,
+) {
+    use serde_json::Value;
+
+    match (a, b) {
+        (Value::Object(map_a), Value::Object(map_b)) => {
+            // Keys in a but not in b → removed
+            for key in map_a.keys() {
+                let child_path = format!("{}.{}", path, key);
+                if let Some(val_b) = map_b.get(key) {
+                    diff_json_values(&child_path, &map_a[key], val_b, changes);
+                } else {
+                    collect_all_leaves(&child_path, &map_a[key], changes, "removed", true);
+                }
+            }
+            // Keys in b but not in a → added
+            for key in map_b.keys() {
+                if !map_a.contains_key(key) {
+                    let child_path = format!("{}.{}", path, key);
+                    collect_all_leaves(&child_path, &map_b[key], changes, "added", false);
+                }
+            }
+        }
+        (Value::Array(arr_a), Value::Array(arr_b)) => {
+            let max_len = arr_a.len().max(arr_b.len());
+            for i in 0..max_len {
+                let child_path = format!("{}[{}]", path, i);
+                match (arr_a.get(i), arr_b.get(i)) {
+                    (Some(va), Some(vb)) => diff_json_values(&child_path, va, vb, changes),
+                    (Some(va), None) => {
+                        collect_all_leaves(&child_path, va, changes, "removed", true);
+                    }
+                    (None, Some(vb)) => {
+                        collect_all_leaves(&child_path, vb, changes, "added", false);
+                    }
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => {
+            if a != b {
+                changes.push(DiffChange {
+                    path: path.to_string(),
+                    old: a.clone(),
+                    new: b.clone(),
+                    change_type: "changed".to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// For added/removed subtrees, emit a single change entry at the subtree root
+/// rather than recursing into every leaf.
+fn collect_all_leaves(
+    path: &str,
+    val: &serde_json::Value,
+    changes: &mut Vec<DiffChange>,
+    change_type: &str,
+    is_old: bool,
+) {
+    let (old, new) = if is_old {
+        (val.clone(), serde_json::Value::Null)
+    } else {
+        (serde_json::Value::Null, val.clone())
+    };
+    changes.push(DiffChange {
+        path: path.to_string(),
+        old,
+        new,
+        change_type: change_type.to_string(),
+    });
+}
+
+fn mop_diff_text(a: &str, b: &str) -> StepDiff {
+    let lines_a: Vec<&str> = a.lines().collect();
+    let lines_b: Vec<&str> = b.lines().collect();
+
+    // LCS-based diff
+    let lcs_table = build_lcs_table(&lines_a, &lines_b);
+    let changes = extract_diff_changes(&lcs_table, &lines_a, &lines_b);
+
+    let summary = DiffSummary {
+        changed: changes.iter().filter(|c| c.change_type == "changed").count(),
+        added: changes.iter().filter(|c| c.change_type == "added").count(),
+        removed: changes.iter().filter(|c| c.change_type == "removed").count(),
+    };
+
+    StepDiff {
+        format: "text".to_string(),
+        changes,
+        summary,
+    }
+}
+
+fn build_lcs_table(a: &[&str], b: &[&str]) -> Vec<Vec<usize>> {
+    let m = a.len();
+    let n = b.len();
+    let mut table = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                table[i][j] = table[i - 1][j - 1] + 1;
+            } else {
+                table[i][j] = table[i - 1][j].max(table[i][j - 1]);
+            }
+        }
+    }
+    table
+}
+
+fn extract_diff_changes(
+    table: &[Vec<usize>],
+    a: &[&str],
+    b: &[&str],
+) -> Vec<DiffChange> {
+    let mut changes = Vec::new();
+    let mut i = a.len();
+    let mut j = b.len();
+
+    // Backtrack through the LCS table to produce diff entries
+    // We collect in reverse order, then reverse at the end
+    let mut raw: Vec<(String, serde_json::Value, serde_json::Value, String)> = Vec::new();
+
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+            // Lines match — no change
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || table[i][j - 1] >= table[i - 1][j]) {
+            // Line added in b
+            raw.push((
+                format!("L{}", j),
+                serde_json::Value::Null,
+                serde_json::Value::String(b[j - 1].to_string()),
+                "added".to_string(),
+            ));
+            j -= 1;
+        } else if i > 0 {
+            // Line removed from a
+            raw.push((
+                format!("L{}", i),
+                serde_json::Value::String(a[i - 1].to_string()),
+                serde_json::Value::Null,
+                "removed".to_string(),
+            ));
+            i -= 1;
+        }
+    }
+
+    raw.reverse();
+
+    // Pair up adjacent removed+added at the same conceptual position as "changed"
+    let mut idx = 0;
+    while idx < raw.len() {
+        if idx + 1 < raw.len() && raw[idx].3 == "removed" && raw[idx + 1].3 == "added" {
+            changes.push(DiffChange {
+                path: raw[idx].0.clone(),
+                old: raw[idx].1.clone(),
+                new: raw[idx + 1].2.clone(),
+                change_type: "changed".to_string(),
+            });
+            idx += 2;
+        } else {
+            changes.push(DiffChange {
+                path: raw[idx].0.clone(),
+                old: raw[idx].1.clone(),
+                new: raw[idx].2.clone(),
+                change_type: raw[idx].3.clone(),
+            });
+            idx += 1;
+        }
+    }
+
+    changes
+}
+
+// === AI Memory Endpoints ===
+
+/// GET /ai/memory — list all memories, optionally filtered by category
+pub async fn list_ai_memories(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let rows: Vec<(String, String, String, String, String, String)> = if let Some(cat) = params.get("category") {
+        sqlx::query_as(
+            "SELECT id, content, category, source, created_at, updated_at FROM ai_memory WHERE category = ? ORDER BY created_at DESC LIMIT 100"
+        )
+        .bind(cat)
+        .fetch_all(&state.pool)
+        .await
+    } else {
+        sqlx::query_as(
+            "SELECT id, content, category, source, created_at, updated_at FROM ai_memory ORDER BY created_at DESC LIMIT 100"
+        )
+        .fetch_all(&state.pool)
+        .await
+    }
+    .map_err(|e| ApiError { error: e.to_string(), code: "DATABASE_ERROR".to_string() })?;
+
+    let memories: Vec<serde_json::Value> = rows.iter().map(|(id, content, category, source, created_at, updated_at)| {
+        serde_json::json!({
+            "id": id,
+            "content": content,
+            "category": category,
+            "source": source,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "memories": memories })))
+}
+
+/// POST /ai/memory — create a new memory
+pub async fn create_ai_memory(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let category = body.get("category").and_then(|v| v.as_str()).unwrap_or("general").to_string();
+    let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("user").to_string();
+
+    if content.is_empty() {
+        return Err(ApiError { error: "Memory content cannot be empty".to_string(), code: "VALIDATION".to_string() });
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    sqlx::query("INSERT INTO ai_memory (id, content, category, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(&id).bind(&content).bind(&category).bind(&source).bind(&now).bind(&now)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| ApiError { error: e.to_string(), code: "DATABASE_ERROR".to_string() })?;
+
+    Ok(Json(serde_json::json!({ "id": id, "content": content, "category": category })))
+}
+
+/// PUT /ai/memory/:id — update a memory
+pub async fn update_ai_memory(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<StatusCode, ApiError> {
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let category = body.get("category").and_then(|v| v.as_str()).unwrap_or("general");
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    sqlx::query("UPDATE ai_memory SET content = ?, category = ?, updated_at = ? WHERE id = ?")
+        .bind(content).bind(category).bind(&now).bind(&id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| ApiError { error: e.to_string(), code: "DATABASE_ERROR".to_string() })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /ai/memory/:id — delete a memory
+pub async fn delete_ai_memory(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    sqlx::query("DELETE FROM ai_memory WHERE id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| ApiError { error: e.to_string(), code: "DATABASE_ERROR".to_string() })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// === Task Tool-Use Approval Endpoints (AUDIT FIX EXEC-017) ===
+//
+// Background ReAct tasks pause before any mutating tool dispatch
+// (`tasks::approvals::is_mutating_tool`). The frontend polls
+// `GET /api/tasks/:id/pending-approvals` while showing a running task
+// and resolves via the approve/reject endpoints below.
+
+/// GET /api/tasks/:task_id/pending-approvals — pending tool-use prompts
+/// for one task.
+pub async fn list_task_pending_approvals(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> Json<Vec<crate::tasks::approvals::PendingTaskApproval>> {
+    Json(state.task_executor.approval_service.pending_for_task(&task_id).await)
+}
+
+/// GET /api/task-approvals — every pending approval across all tasks.
+/// Used by the agents panel for a "you have N pending decisions" badge.
+pub async fn list_all_task_approvals(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::tasks::approvals::PendingTaskApproval>> {
+    Json(state.task_executor.approval_service.list_all().await)
+}
+
+/// POST /api/task-approvals/:approval_id/approve — user approved the call.
+pub async fn approve_task_tool_use(
+    State(state): State<Arc<AppState>>,
+    Path(approval_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.task_executor.approval_service.resolve(&approval_id, true).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError {
+            error: "Approval not found (likely already resolved or timed out)".to_string(),
+            code: "NOT_FOUND".to_string(),
+        })
+    }
+}
+
+/// POST /api/task-approvals/:approval_id/reject — user rejected the call.
+pub async fn reject_task_tool_use(
+    State(state): State<Arc<AppState>>,
+    Path(approval_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.task_executor.approval_service.resolve(&approval_id, false).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError {
+            error: "Approval not found (likely already resolved or timed out)".to_string(),
+            code: "NOT_FOUND".to_string(),
+        })
+    }
+}
+
+// === Host-Key Approval Endpoints (AUDIT FIX REMOTE-001) ===
+//
+// The SSH handshake calls into a server-side approval queue when it sees
+// an unknown or changed host key. The frontend polls this surface every
+// ~750 ms while a connection is in flight, shows the modal, and resolves
+// the prompt with the user's decision.
+
+/// GET /api/host-keys/prompts — list currently-pending fingerprint prompts.
+pub async fn list_host_key_prompts(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::ssh::approvals::PendingPrompt>> {
+    Json(state.host_key_approvals.list_pending().await)
+}
+
+/// POST /api/host-keys/prompts/:id/approve — user accepted the fingerprint.
+pub async fn approve_host_key_prompt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.host_key_approvals.resolve(&id, true).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError {
+            error: "Prompt not found (likely already resolved or timed out)".to_string(),
+            code: "NOT_FOUND".to_string(),
+        })
+    }
+}
+
+/// POST /api/host-keys/prompts/:id/reject — user refused the fingerprint.
+pub async fn reject_host_key_prompt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.host_key_approvals.resolve(&id, false).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError {
+            error: "Prompt not found (likely already resolved or timed out)".to_string(),
+            code: "NOT_FOUND".to_string(),
+        })
+    }
+}
+
+// === AI Config-Mode Endpoints (AUDIT FIX EXEC-002) ===
+//
+// These three endpoints replace the request-body `allow_config_changes`
+// boolean as the source of truth for whether the AI may emit configuration
+// commands. Enable requires the current master password; the state expires
+// automatically after CONFIG_MODE_TTL_SECS so an unattended laptop does not
+// stay armed indefinitely.
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigModeEnableRequest {
+    pub master_password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigModeStatusResponse {
+    pub enabled: bool,
+    pub expires_at: Option<String>,
+    pub seconds_remaining: Option<i64>,
+}
+
+/// POST /api/ai/config-mode/enable — turn config mode on for CONFIG_MODE_TTL_SECS.
+/// Requires the user to re-supply the master password (proof-of-presence).
+pub async fn enable_config_mode(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ConfigModeEnableRequest>,
+) -> Result<Json<ConfigModeStatusResponse>, ApiError> {
+    state
+        .provider
+        .unlock(&req.master_password)
+        .await
+        .map_err(|_| ApiError {
+            error: "Invalid master password".to_string(),
+            code: "INVALID_PASSWORD".to_string(),
+        })?;
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(CONFIG_MODE_TTL_SECS);
+    *state.config_mode.write().await = Some(ConfigModeState { expires_at });
+
+    tracing::warn!(
+        target: "audit",
+        ttl_secs = CONFIG_MODE_TTL_SECS,
+        "AI config mode enabled (auto-expires in {} secs)",
+        CONFIG_MODE_TTL_SECS
+    );
+
+    Ok(Json(ConfigModeStatusResponse {
+        enabled: true,
+        expires_at: Some(expires_at.to_rfc3339()),
+        seconds_remaining: Some(CONFIG_MODE_TTL_SECS),
+    }))
+}
+
+/// POST /api/ai/config-mode/disable — turn config mode off immediately.
+pub async fn disable_config_mode(
+    State(state): State<Arc<AppState>>,
+) -> Json<ConfigModeStatusResponse> {
+    let was_active = state.config_mode.write().await.take().is_some();
+    if was_active {
+        tracing::warn!(target: "audit", "AI config mode disabled by user");
+    }
+    Json(ConfigModeStatusResponse {
+        enabled: false,
+        expires_at: None,
+        seconds_remaining: None,
+    })
+}
+
+/// GET /api/ai/config-mode/status — frontend polls this so the UI can
+/// reflect the active state and show the countdown.
+pub async fn config_mode_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ConfigModeStatusResponse> {
+    let snapshot = *state.config_mode.read().await;
+    let now = chrono::Utc::now();
+    match snapshot {
+        Some(s) if s.expires_at > now => Json(ConfigModeStatusResponse {
+            enabled: true,
+            expires_at: Some(s.expires_at.to_rfc3339()),
+            seconds_remaining: Some((s.expires_at - now).num_seconds().max(0)),
+        }),
+        _ => Json(ConfigModeStatusResponse {
+            enabled: false,
+            expires_at: None,
+            seconds_remaining: None,
+        }),
+    }
+}
+
+// === Tunnel Manager Endpoints ===
+
+pub async fn list_tunnels(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<TunnelWithState>>, ApiError> {
+    let tunnels = crate::db::list_tunnels(&state.pool).await?;
+    let states = state.tunnel_manager.get_all_states().await;
+    let mut state_map: std::collections::HashMap<String, TunnelRuntimeState> =
+        states.into_iter().map(|s| (s.id.clone(), s)).collect();
+
+    let mut result: Vec<TunnelWithState> = tunnels.into_iter().map(|t| {
+        let runtime = state_map.remove(&t.id).unwrap_or(TunnelRuntimeState {
+            id: t.id.clone(),
+            status: TunnelStatus::Disconnected,
+            uptime_secs: None,
+            bytes_tx: 0,
+            bytes_rx: 0,
+            last_error: None,
+            retry_count: 0,
+        });
+        TunnelWithState { tunnel: t, state: runtime }
+    }).collect();
+
+    // Append session tunnels (ephemeral, not in DB) using definitions + already-fetched states
+    for (id, def) in state.tunnel_manager.get_session_tunnel_definitions().await {
+        let runtime = state_map.remove(&id).unwrap_or(TunnelRuntimeState {
+            id: id.clone(),
+            status: TunnelStatus::Connected,
+            uptime_secs: None,
+            bytes_tx: 0,
+            bytes_rx: 0,
+            last_error: None,
+            retry_count: 0,
+        });
+        result.push(TunnelWithState { tunnel: def, state: runtime });
+    }
+
+    Ok(Json(result))
+}
+
+/// Validate a tunnel bind_address — only loopback is permitted by default.
+///
+/// AUDIT FIX (REMOTE-010): the previous behaviour accepted any string, so
+/// `0.0.0.0` (open the tunnel to the entire LAN) was a single config typo.
+/// Combined with REMOTE-011 (SOCKS5 advertises no-auth), an accidental
+/// `0.0.0.0` SOCKS5 forward turned the user's machine into an unauthenticated
+/// pivot proxy. We allow only IPv4 / IPv6 loopback addresses; any non-loopback
+/// must be opted into via a future `share_with_lan` UI gesture (not yet
+/// implemented).
+fn validate_tunnel_bind_address(bind: &str) -> Result<(), ApiError> {
+    let trimmed = bind.trim();
+    let parsed: std::net::IpAddr = trimmed.parse().map_err(|_| ApiError {
+        error: format!(
+            "bind_address '{}' is not a valid IP literal (use 127.0.0.1 or ::1)",
+            trimmed
+        ),
+        code: "VALIDATION".to_string(),
+    })?;
+    if !parsed.is_loopback() {
+        return Err(ApiError {
+            error: format!(
+                "bind_address '{}' must be a loopback address (127.0.0.0/8 or ::1) — \
+                 binding tunnels to non-loopback exposes them to the LAN with no auth",
+                trimmed
+            ),
+            code: "VALIDATION".to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub async fn create_tunnel(
+    State(state): State<Arc<AppState>>,
+    Json(new_tunnel): Json<NewTunnel>,
+) -> Result<(StatusCode, Json<Tunnel>), ApiError> {
+    validate_tunnel_bind_address(&new_tunnel.bind_address)?;
+    let tunnel = crate::db::create_tunnel(&state.pool, new_tunnel).await?;
+    Ok((StatusCode::CREATED, Json(tunnel)))
+}
+
+pub async fn update_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateTunnel>,
+) -> Result<Json<Tunnel>, ApiError> {
+    if let Some(bind) = update.bind_address.as_deref() {
+        validate_tunnel_bind_address(bind)?;
+    }
+    let _ = state.tunnel_manager.stop_tunnel(&id).await;
+    let tunnel = crate::db::update_tunnel(&state.pool, &id, update).await?;
+    Ok(Json(tunnel))
+}
+
+pub async fn delete_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let _ = state.tunnel_manager.stop_tunnel(&id).await;
+    crate::db::delete_tunnel(&state.pool, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn start_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tunnel = crate::db::get_tunnel(&state.pool, &id).await?;
+    state.tunnel_manager.start_tunnel(&tunnel).await
+        .map_err(|e| ApiError { error: e, code: "TUNNEL_ERROR".to_string() })?;
+    Ok(Json(serde_json::json!({"status": "started"})))
+}
+
+pub async fn stop_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.tunnel_manager.stop_tunnel(&id).await
+        .map_err(|e| ApiError { error: e, code: "TUNNEL_ERROR".to_string() })?;
+    Ok(Json(serde_json::json!({"status": "stopped"})))
+}
+
+pub async fn reconnect_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _ = state.tunnel_manager.stop_tunnel(&id).await;
+    let tunnel = crate::db::get_tunnel(&state.pool, &id).await?;
+    state.tunnel_manager.start_tunnel(&tunnel).await
+        .map_err(|e| ApiError { error: e, code: "TUNNEL_ERROR".to_string() })?;
+    Ok(Json(serde_json::json!({"status": "reconnected"})))
+}
+
+pub async fn tunnel_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<TunnelRuntimeState>>, ApiError> {
+    let states = state.tunnel_manager.get_all_states().await;
+    Ok(Json(states))
+}
+
+pub async fn start_all_tunnels(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tunnels = crate::db::list_tunnels(&state.pool).await?;
+    state.tunnel_manager.start_all_auto(&tunnels).await;
+    Ok(Json(serde_json::json!({"status": "started"})))
+}
+
+pub async fn stop_all_tunnels(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.tunnel_manager.stop_all().await;
+    Ok(Json(serde_json::json!({"status": "stopped"})))
+}

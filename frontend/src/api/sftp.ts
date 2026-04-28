@@ -1,0 +1,186 @@
+// SFTP API client for remote file browsing
+
+import { getClient } from './client';
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: number | null;
+  permissions: number | null;
+}
+
+export interface SftpConnectResponse {
+  connected: boolean;
+  home_dir: string | null;
+}
+
+export interface SftpLsResponse {
+  entries: FileEntry[];
+  path: string;
+}
+
+// Connect to SFTP for a session
+export async function sftpConnect(
+  sftpId: string,
+  sessionId?: string,
+  enterpriseParams?: { credential_id: string; host: string; port?: number }
+): Promise<SftpConnectResponse> {
+  try {
+    const body = enterpriseParams
+      ? { credential_id: enterpriseParams.credential_id, host: enterpriseParams.host, port: enterpriseParams.port }
+      : { session_id: sessionId };
+    const { data } = await getClient().http.post(`/sftp/${sftpId}/connect`, body);
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to connect SFTP');
+  }
+}
+
+// Disconnect SFTP session
+export async function sftpDisconnect(sftpId: string): Promise<void> {
+  try {
+    await getClient().http.post(`/sftp/${sftpId}/disconnect`);
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to disconnect SFTP');
+  }
+}
+
+// List directory contents
+export async function sftpLs(
+  sftpId: string,
+  path?: string
+): Promise<SftpLsResponse> {
+  try {
+    const { data } = await getClient().http.get(`/sftp/${sftpId}/ls`, {
+      params: path ? { path } : undefined,
+    });
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to list directory');
+  }
+}
+
+// Download a file
+export async function sftpDownload(
+  sftpId: string,
+  path: string
+): Promise<Blob> {
+  try {
+    const { data } = await getClient().http.get(`/sftp/${sftpId}/download`, {
+      params: { path },
+      responseType: 'blob',
+    });
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to download file');
+  }
+}
+
+// Upload a file
+export async function sftpUpload(
+  sftpId: string,
+  path: string,
+  data: Blob | ArrayBuffer
+): Promise<void> {
+  try {
+    await getClient().http.post(`/sftp/${sftpId}/upload`, data, {
+      params: { path },
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to upload file');
+  }
+}
+
+// Create a directory
+export async function sftpMkdir(sftpId: string, path: string): Promise<void> {
+  try {
+    await getClient().http.post(`/sftp/${sftpId}/mkdir`, null, {
+      params: { path },
+    });
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to create directory');
+  }
+}
+
+// Remove a file or directory
+export async function sftpRm(
+  sftpId: string,
+  path: string,
+  isDir: boolean
+): Promise<void> {
+  try {
+    await getClient().http.delete(`/sftp/${sftpId}/rm`, {
+      params: { path, is_dir: isDir },
+    });
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to remove');
+  }
+}
+
+// Rename a file or directory
+export async function sftpRename(
+  sftpId: string,
+  from: string,
+  to: string
+): Promise<void> {
+  try {
+    await getClient().http.post(`/sftp/${sftpId}/rename`, null, {
+      params: { from, to },
+    });
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to rename');
+  }
+}
+
+// Get file info
+export async function sftpStat(
+  sftpId: string,
+  path: string
+): Promise<FileEntry> {
+  try {
+    const { data } = await getClient().http.get(`/sftp/${sftpId}/stat`, {
+      params: { path },
+    });
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string } } };
+    throw new Error(axiosErr.response?.data?.error || 'Failed to get file info');
+  }
+}
+
+// Helper to format file size
+export function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+// Helper to format permissions (Unix style)
+export function formatPermissions(mode: number | null): string {
+  if (mode === null) return '---';
+  const perms = ['---', '--x', '-w-', '-wx', 'r--', 'r-x', 'rw-', 'rwx'];
+  const owner = perms[(mode >> 6) & 7];
+  const group = perms[(mode >> 3) & 7];
+  const other = perms[mode & 7];
+  return `${owner}${group}${other}`;
+}
+
+// Helper to format timestamp
+export function formatTimestamp(ts: number | null): string {
+  if (ts === null) return '-';
+  const date = new Date(ts * 1000);
+  return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+}

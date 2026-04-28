@@ -1,0 +1,56 @@
+# Build artifacts
+**/target/
+**/node_modules/
+**/dist/
+
+# Rust
+**/*.rs.bk
+Cargo.lock
+!agent/Cargo.lock
+!frontend/src-tauri/Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Tauri
+**/src-tauri/gen/
+**/binaries/netstacks-agent-*
+
+# License server sensitive data
+license-server/data/
+license-server/keys/
+
+# Planning documents
+.planning/
+
+# Local-only dev / release tooling — never published to the public repo
+terminal-dev.sh
+builds/
+
+# Internal build outputs
+output/
+**/output/
+
+# Apple / Windows code-signing material — must never be committed
+*.p12
+*.pfx
+*.cer
+*.mobileprovision
+
+# Tauri updater signing keys
+*.key
+*.pub
+TAURI_PRIVATE_KEY*

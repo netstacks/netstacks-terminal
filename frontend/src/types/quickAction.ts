@@ -1,0 +1,120 @@
+// Types for API Resources and Quick Actions
+
+export type ApiResourceAuthType = 'none' | 'bearer_token' | 'basic' | 'api_key_header' | 'multi_step'
+
+export interface AuthFlowStep {
+  method: string
+  path: string
+  body?: string
+  extract_path: string
+  store_as: string
+}
+
+export interface ApiResource {
+  id: string
+  name: string
+  base_url: string
+  auth_type: ApiResourceAuthType
+  auth_header_name?: string | null
+  auth_flow?: AuthFlowStep[] | null
+  default_headers: Record<string, string>
+  verify_ssl: boolean
+  timeout_secs: number
+  has_credentials: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateApiResourceRequest {
+  name: string
+  base_url: string
+  auth_type?: ApiResourceAuthType
+  auth_token?: string
+  auth_username?: string
+  auth_password?: string
+  auth_header_name?: string
+  auth_flow?: AuthFlowStep[]
+  default_headers?: Record<string, string>
+  verify_ssl?: boolean
+  timeout_secs?: number
+}
+
+export interface UpdateApiResourceRequest {
+  name?: string
+  base_url?: string
+  auth_type?: ApiResourceAuthType
+  auth_token?: string
+  auth_username?: string
+  auth_password?: string
+  auth_header_name?: string
+  auth_flow?: AuthFlowStep[]
+  default_headers?: Record<string, string>
+  verify_ssl?: boolean
+  timeout_secs?: number
+}
+
+export interface QuickAction {
+  id: string
+  name: string
+  description?: string | null
+  api_resource_id: string
+  method: string
+  path: string
+  headers: Record<string, string>
+  body?: string | null
+  json_extract_path?: string | null
+  icon?: string | null
+  color?: string | null
+  sort_order: number
+  category?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateQuickActionRequest {
+  name: string
+  description?: string
+  api_resource_id: string
+  method?: string
+  path?: string
+  headers?: Record<string, string>
+  body?: string
+  json_extract_path?: string
+  icon?: string
+  color?: string
+  sort_order?: number
+  category?: string
+}
+
+export interface UpdateQuickActionRequest {
+  name?: string
+  description?: string
+  api_resource_id?: string
+  method?: string
+  path?: string
+  headers?: Record<string, string>
+  body?: string
+  json_extract_path?: string
+  icon?: string
+  color?: string
+  sort_order?: number
+  category?: string
+}
+
+export interface QuickActionResult {
+  success: boolean
+  status_code: number
+  extracted_value?: unknown
+  raw_body?: unknown
+  error?: string | null
+  duration_ms: number
+}
+
+export interface ExecuteInlineRequest {
+  api_resource_id: string
+  method: string
+  path: string
+  headers?: Record<string, string>
+  body?: string
+  json_extract_path?: string
+}
