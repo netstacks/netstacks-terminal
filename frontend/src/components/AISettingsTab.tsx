@@ -240,9 +240,16 @@ export default function AISettingsTab() {
       setConfigModeStatus(status);
       setConfigModePassword('');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to enable config mode';
-      // Backend returns INVALID_PASSWORD on bad password (standalone path only).
-      setConfigModeError(/invalid/i.test(msg) ? 'Wrong master password.' : msg);
+      const axiosErr = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
+      const status = axiosErr.response?.status;
+      const apiError = axiosErr.response?.data?.error;
+      const fallback = err instanceof Error ? err.message : 'Failed to enable config mode';
+      // 401 from /ai/config-mode/enable means wrong password (standalone path).
+      // Session-only path (enterprise) doesn't return 401 — session auth happens earlier.
+      const friendly = status === 401
+        ? 'Wrong master password.'
+        : apiError ?? fallback;
+      setConfigModeError(friendly);
     } finally {
       setConfigModeBusy(false);
     }
@@ -1482,7 +1489,7 @@ export default function AISettingsTab() {
                     className="form-button"
                     onClick={() => { void handleEnableConfigMode(); }}
                     disabled={configModeBusy}
-                    style={{ background: '#b45309', color: '#fed7aa' }}
+                    style={{ background: '#b45309', color: '#fed7aa', minWidth: '160px', padding: '8px 16px', borderRadius: '4px', border: 'none', cursor: configModeBusy ? 'not-allowed' : 'pointer', opacity: configModeBusy ? 0.6 : 1 }}
                   >
                     {configModeBusy ? 'Enabling…' : 'Enable for 5 min'}
                   </button>
