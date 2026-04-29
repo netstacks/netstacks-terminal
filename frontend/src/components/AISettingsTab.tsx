@@ -225,21 +225,23 @@ export default function AISettingsTab() {
     return () => { cancelled = true; if (timer) clearInterval(timer); };
   }, []);
 
-  const handleEnableConfigMode = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleEnableConfigMode = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     setConfigModeError(null);
-    if (configModePassword.length < 12) {
+    if (!isEnterprise && configModePassword.length < 12) {
       setConfigModeError('Master password must be at least 12 characters.');
       return;
     }
     setConfigModeBusy(true);
     try {
-      const status = await enableAiConfigMode(configModePassword);
+      const status = isEnterprise
+        ? await enableAiConfigMode()
+        : await enableAiConfigMode(configModePassword);
       setConfigModeStatus(status);
       setConfigModePassword('');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to enable config mode';
-      // Backend returns INVALID_PASSWORD on bad password.
+      // Backend returns INVALID_PASSWORD on bad password (standalone path only).
       setConfigModeError(/invalid/i.test(msg) ? 'Wrong master password.' : msg);
     } finally {
       setConfigModeBusy(false);
@@ -1447,7 +1449,9 @@ export default function AISettingsTab() {
                 <span className="ai-automation-description">
                   {isEnterprise && !controllerAiConfigEnabled
                     ? 'This feature is disabled by your administrator. Contact your admin to enable AI configuration changes on the controller.'
-                    : 'Temporarily allows the AI assistant to execute configuration commands on network devices. Requires your master password to enable, auto-disables after 5 minutes.'
+                    : isEnterprise
+                      ? 'Temporarily allows the AI assistant to execute configuration commands on network devices. Auto-disables after 5 minutes.'
+                      : 'Temporarily allows the AI assistant to execute configuration commands on network devices. Requires your master password to enable, auto-disables after 5 minutes.'
                   }
                 </span>
               </div>
@@ -1471,26 +1475,40 @@ export default function AISettingsTab() {
             </div>
 
             {!configModeStatus.enabled && !(isEnterprise && !controllerAiConfigEnabled) && (
-              <form onSubmit={handleEnableConfigMode} style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                <input
-                  type="password"
-                  className="form-input"
-                  placeholder="Master password to enable…"
-                  value={configModePassword}
-                  onChange={(e) => setConfigModePassword(e.target.value)}
-                  autoComplete="current-password"
-                  disabled={configModeBusy}
-                  style={{ flex: 1 }}
-                />
-                <button
-                  type="submit"
-                  className="form-button"
-                  disabled={configModeBusy || configModePassword.length < 12}
-                  style={{ background: '#b45309', color: '#fed7aa' }}
-                >
-                  {configModeBusy ? 'Enabling…' : 'Enable for 5 min'}
-                </button>
-              </form>
+              isEnterprise ? (
+                <div style={{ marginTop: '8px' }}>
+                  <button
+                    type="button"
+                    className="form-button"
+                    onClick={() => { void handleEnableConfigMode(); }}
+                    disabled={configModeBusy}
+                    style={{ background: '#b45309', color: '#fed7aa' }}
+                  >
+                    {configModeBusy ? 'Enabling…' : 'Enable for 5 min'}
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleEnableConfigMode} style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                  <input
+                    type="password"
+                    className="form-input"
+                    placeholder="Master password to enable…"
+                    value={configModePassword}
+                    onChange={(e) => setConfigModePassword(e.target.value)}
+                    autoComplete="current-password"
+                    disabled={configModeBusy}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="submit"
+                    className="form-button"
+                    disabled={configModeBusy || configModePassword.length < 12}
+                    style={{ background: '#b45309', color: '#fed7aa' }}
+                  >
+                    {configModeBusy ? 'Enabling…' : 'Enable for 5 min'}
+                  </button>
+                </form>
+              )
             )}
 
             {configModeError && (
