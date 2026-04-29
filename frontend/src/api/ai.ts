@@ -1263,13 +1263,24 @@ export interface ConfigModeStatus {
 }
 
 /**
- * Turn AI config mode on. Requires the user to re-supply the master password
- * (proof-of-presence). The override expires server-side after ~5 min.
+ * Turn AI config mode on. The override expires server-side after ~5 min.
+ *
+ * - **Standalone mode** (local terminal agent): pass the user's master
+ *   password. The agent sends it as `{master_password: "..."}` and unlocks
+ *   the vault with it.
+ * - **Enterprise mode** (controller): omit the argument. The controller
+ *   trusts the existing session auth — no proof-of-presence is sent. The
+ *   global `ai.config_changes_enabled` admin toggle still gates downstream
+ *   command execution.
+ *
+ * `getClient()` already routes to the correct backend based on app mode at
+ * startup; this function does not check `isEnterprise` itself.
  */
-export async function enableAiConfigMode(masterPassword: string): Promise<ConfigModeStatus> {
-  const { data } = await getClient().http.post('/ai/config-mode/enable', {
-    master_password: masterPassword,
-  });
+export async function enableAiConfigMode(masterPassword?: string): Promise<ConfigModeStatus> {
+  const body = masterPassword !== undefined
+    ? { master_password: masterPassword }
+    : {};
+  const { data } = await getClient().http.post('/ai/config-mode/enable', body);
   return data;
 }
 
