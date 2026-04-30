@@ -22,6 +22,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod ai;
 mod api;
+mod biometric;
 mod cert_manager;
 mod crypto;
 mod db;
@@ -371,6 +372,11 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/vault/password", post(api::set_master_password))
         .route("/vault/unlock", post(api::unlock_vault))
         .route("/vault/lock", post(api::lock_vault))
+        // Touch ID / biometric vault unlock (macOS only meaningful)
+        .route("/vault/biometric/status", get(api::biometric_status))
+        .route("/vault/biometric/enable", post(api::enable_biometric))
+        .route("/vault/biometric/unlock", post(api::unlock_with_biometric))
+        .route("/vault/biometric", axum::routing::delete(api::disable_biometric))
         // Credentials
         .route(
             "/credentials/:session_id",

@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { getVaultStatus, setMasterPassword, unlockVault } from '../api/sessions';
+import { getBiometricStatus, unlockVaultWithBiometric, type BiometricStatus } from '../api/vault';
 import { useMode } from '../hooks/useMode';
 import './VaultUnlockGate.css';
 
@@ -20,6 +21,11 @@ export default function VaultUnlockGate({ children }: VaultUnlockGateProps) {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [biometric, setBiometric] = useState<BiometricStatus | null>(null);
+  const [biometricLoading, setBiometricLoading] = useState(false);
+  // Tracks whether we've auto-fired the Touch ID prompt this mount, so a
+  // cancel doesn't loop us back into another prompt on the next render.
+  const autoPromptedRef = useRef(false);
 
   const checkVaultStatus = useCallback(async () => {
     try {
@@ -47,6 +53,54 @@ export default function VaultUnlockGate({ children }: VaultUnlockGateProps) {
       checkVaultStatus();
     }
   }, [checkVaultStatus, isEnterprise]);
+
+  // Check biometric availability whenever the unlock screen is shown.
+  useEffect(() => {
+    if (state !== 'unlock') return;
+    let cancelled = false;
+    getBiometricStatus().then((status) => {
+      if (!cancelled) setBiometric(status);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
+  const handleBiometricUnlock = useCallback(async () => {
+    setError(null);
+    setBiometricLoading(true);
+    try {
+      await unlockVaultWithBiometric();
+      setState('unlocked');
+    } catch (err: unknown) {
+      // Map known backend codes to friendly messages; otherwise show the raw message.
+      const e = err as { response?: { data?: { code?: string; error?: string } } };
+      const code = e?.response?.data?.code;
+      const apiMsg = e?.response?.data?.error;
+      if (code === 'BIOMETRIC_CANCELLED') {
+        // User dismissed the prompt — no error message needed, just leave the
+        // password field for fallback.
+      } else if (code === 'BIOMETRIC_NOT_ENROLLED') {
+        setError('Touch ID enrollment was removed. Please re-enable it after unlocking.');
+        setBiometric((prev) => (prev ? { ...prev, enrolled: false, enabled: false } : prev));
+      } else {
+        setError(apiMsg || 'Touch ID unlock failed — please use your master password.');
+      }
+    } finally {
+      setBiometricLoading(false);
+    }
+  }, []);
+
+  // Auto-fire the Touch ID prompt as soon as the unlock screen has biometric
+  // available. The ref guard ensures cancelling the prompt doesn't spawn
+  // another one — the user falls through to the password field instead.
+  useEffect(() => {
+    if (state !== 'unlock') return;
+    if (autoPromptedRef.current) return;
+    if (!biometric?.supported || !biometric.enrolled || !biometric.enabled) return;
+    autoPromptedRef.current = true;
+    handleBiometricUnlock();
+  }, [state, biometric, handleBiometricUnlock]);
 
   // In Enterprise mode, vault is managed by Controller - skip local vault gate
   if (isEnterprise) {
@@ -181,6 +235,33 @@ export default function VaultUnlockGate({ children }: VaultUnlockGateProps) {
             </svg>
             <span>{error}</span>
           </div>
+        )}
+
+        {state === 'unlock' && biometric?.enabled && biometric.supported && biometric.enrolled && (
+          <>
+            <button
+              type="button"
+              className="vault-submit vault-biometric-btn"
+              onClick={handleBiometricUnlock}
+              disabled={biometricLoading || loading}
+            >
+              {biometricLoading ? (
+                <>
+                  <div className="vault-spinner small" />
+                  <span>Waiting for Touch ID…</span>
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
+                    <path d="M12 11v6M9 14h6" />
+                    <circle cx="12" cy="12" r="10" />
+                  </svg>
+                  <span>Unlock with Touch ID</span>
+                </>
+              )}
+            </button>
+            <div className="vault-divider"><span>or</span></div>
+          </>
         )}
 
         <form onSubmit={state === 'setup' ? handleSetup : handleUnlock} className="vault-form">

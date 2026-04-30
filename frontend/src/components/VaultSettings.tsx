@@ -1,6 +1,17 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { getVaultStatus, setMasterPassword, unlockVault } from '../api/sessions'
-import { getApiKey, storeApiKey, deleteApiKey, lockVault, type ApiKeyType, API_KEY_LABELS } from '../api/vault'
+import {
+  getApiKey,
+  storeApiKey,
+  deleteApiKey,
+  lockVault,
+  getBiometricStatus,
+  enableBiometric,
+  disableBiometric,
+  type BiometricStatus,
+  type ApiKeyType,
+  API_KEY_LABELS,
+} from '../api/vault'
 import './VaultSettings.css'
 
 export default function VaultSettings() {
@@ -25,6 +36,12 @@ export default function VaultSettings() {
   })
   const [editingKey, setEditingKey] = useState<ApiKeyType | null>(null)
   const [editingValue, setEditingValue] = useState('')
+
+  // Touch ID state
+  const [biometric, setBiometric] = useState<BiometricStatus | null>(null)
+  const [biometricBusy, setBiometricBusy] = useState(false)
+  const [biometricEnableMode, setBiometricEnableMode] = useState(false)
+  const [biometricPassword, setBiometricPassword] = useState('')
 
   // Fetch vault status on mount
   useEffect(() => {
@@ -99,6 +116,59 @@ export default function VaultSettings() {
       await fetchStatus()
     } catch (err) {
       setError('Failed to lock vault')
+    }
+  }
+
+  // Touch ID
+  const fetchBiometric = useCallback(async () => {
+    try {
+      const s = await getBiometricStatus()
+      setBiometric(s)
+    } catch {
+      setBiometric({ supported: false, enrolled: false, enabled: false })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (status?.unlocked) fetchBiometric()
+  }, [status?.unlocked, fetchBiometric])
+
+  const handleEnableBiometric = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setSuccess(null)
+    if (!biometricPassword) {
+      setError('Enter your master password to confirm enrollment')
+      return
+    }
+    setBiometricBusy(true)
+    try {
+      await enableBiometric(biometricPassword)
+      setSuccess('Touch ID is now enabled for vault unlock')
+      setBiometricPassword('')
+      setBiometricEnableMode(false)
+      await fetchBiometric()
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string } } }
+      setError(e?.response?.data?.error || 'Failed to enable Touch ID')
+    } finally {
+      setBiometricBusy(false)
+    }
+  }
+
+  const handleDisableBiometric = async () => {
+    setError(null)
+    setSuccess(null)
+    setBiometricBusy(true)
+    try {
+      await disableBiometric()
+      setSuccess('Touch ID disabled — keychain entry removed')
+      await fetchBiometric()
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string } } }
+      setError(e?.response?.data?.error || 'Failed to disable Touch ID')
+    } finally {
+      setBiometricBusy(false)
     }
   }
 
@@ -290,6 +360,70 @@ export default function VaultSettings() {
           <button className="btn-lock" onClick={handleLockVault}>
             Lock Vault
           </button>
+
+          {/* Touch ID — macOS only */}
+          {biometric?.supported && (
+            <div className="vault-biometric-section">
+              <h4>Touch ID Unlock</h4>
+              {biometric.enabled && biometric.enrolled ? (
+                <>
+                  <p className="vault-biometric-status">
+                    <span className="vault-biometric-dot enabled" /> Enabled — you can use Touch ID on the unlock screen.
+                  </p>
+                  <button
+                    className="btn-disable-biometric"
+                    onClick={handleDisableBiometric}
+                    disabled={biometricBusy}
+                  >
+                    {biometricBusy ? 'Removing…' : 'Disable Touch ID'}
+                  </button>
+                </>
+              ) : biometricEnableMode ? (
+                <form onSubmit={handleEnableBiometric} className="vault-biometric-enable-form">
+                  <p className="vault-biometric-warning">
+                    Anyone with a registered fingerprint on this Mac will be able to unlock NetStacks.
+                    Your master password remains the recovery method.
+                  </p>
+                  <input
+                    type="password"
+                    value={biometricPassword}
+                    onChange={(e) => setBiometricPassword(e.target.value)}
+                    placeholder="Confirm master password"
+                    autoFocus
+                    disabled={biometricBusy}
+                  />
+                  <div className="vault-biometric-enable-actions">
+                    <button type="submit" className="btn-save" disabled={biometricBusy}>
+                      {biometricBusy ? 'Enabling…' : 'Enable'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-cancel"
+                      onClick={() => {
+                        setBiometricEnableMode(false)
+                        setBiometricPassword('')
+                      }}
+                      disabled={biometricBusy}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <>
+                  <p className="vault-biometric-status">
+                    <span className="vault-biometric-dot disabled" /> Not enabled. Use your fingerprint instead of typing the master password.
+                  </p>
+                  <button
+                    className="btn-enable-biometric"
+                    onClick={() => setBiometricEnableMode(true)}
+                  >
+                    Enable Touch ID
+                  </button>
+                </>
+              )}
+            </div>
+          )}
 
           {/* API Keys Management */}
           <div className="vault-api-keys">
