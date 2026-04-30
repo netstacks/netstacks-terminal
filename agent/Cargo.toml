@@ -1,6 +1,6 @@
 [package]
 name = "netstacks-agent"
-version = "0.0.26"
+version = "0.0.27"
 edition = "2021"
 description = "Local Agent for NetStacks Terminal — SSH/Telnet/SFTP, credential vault, and AI assistant for Personal Mode."
 license = "Apache-2.0"
@@ -98,6 +98,20 @@ rmcp = { version = "0.14", features = ["client", "transport-child-process", "tra
 
 # Email sending
 lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# Platform-specific deps
+[target.'cfg(target_os = "macos")'.dependencies]
+# Touch ID prompt + keychain storage for the vault master password.
+# We use plain SecItem* (legacy keychain) so it works in unsigned dev builds,
+# and call LAContext.evaluatePolicy via objc2 to enforce Touch ID explicitly.
+security-framework = "2.11"
+security-framework-sys = "2.11"
+core-foundation = "0.9"
+core-foundation-sys = "0.8"
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSError", "NSString"] }
+objc2-local-authentication = { version = "0.2", features = ["LAContext", "LAError", "block2"] }
+block2 = "0.5"
 
 [dev-dependencies]
 tempfile = "3"

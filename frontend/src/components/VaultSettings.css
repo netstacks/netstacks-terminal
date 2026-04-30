@@ -291,3 +291,68 @@
 .btn-cancel:hover {
   background: rgba(108, 117, 125, 0.2);
 }
+
+/* Touch ID section */
+.vault-biometric-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--color-bg-tertiary, rgba(255,255,255,0.03));
+  border: 1px solid var(--color-border, rgba(255,255,255,0.08));
+  border-radius: 6px;
+}
+.vault-biometric-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+}
+.vault-biometric-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.vault-biometric-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.vault-biometric-dot.enabled { background: var(--color-success, #4ec9b0); }
+.vault-biometric-dot.disabled { background: var(--color-text-secondary); opacity: 0.5; }
+.btn-enable-biometric,
+.btn-disable-biometric {
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+.btn-enable-biometric:hover,
+.btn-disable-biometric:hover { background: var(--color-bg-hover); }
+.btn-disable-biometric { color: var(--color-warning, #dcdcaa); }
+.vault-biometric-enable-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.vault-biometric-enable-form input {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+.vault-biometric-enable-actions {
+  display: flex;
+  gap: 8px;
+}
+.vault-biometric-warning {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-warning, #dcdcaa);
+  line-height: 1.5;
+}

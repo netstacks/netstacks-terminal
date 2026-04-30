@@ -1,25 +1,75 @@
-/* Vault Unlock Gate - Full screen overlay */
+/* Vault Unlock Gate — themed to match netstacks.net (VS Code Dark) */
+
+/* Local accent tokens mirrored from the website so this view doesn't depend
+   on the rest of the app's stylesheet. Keeps the splash visually consistent
+   with netstacks.net even if the app theme drifts later. */
 .vault-gate {
+  --vg-bg: #1e1e1e;
+  --vg-card-bg: #2d2d2d;
+  --vg-elevated: #333333;
+  --vg-border: #3c3c3c;
+  --vg-border-hover: #4d4d4d;
+  --vg-text-primary: #d4d4d4;
+  --vg-text-secondary: #9d9d9d;
+  --vg-text-muted: #6d6d6d;
+  --vg-accent: #569cd6;
+  --vg-accent-2: #4ec9b0;
+  --vg-accent-light: rgba(86, 156, 214, 0.15);
+  --vg-accent-grad: linear-gradient(135deg, #569cd6 0%, #4ec9b0 100%);
+  --vg-error: #f14c4c;
+  --vg-error-bg: rgba(241, 76, 76, 0.1);
+  --vg-warning: #dcdcaa;
+  --vg-glow: 0 0 60px rgba(86, 156, 214, 0.15);
+
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+  background: var(--vg-bg);
   z-index: 10000;
+  overflow: hidden;
+}
+
+/* Subtle 48px grid overlay matches the website body::before */
+.vault-gate::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Soft accent glow behind the card */
+.vault-gate::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 600px;
+  height: 600px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(86, 156, 214, 0.08) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .vault-gate-container {
+  position: relative;
+  z-index: 1;
   width: 100%;
-  max-width: 400px;
-  padding: 40px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  backdrop-filter: blur(10px);
+  max-width: 420px;
+  padding: 40px 36px;
+  background: var(--vg-card-bg);
+  border: 1px solid var(--vg-border);
+  border-radius: 12px;
+  box-shadow:
+    0 20px 25px -5px rgba(0, 0, 0, 0.5),
+    var(--vg-glow);
 }
 
 .vault-gate-loading {
@@ -27,59 +77,64 @@
   flex-direction: column;
   align-items: center;
   gap: 16px;
-  color: #94a3b8;
+  color: var(--vg-text-secondary);
 }
 
 .vault-gate-header {
   text-align: center;
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
 
 .vault-logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 80px;
-  height: 80px;
-  margin-bottom: 16px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.2) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  border-radius: 20px;
-  color: #818cf8;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 18px;
+  background: var(--vg-accent-light);
+  border: 1px solid rgba(86, 156, 214, 0.35);
+  border-radius: 16px;
+  color: var(--vg-accent);
+  box-shadow: 0 0 30px rgba(86, 156, 214, 0.2);
 }
 
 .vault-gate-header h1 {
   margin: 0 0 8px 0;
   font-size: 28px;
-  font-weight: 600;
-  color: #f1f5f9;
-  letter-spacing: -0.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--vg-text-primary);
+  background: var(--vg-accent-grad);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .vault-subtitle {
   margin: 0;
   font-size: 14px;
-  color: #94a3b8;
-  line-height: 1.5;
+  color: var(--vg-text-secondary);
+  line-height: 1.6;
 }
 
 .vault-error {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  border-radius: 8px;
-  color: #f87171;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  background: var(--vg-error-bg);
+  border: 1px solid rgba(241, 76, 76, 0.3);
+  border-radius: 6px;
+  color: var(--vg-error);
   font-size: 13px;
 }
 
 .vault-form {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .vault-field {
@@ -89,31 +144,33 @@
 }
 
 .vault-field label {
-  font-size: 12px;
-  font-weight: 500;
-  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vg-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
+  font-family: var(--font-family-mono, 'JetBrains Mono', 'Consolas', monospace);
 }
 
 .vault-field input {
-  padding: 12px 16px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  color: #f1f5f9;
+  padding: 12px 14px;
+  background: var(--vg-bg);
+  border: 1px solid var(--vg-border);
+  border-radius: 6px;
+  color: var(--vg-text-primary);
   font-size: 15px;
-  transition: all 0.2s ease;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .vault-field input:focus {
   outline: none;
-  border-color: rgba(99, 102, 241, 0.5);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  border-color: var(--vg-accent);
+  box-shadow: 0 0 0 3px var(--vg-accent-light);
 }
 
 .vault-field input::placeholder {
-  color: #64748b;
+  color: var(--vg-text-muted);
 }
 
 .vault-field input:disabled {
@@ -126,21 +183,22 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: 8px;
-  padding: 14px 24px;
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  margin-top: 6px;
+  padding: 12px 20px;
+  background: var(--vg-accent);
   border: none;
-  border-radius: 8px;
-  color: white;
+  border-radius: 6px;
+  color: #ffffff;
   font-size: 15px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .vault-submit:hover:not(:disabled) {
+  background: #6bb3eb;
   transform: translateY(-1px);
-  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 6px 20px rgba(86, 156, 214, 0.35);
 }
 
 .vault-submit:active:not(:disabled) {
@@ -152,18 +210,55 @@
   cursor: not-allowed;
 }
 
+/* Touch ID button — secondary tone, accent border. Stretched to match the
+   primary Unlock button (which is full-width inside the form's flex column). */
+.vault-biometric-btn {
+  width: 100%;
+  margin-bottom: 14px;
+  background: var(--vg-accent-light);
+  border: 1px solid rgba(86, 156, 214, 0.4);
+  color: var(--vg-accent);
+}
+
+.vault-biometric-btn:hover:not(:disabled) {
+  background: rgba(86, 156, 214, 0.22);
+  border-color: var(--vg-accent);
+  color: #ffffff;
+  box-shadow: 0 4px 18px rgba(86, 156, 214, 0.25);
+}
+
+.vault-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px 0;
+  color: var(--vg-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-family: var(--font-family-mono, 'JetBrains Mono', 'Consolas', monospace);
+}
+
+.vault-divider::before,
+.vault-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--vg-border);
+}
+
 .vault-spinner {
   width: 24px;
   height: 24px;
   border: 2px solid rgba(255, 255, 255, 0.2);
-  border-top-color: white;
+  border-top-color: #ffffff;
   border-radius: 50%;
   animation: vault-spin 0.8s linear infinite;
 }
 
 .vault-spinner.small {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 @keyframes vault-spin {
@@ -173,12 +268,13 @@
 }
 
 .vault-hint {
-  margin: 20px 0 0 0;
-  padding: 12px;
-  background: rgba(99, 102, 241, 0.1);
-  border-radius: 8px;
+  margin: 18px 0 0 0;
+  padding: 10px 12px;
+  background: var(--vg-accent-light);
+  border-left: 2px solid var(--vg-accent);
+  border-radius: 4px;
   font-size: 12px;
-  color: #a5b4fc;
-  text-align: center;
+  color: var(--vg-text-secondary);
+  text-align: left;
   line-height: 1.5;
 }

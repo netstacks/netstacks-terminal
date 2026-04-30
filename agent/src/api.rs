@@ -423,6 +423,135 @@ pub async fn lock_vault(State(state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+// === Vault Biometric (Touch ID) Endpoints — macOS-only meaningful ===
+
+/// Status of biometric vault unlock for the current device.
+#[derive(Serialize)]
+pub struct BiometricStatus {
+    /// Whether the agent build supports biometric unlock at all (macOS today).
+    pub supported: bool,
+    /// Whether a keychain entry currently exists.
+    pub enrolled: bool,
+    /// Whether the user has flipped the toggle on (UI gating; may diverge
+    /// from `enrolled` if the keychain entry was wiped externally).
+    pub enabled: bool,
+}
+
+/// GET `/vault/biometric/status` — does NOT trigger Touch ID.
+pub async fn biometric_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BiometricStatus>, ApiError> {
+    let supported = crate::biometric::BiometricVaultStore::is_supported();
+    let enrolled = supported && crate::biometric::BiometricVaultStore::is_enrolled();
+    let enabled_setting = state
+        .provider
+        .get_setting("vault.biometric_enabled")
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Json(BiometricStatus {
+        supported,
+        enrolled,
+        enabled: enabled_setting && enrolled,
+    }))
+}
+
+/// Request body for enabling biometric unlock — carries the master password
+/// to verify before enrolling.
+#[derive(Deserialize)]
+pub struct EnableBiometricRequest {
+    pub password: String,
+}
+
+impl std::fmt::Debug for EnableBiometricRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnableBiometricRequest")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+fn biometric_err_to_api(e: crate::biometric::BiometricError) -> ApiError {
+    use crate::biometric::BiometricError;
+    let code = match &e {
+        BiometricError::Unsupported => "BIOMETRIC_UNSUPPORTED",
+        BiometricError::NotEnrolled => "BIOMETRIC_NOT_ENROLLED",
+        BiometricError::UserCancelled => "BIOMETRIC_CANCELLED",
+        BiometricError::Other(_) => "BIOMETRIC_ERROR",
+    };
+    ApiError {
+        error: e.to_string(),
+        code: code.to_string(),
+    }
+}
+
+/// POST `/vault/biometric/enable` — verify password, store in keychain, flip setting.
+pub async fn enable_biometric(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EnableBiometricRequest>,
+) -> Result<StatusCode, ApiError> {
+    if !crate::biometric::BiometricVaultStore::is_supported() {
+        return Err(ApiError {
+            error: "Biometric unlock is not supported on this platform".to_string(),
+            code: "BIOMETRIC_UNSUPPORTED".to_string(),
+        });
+    }
+    // Verify the password is correct by unlocking. (Idempotent if already unlocked.)
+    state.provider.unlock(&req.password).await?;
+    crate::biometric::BiometricVaultStore::store(req.password.clone())
+        .await
+        .map_err(biometric_err_to_api)?;
+    state
+        .provider
+        .set_setting(
+            "vault.biometric_enabled",
+            serde_json::json!(true),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST `/vault/biometric/unlock` — Touch ID prompt then unlock vault.
+pub async fn unlock_with_biometric(
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let password = crate::biometric::BiometricVaultStore::retrieve()
+        .await
+        .map_err(biometric_err_to_api)?;
+    match state.provider.unlock(&password).await {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            // Stored password no longer matches the vault — most likely the
+            // master password was changed somewhere else. Wipe the stale entry
+            // and clear the toggle so the user gets a clean re-enrollment path.
+            let _ = crate::biometric::BiometricVaultStore::delete().await;
+            let _ = state
+                .provider
+                .set_setting("vault.biometric_enabled", serde_json::json!(false))
+                .await;
+            Err(e.into())
+        }
+    }
+}
+
+/// DELETE `/vault/biometric` — remove keychain entry, clear setting.
+pub async fn disable_biometric(
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    crate::biometric::BiometricVaultStore::delete()
+        .await
+        .map_err(biometric_err_to_api)?;
+    state
+        .provider
+        .set_setting(
+            "vault.biometric_enabled",
+            serde_json::json!(false),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Store credential for a session
 pub async fn store_credential(
     State(state): State<Arc<AppState>>,

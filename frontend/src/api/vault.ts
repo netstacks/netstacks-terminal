@@ -56,3 +56,65 @@ export async function lockVault(): Promise<void> {
   if (getCurrentMode() === 'enterprise') throw new Error('Local vault is not available in enterprise mode');
   await getClient().http.post('/vault/lock');
 }
+
+// === Biometric (Touch ID) unlock ===
+
+export interface BiometricStatus {
+  /** Whether the running build supports biometric unlock (macOS today). */
+  supported: boolean;
+  /** Whether a keychain entry currently exists. */
+  enrolled: boolean;
+  /** User-facing toggle (only true when both setting=on AND keychain entry exists). */
+  enabled: boolean;
+}
+
+const DISABLED_BIOMETRIC_STATUS: BiometricStatus = {
+  supported: false,
+  enrolled: false,
+  enabled: false,
+};
+
+/**
+ * Check whether Touch ID unlock is available on this device. Does NOT trigger
+ * the biometric prompt — safe to call on any screen including the locked one.
+ */
+export async function getBiometricStatus(): Promise<BiometricStatus> {
+  if (getCurrentMode() === 'enterprise') return DISABLED_BIOMETRIC_STATUS;
+  try {
+    const { data } = await getClient().http.get('/vault/biometric/status');
+    return data;
+  } catch {
+    return DISABLED_BIOMETRIC_STATUS;
+  }
+}
+
+/**
+ * Enroll Touch ID: stores the master password in the OS keychain behind a
+ * biometric access-control flag. Verifies the password by unlocking first.
+ */
+export async function enableBiometric(password: string): Promise<void> {
+  if (getCurrentMode() === 'enterprise') {
+    throw new Error('Biometric unlock is not available in enterprise mode');
+  }
+  await getClient().http.post('/vault/biometric/enable', { password });
+}
+
+/**
+ * Unlock the vault using Touch ID. Triggers the system biometric prompt;
+ * resolves on success, throws on cancel or failure (caller falls back to
+ * password input).
+ */
+export async function unlockVaultWithBiometric(): Promise<void> {
+  if (getCurrentMode() === 'enterprise') {
+    throw new Error('Biometric unlock is not available in enterprise mode');
+  }
+  await getClient().http.post('/vault/biometric/unlock');
+}
+
+/**
+ * Remove the biometric enrollment from this device.
+ */
+export async function disableBiometric(): Promise<void> {
+  if (getCurrentMode() === 'enterprise') return;
+  await getClient().http.delete('/vault/biometric');
+}
