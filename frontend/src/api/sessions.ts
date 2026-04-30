@@ -11,8 +11,8 @@ export const CLI_FLAVOR_OPTIONS: { value: CliFlavor; label: string }[] = [
   { value: 'linux', label: 'Linux/Unix Shell' },
   { value: 'cisco-ios', label: 'Cisco IOS/IOS-XE' },
   { value: 'cisco-nxos', label: 'Cisco NX-OS' },
-  { value: 'juniper-junos', label: 'Juniper Junos' },
-  { value: 'arista-eos', label: 'Arista EOS' },
+  { value: 'juniper', label: 'Juniper Junos' },
+  { value: 'arista', label: 'Arista EOS' },
   { value: 'paloalto', label: 'Palo Alto PAN-OS' },
   { value: 'fortinet', label: 'Fortinet FortiOS' },
 ];

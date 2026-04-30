@@ -475,7 +475,7 @@ export const analyzeChangeToolDefinition: AgentTool = {
       },
       device_type: {
         type: 'string',
-        description: 'Device type/vendor (e.g., cisco-ios, juniper-junos, linux)',
+        description: 'Device type/vendor (e.g., cisco-ios, juniper, linux)',
       },
     },
     required: ['before_output', 'after_output', 'change_description'],
@@ -497,7 +497,7 @@ export const suggestPreChecksToolDefinition: AgentTool = {
       },
       device_type: {
         type: 'string',
-        description: 'Device type/vendor (e.g., cisco-ios, juniper-junos, linux)',
+        description: 'Device type/vendor (e.g., cisco-ios, juniper, linux)',
       },
       affected_interface: {
         type: 'string',

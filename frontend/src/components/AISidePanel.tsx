@@ -286,11 +286,11 @@ const AISidePanel = ({
         switch (cliFlavor) {
           case 'cisco-ios':
           case 'cisco-nxos':
-          case 'arista-eos':
+          case 'arista':
             // Cisco IOS, NX-OS, and Arista EOS all use this command
             await onExecuteCommand(sessionId, 'terminal length 0')
             break
-          case 'juniper-junos':
+          case 'juniper':
             // Juniper uses screen-length in operational mode
             await onExecuteCommand(sessionId, 'set cli screen-length 0')
             break
@@ -313,7 +313,7 @@ const AISidePanel = ({
     // Helper to append no-more pipe for commands
     // For auto mode and Juniper, always use | no-more since it's the safest option
     const addNoPager = (cmd: string): string => {
-      if (cliFlavor === 'juniper-junos' || cliFlavor === 'auto') {
+      if (cliFlavor === 'juniper' || cliFlavor === 'auto') {
         // Juniper and auto mode - | no-more is widely supported
         return `${cmd} | no-more`
       }

@@ -869,6 +869,17 @@ pub struct ProfileMappings {
     pub by_role: std::collections::HashMap<String, String>,
 }
 
+/// CLI flavor mappings for NetBox source (maps manufacturer/platform slugs to CLI flavor)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CliFlavorMappings {
+    /// Map of manufacturer slug -> CLI flavor
+    #[serde(default)]
+    pub by_manufacturer: std::collections::HashMap<String, CliFlavor>,
+    /// Map of platform slug -> CLI flavor
+    #[serde(default)]
+    pub by_platform: std::collections::HashMap<String, CliFlavor>,
+}
+
 /// Sync filters for NetBox import (legacy, single-value)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncFilters {
@@ -911,6 +922,8 @@ pub struct NetBoxSource {
     #[serde(default)]
     pub profile_mappings: ProfileMappings,
     #[serde(default)]
+    pub cli_flavor_mappings: CliFlavorMappings,
+    #[serde(default)]
     pub device_filters: Option<DeviceFilters>,
     pub last_sync_at: Option<DateTime<Utc>>,
     pub last_sync_filters: Option<SyncFilters>,
@@ -930,6 +943,8 @@ pub struct NewNetBoxSource {
     #[serde(default)]
     pub profile_mappings: ProfileMappings,
     #[serde(default)]
+    pub cli_flavor_mappings: CliFlavorMappings,
+    #[serde(default)]
     pub device_filters: Option<DeviceFilters>,
 }
 
@@ -942,6 +957,7 @@ pub struct UpdateNetBoxSource {
     pub api_token: Option<String>,
     pub default_profile_id: Option<Option<String>>,
     pub profile_mappings: Option<ProfileMappings>,
+    pub cli_flavor_mappings: Option<CliFlavorMappings>,
     /// Device filters for import (multi-select)
     pub device_filters: Option<Option<DeviceFilters>>,
     /// Updated sync timestamp (set by sync-complete endpoint)

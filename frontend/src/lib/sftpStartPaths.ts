@@ -7,8 +7,8 @@ import type { CliFlavor } from '../api/sessions'
 const CLI_FLAVOR_PATHS: Record<string, string> = {
   'cisco-ios': 'flash:/',
   'cisco-nxos': 'bootflash:/',
-  'juniper-junos': '/var/',
-  'arista-eos': 'flash:/',
+  'juniper': '/var/',
+  'arista': 'flash:/',
   'paloalto': '/',
   'fortinet': '/',
 }

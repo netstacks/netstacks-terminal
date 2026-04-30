@@ -161,7 +161,7 @@ function parseCiscoNxos(output: string): Partial<DeviceEnrichment> {
 function parseJuniperJunos(output: string): Partial<DeviceEnrichment> {
   const result: Partial<DeviceEnrichment> = {
     vendor: 'Juniper',
-    cliFlavor: 'juniper-junos',
+    cliFlavor: 'juniper',
   };
 
   // Model: "Model: mx240"
@@ -199,7 +199,7 @@ function parseJuniperJunos(output: string): Partial<DeviceEnrichment> {
 function parseAristaEos(output: string): Partial<DeviceEnrichment> {
   const result: Partial<DeviceEnrichment> = {
     vendor: 'Arista',
-    cliFlavor: 'arista-eos',
+    cliFlavor: 'arista',
   };
 
   // Model: "Arista DCS-7280SR-48C6"
@@ -281,9 +281,9 @@ export function parseVersionOutput(
       return parseCiscoIos(output);
     case 'cisco-nxos':
       return parseCiscoNxos(output);
-    case 'juniper-junos':
+    case 'juniper':
       return parseJuniperJunos(output);
-    case 'arista-eos':
+    case 'arista':
       return parseAristaEos(output);
     case 'linux':
       return parseLinux(output);
@@ -315,12 +315,12 @@ export function detectCliFlavorFromVersion(output: string): CliFlavor | undefine
 
   // Juniper
   if (lower.includes('junos') || lower.includes('juniper')) {
-    return 'juniper-junos';
+    return 'juniper';
   }
 
   // Arista
   if (lower.includes('arista') || lower.includes('eos')) {
-    return 'arista-eos';
+    return 'arista';
   }
 
   // Linux

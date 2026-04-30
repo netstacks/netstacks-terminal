@@ -159,9 +159,10 @@ export default function IntegrationsTab() {
   };
 
   const handleImportComplete = () => {
-    setImportDialogOpen(false);
-    setSyncSourceId(undefined);
-    fetchSources(); // Refresh to show updated last_sync_at
+    // Refresh the source list (last_sync_at, etc.) but leave the import dialog
+    // open. The dialog shows a per-import report that the user dismisses with
+    // "Done" or "Import More" — auto-closing here would hide it.
+    fetchSources();
   };
 
   const handleImportFromFile = () => {

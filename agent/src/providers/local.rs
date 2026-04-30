@@ -421,6 +421,7 @@ struct NetBoxSourceRow {
     url: String,
     default_profile_id: Option<String>,
     profile_mappings: Option<String>,
+    cli_flavor_mappings: Option<String>,
     device_filters: Option<String>,
     last_sync_at: Option<String>,
     last_sync_filters: Option<String>,
@@ -1035,6 +1036,12 @@ impl NetBoxSourceRow {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
+        let cli_flavor_mappings: CliFlavorMappings = self
+            .cli_flavor_mappings
+            .as_ref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
         let device_filters: Option<DeviceFilters> = self
             .device_filters
             .as_ref()
@@ -1061,6 +1068,7 @@ impl NetBoxSourceRow {
             url: self.url,
             default_profile_id: self.default_profile_id,
             profile_mappings,
+            cli_flavor_mappings,
             device_filters,
             last_sync_at,
             last_sync_filters,
@@ -2982,6 +2990,9 @@ impl DataProvider for LocalDataProvider {
         let profile_mappings_json = serde_json::to_string(&source.profile_mappings)
             .map_err(|e| ProviderError::Database(format!("Failed to serialize profile_mappings: {}", e)))?;
 
+        let cli_flavor_mappings_json = serde_json::to_string(&source.cli_flavor_mappings)
+            .map_err(|e| ProviderError::Database(format!("Failed to serialize cli_flavor_mappings: {}", e)))?;
+
         let device_filters_json = source.device_filters
             .map(|f| serde_json::to_string(&f))
             .transpose()
@@ -2989,8 +3000,8 @@ impl DataProvider for LocalDataProvider {
 
         sqlx::query(
             r#"
-            INSERT INTO netbox_sources (id, name, url, default_profile_id, profile_mappings, device_filters, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO netbox_sources (id, name, url, default_profile_id, profile_mappings, cli_flavor_mappings, device_filters, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -2998,6 +3009,7 @@ impl DataProvider for LocalDataProvider {
         .bind(&source.url)
         .bind(&source.default_profile_id)
         .bind(&profile_mappings_json)
+        .bind(&cli_flavor_mappings_json)
         .bind(&device_filters_json)
         .bind(&now)
         .bind(&now)
@@ -3025,6 +3037,7 @@ impl DataProvider for LocalDataProvider {
         let url = update.url.unwrap_or(current.url);
         let default_profile_id = update.default_profile_id.unwrap_or(current.default_profile_id);
         let profile_mappings = update.profile_mappings.unwrap_or(current.profile_mappings);
+        let cli_flavor_mappings = update.cli_flavor_mappings.unwrap_or(current.cli_flavor_mappings);
         let device_filters = update.device_filters.unwrap_or(current.device_filters);
         let last_sync_at = update.last_sync_at.unwrap_or(current.last_sync_at);
         let last_sync_filters = update.last_sync_filters.unwrap_or(current.last_sync_filters);
@@ -3032,6 +3045,8 @@ impl DataProvider for LocalDataProvider {
 
         let profile_mappings_json = serde_json::to_string(&profile_mappings)
             .map_err(|e| ProviderError::Database(format!("Failed to serialize profile_mappings: {}", e)))?;
+        let cli_flavor_mappings_json = serde_json::to_string(&cli_flavor_mappings)
+            .map_err(|e| ProviderError::Database(format!("Failed to serialize cli_flavor_mappings: {}", e)))?;
         let device_filters_json = device_filters
             .map(|f| serde_json::to_string(&f))
             .transpose()
@@ -3049,7 +3064,7 @@ impl DataProvider for LocalDataProvider {
         sqlx::query(
             r#"
             UPDATE netbox_sources SET
-                name = ?, url = ?, default_profile_id = ?, profile_mappings = ?,
+                name = ?, url = ?, default_profile_id = ?, profile_mappings = ?, cli_flavor_mappings = ?,
                 device_filters = ?, last_sync_at = ?, last_sync_filters = ?, last_sync_result = ?,
                 updated_at = ?
             WHERE id = ?
@@ -3059,6 +3074,7 @@ impl DataProvider for LocalDataProvider {
         .bind(&url)
         .bind(&default_profile_id)
         .bind(&profile_mappings_json)
+        .bind(&cli_flavor_mappings_json)
         .bind(&device_filters_json)
         .bind(&last_sync_at_str)
         .bind(&last_sync_filters_json)

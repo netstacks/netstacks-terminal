@@ -403,9 +403,9 @@ export function parseInterfacesOutput(
       return parseCiscoIos(output);
     case 'cisco-nxos':
       return parseCiscoNxos(output);
-    case 'juniper-junos':
+    case 'juniper':
       return parseJuniperJunos(output);
-    case 'arista-eos':
+    case 'arista':
       return parseAristaEos(output);
     case 'linux':
       return parseLinux(output);

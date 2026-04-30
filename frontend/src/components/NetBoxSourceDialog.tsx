@@ -6,9 +6,11 @@ import {
   getNetBoxToken,
   type NetBoxSource,
   type ProfileMappings,
+  type CliFlavorMappings,
   type DeviceFilters,
 } from '../api/netboxSources';
 import { listProfiles, type CredentialProfile } from '../api/profiles';
+import { CLI_FLAVOR_OPTIONS, type CliFlavor } from '../api/sessions';
 import {
   fetchSites,
   fetchRoles,
@@ -62,6 +64,11 @@ const Icons = {
 interface MappingRow {
   key: string;
   profileId: string;
+}
+
+interface FlavorMappingRow {
+  key: string;
+  flavor: CliFlavor;
 }
 
 interface MultiSelectOption {
@@ -172,6 +179,10 @@ export default function NetBoxSourceDialog({
   const [siteMappings, setSiteMappings] = useState<MappingRow[]>([]);
   const [roleMappings, setRoleMappings] = useState<MappingRow[]>([]);
 
+  // CLI flavor mappings (manufacturer/platform slug → CliFlavor)
+  const [manufacturerFlavorMappings, setManufacturerFlavorMappings] = useState<FlavorMappingRow[]>([]);
+  const [platformFlavorMappings, setPlatformFlavorMappings] = useState<FlavorMappingRow[]>([]);
+
   // Test connection state
   const [testing, setTesting] = useState(false);
   const [testSuccess, setTestSuccess] = useState<boolean | null>(null);
@@ -202,6 +213,9 @@ export default function NetBoxSourceDialog({
   const [totalDeviceCount, setTotalDeviceCount] = useState<number | null>(null);
   const [countLoading, setCountLoading] = useState(false);
 
+  // Token resolved for API calls (typed token, or stored token in edit mode)
+  const [resolvedToken, setResolvedToken] = useState<string>('');
+
   // Load profiles on mount
   useEffect(() => {
     listProfiles()
@@ -231,6 +245,16 @@ export default function NetBoxSourceDialog({
         setSiteMappings(siteRows);
         setRoleMappings(roleRows);
 
+        // Load CLI flavor mappings
+        const mfrFlavorRows = Object.entries(source.cli_flavor_mappings?.by_manufacturer || {}).map(
+          ([key, flavor]) => ({ key, flavor })
+        );
+        const platformFlavorRows = Object.entries(source.cli_flavor_mappings?.by_platform || {}).map(
+          ([key, flavor]) => ({ key, flavor })
+        );
+        setManufacturerFlavorMappings(mfrFlavorRows);
+        setPlatformFlavorMappings(platformFlavorRows);
+
         // Load device filters
         const filters = source.device_filters;
         setFilterSites(filters?.sites || []);
@@ -250,6 +274,7 @@ export default function NetBoxSourceDialog({
         setTags([]);
         setDeviceCount(null);
         setTotalDeviceCount(null);
+        setResolvedToken('');
       } else {
         // Create mode - reset to defaults
         setName('');
@@ -258,6 +283,8 @@ export default function NetBoxSourceDialog({
         setDefaultProfileId('');
         setSiteMappings([]);
         setRoleMappings([]);
+        setManufacturerFlavorMappings([]);
+        setPlatformFlavorMappings([]);
         setFilterSites([]);
         setFilterRoles([]);
         setFilterManufacturers([]);
@@ -273,6 +300,7 @@ export default function NetBoxSourceDialog({
         setTags([]);
         setDeviceCount(null);
         setTotalDeviceCount(null);
+        setResolvedToken('');
       }
 
       setError(null);
@@ -311,6 +339,7 @@ export default function NetBoxSourceDialog({
         setTags(fetchedTags);
         setTotalDeviceCount(total);
         setDeviceCount(total);
+        setResolvedToken(storedToken);
         setSitesLoaded(true);
         setTestSuccess(true); // Mark as connected since we fetched successfully
       } catch (err) {
@@ -346,7 +375,8 @@ export default function NetBoxSourceDialog({
       return;
     }
 
-    const tokenToUse = apiToken.trim() || (isEditing ? 'EXISTING_TOKEN' : '');
+    const tokenToUse = apiToken.trim() || resolvedToken;
+    if (!tokenToUse) return; // No token available — wait until auto-load resolves it
     const config = { url: url.trim(), token: tokenToUse };
 
     setCountLoading(true);
@@ -361,7 +391,7 @@ export default function NetBoxSourceDialog({
       .then((count) => setDeviceCount(count))
       .catch((err) => console.error('Failed to count devices:', err))
       .finally(() => setCountLoading(false));
-  }, [sitesLoaded, url, apiToken, isEditing, filterSites, filterRoles, filterManufacturers, filterPlatforms, filterStatuses, filterTags, totalDeviceCount]);
+  }, [sitesLoaded, url, apiToken, resolvedToken, filterSites, filterRoles, filterManufacturers, filterPlatforms, filterStatuses, filterTags, totalDeviceCount]);
 
   const handleTestConnection = async () => {
     if (!url.trim()) {
@@ -414,10 +444,12 @@ export default function NetBoxSourceDialog({
           setTags(fetchedTags);
           setTotalDeviceCount(total);
           setDeviceCount(total); // Start with all devices matching
+          setResolvedToken(tokenToUse);
           setSitesLoaded(true);
         } catch (err) {
           console.error('Failed to fetch NetBox metadata:', err);
           // Connection works but couldn't fetch metadata - still allow save
+          setResolvedToken(tokenToUse);
           setSitesLoaded(true);
         }
       } else {
@@ -466,6 +498,22 @@ export default function NetBoxSourceDialog({
         }
       }
 
+      // Build CLI flavor mappings
+      const cliFlavorMappings: CliFlavorMappings = {
+        by_manufacturer: {},
+        by_platform: {},
+      };
+      for (const row of manufacturerFlavorMappings) {
+        if (row.key && row.flavor) {
+          cliFlavorMappings.by_manufacturer[row.key] = row.flavor;
+        }
+      }
+      for (const row of platformFlavorMappings) {
+        if (row.key && row.flavor) {
+          cliFlavorMappings.by_platform[row.key] = row.flavor;
+        }
+      }
+
       // Build device filters
       const deviceFilters: DeviceFilters = {
         sites: filterSites,
@@ -489,6 +537,7 @@ export default function NetBoxSourceDialog({
           api_token: apiToken.trim() || undefined,
           default_profile_id: defaultProfileId || null,
           profile_mappings: profileMappings,
+          cli_flavor_mappings: cliFlavorMappings,
           device_filters: hasDeviceFilters ? deviceFilters : null,
         });
       } else {
@@ -499,6 +548,7 @@ export default function NetBoxSourceDialog({
           api_token: apiToken.trim(),
           default_profile_id: defaultProfileId || null,
           profile_mappings: profileMappings,
+          cli_flavor_mappings: cliFlavorMappings,
           device_filters: hasDeviceFilters ? deviceFilters : null,
         });
       }
@@ -537,6 +587,45 @@ export default function NetBoxSourceDialog({
     const updated = [...roleMappings];
     updated[index] = { ...updated[index], [field]: value };
     setRoleMappings(updated);
+  };
+
+  // CLI flavor mapping handlers
+  const handleAddManufacturerFlavorMapping = () => {
+    setManufacturerFlavorMappings([...manufacturerFlavorMappings, { key: '', flavor: 'auto' }]);
+  };
+  const handleRemoveManufacturerFlavorMapping = (index: number) => {
+    setManufacturerFlavorMappings(manufacturerFlavorMappings.filter((_, i) => i !== index));
+  };
+  const handleUpdateManufacturerFlavorMapping = (
+    index: number,
+    field: 'key' | 'flavor',
+    value: string,
+  ) => {
+    const updated = [...manufacturerFlavorMappings];
+    updated[index] = {
+      ...updated[index],
+      ...(field === 'key' ? { key: value } : { flavor: value as CliFlavor }),
+    };
+    setManufacturerFlavorMappings(updated);
+  };
+
+  const handleAddPlatformFlavorMapping = () => {
+    setPlatformFlavorMappings([...platformFlavorMappings, { key: '', flavor: 'auto' }]);
+  };
+  const handleRemovePlatformFlavorMapping = (index: number) => {
+    setPlatformFlavorMappings(platformFlavorMappings.filter((_, i) => i !== index));
+  };
+  const handleUpdatePlatformFlavorMapping = (
+    index: number,
+    field: 'key' | 'flavor',
+    value: string,
+  ) => {
+    const updated = [...platformFlavorMappings];
+    updated[index] = {
+      ...updated[index],
+      ...(field === 'key' ? { key: value } : { flavor: value as CliFlavor }),
+    };
+    setPlatformFlavorMappings(updated);
   };
 
   if (!isOpen) return null;
@@ -760,6 +849,158 @@ export default function NetBoxSourceDialog({
                       <button
                         className="mapping-delete"
                         onClick={() => handleRemoveRoleMapping(index)}
+                        title="Remove"
+                      >
+                        {Icons.trash}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* CLI Flavor Mappings */}
+          <div className="form-section">
+            <h3>CLI Flavor Mappings</h3>
+            <div className="form-hint-block">
+              Map NetBox manufacturer or platform slugs to a CLI flavor. Platform mappings take priority over manufacturer mappings. Devices with no match are imported as <code>auto</code> and detected at connect time.
+            </div>
+
+            {/* By Manufacturer */}
+            <div className="mapping-group">
+              <div className="mapping-header">
+                <span>By Manufacturer</span>
+                <button
+                  className="btn-icon-small"
+                  onClick={handleAddManufacturerFlavorMapping}
+                  title="Add manufacturer mapping"
+                >
+                  {Icons.plus}
+                </button>
+              </div>
+
+              {manufacturerFlavorMappings.length === 0 ? (
+                <div className="mapping-empty">No manufacturer mappings configured.</div>
+              ) : (
+                <div className="mapping-list">
+                  {manufacturerFlavorMappings.map((row, index) => (
+                    <div key={index} className="mapping-row">
+                      {sitesLoaded && manufacturers.length > 0 ? (
+                        <select
+                          value={row.key}
+                          onChange={(e) =>
+                            handleUpdateManufacturerFlavorMapping(index, 'key', e.target.value)
+                          }
+                          className="mapping-key-select"
+                        >
+                          <option value="">Select manufacturer...</option>
+                          {manufacturers.map((m) => (
+                            <option key={m.slug} value={m.slug}>
+                              {m.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={row.key}
+                          onChange={(e) =>
+                            handleUpdateManufacturerFlavorMapping(index, 'key', e.target.value)
+                          }
+                          placeholder="Manufacturer slug"
+                          className="mapping-key-input"
+                        />
+                      )}
+                      <span className="mapping-arrow">→</span>
+                      <select
+                        value={row.flavor}
+                        onChange={(e) =>
+                          handleUpdateManufacturerFlavorMapping(index, 'flavor', e.target.value)
+                        }
+                        className="mapping-profile-select"
+                      >
+                        {CLI_FLAVOR_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="mapping-delete"
+                        onClick={() => handleRemoveManufacturerFlavorMapping(index)}
+                        title="Remove"
+                      >
+                        {Icons.trash}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* By Platform */}
+            <div className="mapping-group">
+              <div className="mapping-header">
+                <span>By Platform</span>
+                <button
+                  className="btn-icon-small"
+                  onClick={handleAddPlatformFlavorMapping}
+                  title="Add platform mapping"
+                >
+                  {Icons.plus}
+                </button>
+              </div>
+
+              {platformFlavorMappings.length === 0 ? (
+                <div className="mapping-empty">No platform mappings configured.</div>
+              ) : (
+                <div className="mapping-list">
+                  {platformFlavorMappings.map((row, index) => (
+                    <div key={index} className="mapping-row">
+                      {sitesLoaded && platforms.length > 0 ? (
+                        <select
+                          value={row.key}
+                          onChange={(e) =>
+                            handleUpdatePlatformFlavorMapping(index, 'key', e.target.value)
+                          }
+                          className="mapping-key-select"
+                        >
+                          <option value="">Select platform...</option>
+                          {platforms.map((p) => (
+                            <option key={p.slug} value={p.slug}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={row.key}
+                          onChange={(e) =>
+                            handleUpdatePlatformFlavorMapping(index, 'key', e.target.value)
+                          }
+                          placeholder="Platform slug"
+                          className="mapping-key-input"
+                        />
+                      )}
+                      <span className="mapping-arrow">→</span>
+                      <select
+                        value={row.flavor}
+                        onChange={(e) =>
+                          handleUpdatePlatformFlavorMapping(index, 'flavor', e.target.value)
+                        }
+                        className="mapping-profile-select"
+                      >
+                        {CLI_FLAVOR_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="mapping-delete"
+                        onClick={() => handleRemovePlatformFlavorMapping(index)}
                         title="Remove"
                       >
                         {Icons.trash}
