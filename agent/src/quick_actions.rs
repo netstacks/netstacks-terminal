@@ -129,32 +129,82 @@ async fn resolve_multi_step_auth(
 ) -> Result<HashMap<String, String>, String> {
     let mut variables = base_variables.clone();
 
-    for step in steps {
-        let url = format!("{}{}", resource.base_url.trim_end_matches('/'), step.path);
+    for (idx, step) in steps.iter().enumerate() {
+        let resolved_step_path = substitute_variables(&step.path, &variables);
+        let url = format!(
+            "{}/{}",
+            resource.base_url.trim_end_matches('/'),
+            resolved_step_path.trim_start_matches('/'),
+        );
         let method: reqwest::Method = step.method.parse()
             .map_err(|_| format!("Invalid HTTP method: {}", step.method))?;
 
         let mut req = client.request(method, &url);
 
+        // Per-step headers (templated). Applied before body so the body's
+        // implicit Content-Type from .body() doesn't get clobbered.
+        for (k, v) in &step.headers {
+            req = req.header(k, substitute_variables(v, &variables));
+        }
+
+        // Optional Basic Auth derived from the resource's stored username/password.
+        // Only applied when both are present — otherwise reqwest would send
+        // `Authorization: Basic <empty>` which leaks intent without working.
+        if step.use_basic_auth {
+            match (variables.get("username"), variables.get("password")) {
+                (Some(u), Some(p)) if !u.is_empty() => {
+                    req = req.basic_auth(u, Some(p));
+                }
+                _ => {
+                    return Err(format!(
+                        "Step {} requires Basic Auth but no username/password is stored on the resource",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+
         // Add body with variable substitution
         if let Some(body_template) = &step.body {
-            let body = substitute_variables(body_template, &variables);
-            req = req.header("Content-Type", "application/json").body(body);
+            if !body_template.is_empty() {
+                let body = substitute_variables(body_template, &variables);
+                req = req.header("Content-Type", "application/json").body(body);
+            }
         }
 
         let response = req.send().await
-            .map_err(|e| format!("Auth step failed: {}", e))?;
+            .map_err(|e| format!("Auth step {} failed: {}", idx + 1, e))?;
 
-        if !response.status().is_success() {
-            return Err(format!("Auth step returned status {}", response.status()));
+        let status = response.status();
+        let response_text = response.text().await
+            .map_err(|e| format!("Auth step {}: failed to read response body: {}", idx + 1, e))?;
+
+        if !status.is_success() {
+            // Surface a snippet of the body so the user can see *why* (e.g. login page HTML, error JSON).
+            let snippet: String = response_text.chars().take(200).collect();
+            return Err(format!(
+                "Auth step {} returned HTTP {}: {}",
+                idx + 1,
+                status,
+                snippet
+            ));
         }
 
-        let response_json: serde_json::Value = response.json().await
-            .map_err(|e| format!("Failed to parse auth response: {}", e))?;
+        let response_json: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| {
+                let snippet: String = response_text.chars().take(200).collect();
+                format!(
+                    "Auth step {}: response was not JSON ({}). First 200 chars: {}",
+                    idx + 1, e, snippet
+                )
+            })?;
 
         // Extract value and store as variable
         let extracted = json_extract(&response_json, &step.extract_path)
-            .ok_or_else(|| format!("Failed to extract '{}' from auth response", step.extract_path))?;
+            .ok_or_else(|| format!(
+                "Auth step {}: failed to extract '{}' from response",
+                idx + 1, step.extract_path
+            ))?;
 
         let extracted_str = match &extracted {
             serde_json::Value::String(s) => s.clone(),

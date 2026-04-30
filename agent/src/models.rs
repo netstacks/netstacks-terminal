@@ -2046,6 +2046,15 @@ pub struct AuthFlowStep {
     pub method: String,          // GET, POST, etc.
     pub path: String,            // e.g. "/api/v1/login"
     pub body: Option<String>,    // JSON body template with {{variables}}
+    /// Per-step request headers (templated), e.g. {"Accept":"application/json"}.
+    /// Defaults to empty for backward compatibility with existing rows.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// When true, this step sends an `Authorization: Basic base64(user:pass)`
+    /// header derived from the resource's stored username/password. Lets the
+    /// step act like a Basic-Auth login that returns a token in the response.
+    #[serde(default)]
+    pub use_basic_auth: bool,
     pub extract_path: String,    // JSON path to extract from response
     pub store_as: String,        // Variable name to store extracted value
 }

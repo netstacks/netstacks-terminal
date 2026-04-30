@@ -168,6 +168,28 @@ function ApiResourceDialog({
     setAuthFlow(updated)
   }
 
+  const toggleStepBasicAuth = (index: number, checked: boolean) => {
+    const updated = [...authFlow]
+    updated[index] = { ...updated[index], use_basic_auth: checked }
+    setAuthFlow(updated)
+  }
+
+  const updateStepHeaders = (index: number, jsonText: string) => {
+    const updated = [...authFlow]
+    // Store the raw text in a side state so the user can type freely; only
+    // commit when it parses cleanly. We just always set headers when valid JSON
+    // and leave it untouched when invalid (the textarea reflects the typed text).
+    try {
+      const parsed = jsonText.trim() ? JSON.parse(jsonText) : {}
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        updated[index] = { ...updated[index], headers: parsed as Record<string, string> }
+        setAuthFlow(updated)
+      }
+    } catch {
+      // ignore parse error during typing
+    }
+  }
+
   const removeAuthFlowStep = (index: number) => {
     setAuthFlow(authFlow.filter((_, i) => i !== index))
   }
@@ -264,12 +286,31 @@ function ApiResourceDialog({
                     <input type="text" value={step.path} onChange={(e) => updateAuthFlowStep(index, 'path', e.target.value)} placeholder="/api/v1/login" />
                   </div>
                   <div className="form-group">
-                    <label>Body Template</label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={!!step.use_basic_auth}
+                        onChange={(e) => toggleStepBasicAuth(index, e.target.checked)}
+                      />
+                      Send HTTP Basic Auth using the resource's username/password
+                    </label>
+                  </div>
+                  <div className="form-group">
+                    <label>Headers (JSON, optional)</label>
+                    <textarea
+                      defaultValue={step.headers ? JSON.stringify(step.headers, null, 2) : ''}
+                      onChange={(e) => updateStepHeaders(index, e.target.value)}
+                      placeholder='{"Accept": "application/json"}'
+                      rows={2}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Body Template (optional)</label>
                     <textarea value={step.body || ''} onChange={(e) => updateAuthFlowStep(index, 'body', e.target.value)} placeholder='{"username":"{{username}}","password":"{{password}}"}' rows={2} />
                   </div>
                   <div className="auth-flow-step-fields">
-                    <input type="text" value={step.extract_path} onChange={(e) => updateAuthFlowStep(index, 'extract_path', e.target.value)} placeholder="Extract path (e.g., token)" />
-                    <input type="text" value={step.store_as} onChange={(e) => updateAuthFlowStep(index, 'store_as', e.target.value)} placeholder="Store as (e.g., auth_token)" />
+                    <input type="text" value={step.extract_path} onChange={(e) => updateAuthFlowStep(index, 'extract_path', e.target.value)} placeholder="Extract path (e.g., api_key)" />
+                    <input type="text" value={step.store_as} onChange={(e) => updateAuthFlowStep(index, 'store_as', e.target.value)} placeholder="Store as (e.g., api_key)" />
                   </div>
                 </div>
               ))}

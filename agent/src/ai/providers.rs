@@ -198,8 +198,25 @@ pub enum AiProviderConfig {
 pub enum ApiFormat {
     /// OpenAI-compatible: POST {base_url}/chat/completions
     OpenAI,
-    /// Gemini/Vertex AI: POST {base_url}/{model}:generateContent
+    /// Gemini/Vertex AI: POST {base_url}/{model}:generateContent (auto-suffix
+    /// only added when the model name does not already contain ':').
     Gemini,
+    /// Anthropic on Vertex AI: POST {base_url}/{model}:rawPredict with
+    /// Anthropic message body (anthropic_version + messages + max_tokens).
+    /// Auto-suffix `:rawPredict` only added when model lacks ':'.
+    VertexAnthropic,
+}
+
+/// Build a `{base_url}/{model}` URL, auto-appending `:{default_action}` only
+/// when the model name doesn't already contain a `:` action suffix. Lets
+/// users put `claude-sonnet-4-6:rawPredict` (or any other action) directly
+/// in the Model field for endpoints that need a non-default action.
+fn build_model_action_url(base_url: &str, model: &str, default_action: &str) -> String {
+    if model.contains(':') {
+        format!("{}/{}", base_url.trim_end_matches('/'), model)
+    } else {
+        format!("{}/{}:{}", base_url.trim_end_matches('/'), model, default_action)
+    }
 }
 
 fn default_anthropic_model() -> String {
@@ -435,6 +452,18 @@ struct AnthropicRequest {
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
+}
+
+/// Anthropic-on-Vertex request format. Differs from native Anthropic in two
+/// ways: the model is in the URL (not the body), and an `anthropic_version`
+/// field selects the Vertex contract version.
+#[derive(Debug, Serialize)]
+struct VertexAnthropicRequest {
+    anthropic_version: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicMessage>,
 }
 
 /// Anthropic API request format with tools (for agent chat)
@@ -1223,10 +1252,11 @@ impl OpenAIProvider {
     }
 
     /// Build a request with auth headers and custom headers applied.
+    /// NOTE: do not set Content-Type here — `.json(&body)` already sets it.
+    /// Setting it twice causes reqwest to emit a duplicate Content-Type header,
+    /// which Apigee/Vertex rejects with a Pydantic body-validation error.
     fn apply_headers(&self, mut request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-        request = request
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json");
+        request = request.header("Authorization", format!("Bearer {}", token));
         for (key, value) in &self.custom_headers {
             request = request.header(key.as_str(), value.as_str());
         }
@@ -1566,8 +1596,10 @@ impl OpenAIProvider {
             tools: None, // Simple chat — no tools
         };
 
-        // Gemini URL: {base_url}/{model}:generateContent
-        let url = format!("{}/{}:generateContent", self.base_url, self.model);
+        // Gemini URL: {base_url}/{model}:generateContent — but if the user
+        // already wrote an action in the model field, respect it (e.g. for
+        // gateways that route differently per action).
+        let url = build_model_action_url(&self.base_url, &self.model, "generateContent");
 
         let response = self.send_request(self.client.post(&url).json(&request)).await?;
 
@@ -1712,7 +1744,7 @@ impl OpenAIProvider {
             tools: gemini_tools,
         };
 
-        let url = format!("{}/{}:generateContent", self.base_url, self.model);
+        let url = build_model_action_url(&self.base_url, &self.model, "generateContent");
         let response = self.send_request(self.client.post(&url).json(&request)).await?;
 
         let response_text = response.text().await.map_err(|e| {
@@ -1779,6 +1811,65 @@ impl OpenAIProvider {
 
         Ok(AgentResponse { content, stop_reason, usage })
     }
+
+    /// Anthropic-on-Vertex chat completion. Uses `:rawPredict` action and the
+    /// Anthropic message body schema (model lives in the URL, not the body).
+    async fn vertex_anthropic_chat_completion(
+        &self,
+        messages: Vec<ChatMessage>,
+        context: Option<AiContext>,
+    ) -> Result<String, AiError> {
+        let system_messages: Vec<&ChatMessage> = messages.iter().filter(|m| m.role == "system").collect();
+        let system_prompt = if !system_messages.is_empty() {
+            system_messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n\n")
+        } else {
+            build_system_prompt(&context, None)
+        };
+
+        let anthropic_messages: Vec<AnthropicMessage> = messages
+            .into_iter()
+            .filter(|m| m.role != "system")
+            .map(|m| AnthropicMessage {
+                role: if m.role == "user" { "user".to_string() } else { "assistant".to_string() },
+                content: m.content,
+            })
+            .collect();
+
+        let request = VertexAnthropicRequest {
+            anthropic_version: "vertex-2023-10-16".to_string(),
+            max_tokens: 4096,
+            system: Some(system_prompt),
+            messages: anthropic_messages,
+        };
+
+        let url = build_model_action_url(&self.base_url, &self.model, "rawPredict");
+        let response = self.send_request(self.client.post(&url).json(&request)).await?;
+
+        let response_text = response.text().await.map_err(|e| {
+            AiError::InvalidResponse(format!("Failed to read Vertex Anthropic response body: {}", e))
+        })?;
+
+        let api_response: AnthropicResponse = serde_json::from_str(&response_text).map_err(|e| {
+            AiError::InvalidResponse(format!(
+                "Failed to parse Vertex Anthropic response: {} — body: {}",
+                e,
+                &response_text[..response_text.len().min(200)]
+            ))
+        })?;
+
+        if let Some(error) = api_response.error {
+            return Err(AiError::RequestFailed(format!(
+                "{}: {}",
+                error.error_type, error.message
+            )));
+        }
+
+        api_response
+            .content
+            .into_iter()
+            .find_map(|c| if c.content_type == "text" { c.text } else { None })
+            .ok_or_else(|| AiError::InvalidResponse("No text content in Vertex Anthropic response".to_string()))
+    }
 }
 
 #[async_trait]
@@ -1788,9 +1879,12 @@ impl AiProvider for OpenAIProvider {
         messages: Vec<ChatMessage>,
         context: Option<AiContext>,
     ) -> Result<String, AiError> {
-        // Dispatch to Gemini format if configured
+        // Dispatch to per-format request builder when applicable.
         if self.api_format == ApiFormat::Gemini {
             return self.gemini_chat_completion(messages, context).await;
+        }
+        if self.api_format == ApiFormat::VertexAnthropic {
+            return self.vertex_anthropic_chat_completion(messages, context).await;
         }
 
         // Build system prompt with enhanced context
@@ -1853,6 +1947,32 @@ impl AiProvider for OpenAIProvider {
         // Gemini format: native function calling support
         if self.api_format == ApiFormat::Gemini {
             return self.gemini_agent_chat(system_prompt, messages, tools, options).await;
+        }
+        // Vertex Anthropic: tools not yet wired through this path; degrade
+        // gracefully to a plain chat call so single-shot AI use still works.
+        // (Tool-use plumbing for Vertex Anthropic is a follow-up.)
+        if self.api_format == ApiFormat::VertexAnthropic {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find_map(|m| match &m.content {
+                    AgentContent::Text(t) => Some(t.clone()),
+                    AgentContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                        AgentContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    }),
+                })
+                .unwrap_or_default();
+            let chat_messages = vec![
+                ChatMessage { role: "system".to_string(), content: system_prompt },
+                ChatMessage { role: "user".to_string(), content: last_user },
+            ];
+            let text = self.vertex_anthropic_chat_completion(chat_messages, None).await?;
+            return Ok(AgentResponse {
+                content: vec![AgentContentBlock::Text { text }],
+                stop_reason: Some("end_turn".to_string()),
+                usage: None,
+            });
         }
 
         // Convert Anthropic-style tools to OpenAI format
@@ -3098,10 +3218,18 @@ pub fn create_provider(config: Option<AiProviderConfig>) -> Box<dyn AiProvider> 
             // Determine API format: explicit setting > model name heuristic > default OpenAI
             let format = match api_format.as_deref() {
                 Some("gemini") => ApiFormat::Gemini,
+                Some("vertex-anthropic") => ApiFormat::VertexAnthropic,
                 Some(_) => ApiFormat::OpenAI,
                 None => {
-                    // Heuristic: if model or base_url contains "gemini" or "vertex", use Gemini format
-                    if model.contains("gemini") || base_url.contains("vertexai") || base_url.contains("vertex-ai") {
+                    // Heuristic: anthropic-on-vertex paths win first; then Gemini.
+                    let lower_base = base_url.to_lowercase();
+                    let lower_model = model.to_lowercase();
+                    if (lower_base.contains("vertex") || lower_base.contains("anthropic"))
+                        && (lower_model.starts_with("claude") || lower_model.contains(":rawpredict"))
+                    {
+                        tracing::info!("Auto-detected Vertex Anthropic format from model '{}' / base_url", model);
+                        ApiFormat::VertexAnthropic
+                    } else if lower_model.contains("gemini") || lower_base.contains("vertexai") || lower_base.contains("vertex-ai") {
                         tracing::info!("Auto-detected Gemini format from model '{}' / base_url", model);
                         ApiFormat::Gemini
                     } else {
@@ -3121,12 +3249,12 @@ pub fn create_provider(config: Option<AiProviderConfig>) -> Box<dyn AiProvider> 
                 }
             } else if api_key.is_empty() {
                 Box::new(MockProvider::new())
-            } else if format == ApiFormat::Gemini {
-                // Static API key with Gemini format
+            } else if format != ApiFormat::OpenAI {
+                // Static API key with non-default format (Gemini or Vertex Anthropic)
                 match OpenAIProvider::with_format(api_key, model, base_url, format) {
                     Ok(provider) => Box::new(provider),
                     Err(e) => {
-                        tracing::error!("Failed to create Gemini custom provider: {}", e);
+                        tracing::error!("Failed to create custom provider with format: {}", e);
                         Box::new(MockProvider::new())
                     }
                 }
