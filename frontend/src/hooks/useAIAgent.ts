@@ -885,7 +885,7 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
         if (flavor === 'linux' || flavor === 'auto') {
           // Inline env vars disable pagers for most Unix tools (less, more, systemctl, git, etc.)
           command = `PAGER=cat SYSTEMD_PAGER= GIT_PAGER=cat LESS=-FRX ${command}`;
-        } else if (flavor === 'juniper-junos') {
+        } else if (flavor === 'juniper') {
           // Juniper: pipe through no-more to suppress paging
           if (!command.includes('| no-more')) {
             command = `${command} | no-more`;

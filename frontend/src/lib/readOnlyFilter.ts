@@ -71,14 +71,14 @@ const VENDOR_SAFE_PATTERNS: Record<CliFlavor, RegExp[]> = {
     /^debug\s+/i,
     /^terminal\s+length\s+\d+/i,
   ],
-  'juniper-junos': [
+  'juniper': [
     /^show\s+/i,
     /^ping\s+/i,
     /^traceroute\s+/i,
     /^monitor\s+/i,  // Read-only monitoring
     /^set\s+cli\s+screen-(length|width)\s+\d+/i,  // CLI display only
   ],
-  'arista-eos': [
+  'arista': [
     /^show\s+/i,
     /^ping\s+/i,
     /^traceroute\s+/i,

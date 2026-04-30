@@ -248,15 +248,11 @@ export async function fetchDevices(
     body.tags = filters.tags;
   }
 
-  const { data: devices } = await getClient().http.post('/netbox/proxy/devices', body);
-
-  // Debug: Log first few devices to see primary_ip structure
-  console.log('NetBox devices response (first 3):', devices.slice(0, 3).map((d: any) => ({
-    name: d.name,
-    primary_ip: d.primary_ip,
-    primary_ip4: d.primary_ip4,
-    primary_ip6: d.primary_ip6,
-  })));
+  // Long timeout (5 min): backend paginates synchronously through all matching devices.
+  // Slow NetBox + small page size can push the call past axios's default 30s.
+  const { data: devices } = await getClient().http.post('/netbox/proxy/devices', body, {
+    timeout: 300000,
+  });
   return devices;
 }
 
@@ -716,6 +712,30 @@ export interface NetBoxTag {
 }
 
 /**
+ * Per-reason counts attached to the import result for the report panel.
+ */
+export interface SessionImportCounts {
+  /** Devices returned by NetBox after server-side filtering. */
+  fetched: number;
+  /** Subset of fetched devices that have a primary IP. */
+  with_primary_ip: number;
+  /** Sessions successfully created (== result.sessions_created). */
+  created: number;
+  /** Devices skipped because a matching session already exists in the DB. */
+  already_exists: number;
+  /** Devices skipped because no profile could be resolved. */
+  no_profile: number;
+  /** Devices skipped because they had no primary IP. */
+  no_primary_ip: number;
+  /** Devices dropped because their site folder could not be created. */
+  folder_failed: number;
+  /** Devices the backend rejected on session creation. */
+  create_failed: number;
+  /** Existing session count read for dedup (sanity check). */
+  existing_sessions: number;
+}
+
+/**
  * Session import result
  */
 export interface SessionImportResult {
@@ -723,6 +743,8 @@ export interface SessionImportResult {
   folders_created: number;
   skipped: number;
   warnings: string[];
+  /** Optional structured breakdown (set when import completes; absent on early return). */
+  counts?: SessionImportCounts;
 }
 
 /**
@@ -815,6 +837,10 @@ export interface ImportSourceConfig {
     by_site: Record<string, string>;
     by_role: Record<string, string>;
   };
+  cliFlavorMappings: {
+    by_manufacturer: Record<string, CliFlavor>;
+    by_platform: Record<string, CliFlavor>;
+  };
 }
 
 /**
@@ -855,55 +881,23 @@ interface ExistingSession {
 }
 
 /**
- * Infer CLI flavor from NetBox device manufacturer/platform
- * Uses manufacturer name from device_type for network devices
+ * Resolve CLI flavor for a device using user-configured mappings on the source.
+ * Precedence: platform mapping > manufacturer mapping > 'auto' (let connect-time
+ * detection take over). No more substring guessing — orgs configure their own
+ * NetBox conventions via the source dialog.
  */
-function inferCliFlavor(device: NetBoxDevice): CliFlavor {
-  // Check manufacturer from device_type first
-  const manufacturer = device.device_type?.manufacturer?.slug?.toLowerCase() ||
-                       device.device_type?.manufacturer?.name?.toLowerCase() || '';
-
-  // Check platform slug/name as fallback
-  const platform = device.platform?.slug?.toLowerCase() ||
-                   device.platform?.name?.toLowerCase() || '';
-
-  // Cisco detection
-  if (manufacturer.includes('cisco') || platform.includes('cisco')) {
-    if (platform.includes('nxos') || platform.includes('nx-os') ||
-        manufacturer.includes('nexus') || device.device_type?.model?.toLowerCase().includes('nexus')) {
-      return 'cisco-nxos';
-    }
-    return 'cisco-ios';
+function resolveCliFlavor(
+  device: NetBoxDevice,
+  mappings: ImportSourceConfig['cliFlavorMappings'],
+): CliFlavor {
+  const platformSlug = device.platform?.slug?.toLowerCase();
+  if (platformSlug && mappings.by_platform[platformSlug]) {
+    return mappings.by_platform[platformSlug];
   }
-
-  // Juniper detection
-  if (manufacturer.includes('juniper') || platform.includes('junos') || platform.includes('juniper')) {
-    return 'juniper-junos';
+  const mfrSlug = device.device_type?.manufacturer?.slug?.toLowerCase();
+  if (mfrSlug && mappings.by_manufacturer[mfrSlug]) {
+    return mappings.by_manufacturer[mfrSlug];
   }
-
-  // Arista detection
-  if (manufacturer.includes('arista') || platform.includes('arista') || platform.includes('eos')) {
-    return 'arista-eos';
-  }
-
-  // Palo Alto detection
-  if (manufacturer.includes('palo') || manufacturer.includes('paloalto') ||
-      platform.includes('panos') || platform.includes('pan-os')) {
-    return 'paloalto';
-  }
-
-  // Fortinet detection
-  if (manufacturer.includes('fortinet') || platform.includes('fortios') || platform.includes('forti')) {
-    return 'fortinet';
-  }
-
-  // Linux/server detection based on role
-  const role = device.device_role?.slug?.toLowerCase() || '';
-  if (role.includes('server') || role.includes('linux') || role.includes('vm')) {
-    return 'linux';
-  }
-
-  // Default to auto-detect
   return 'auto';
 }
 
@@ -938,9 +932,11 @@ export async function importDevicesAsSessions(
   const devices = await fetchDevices(config, filters);
 
   // Filter to only devices with primary_ip (check both address and display fields)
+  let noIpCount = 0;
   const devicesWithIp = devices.filter(device => {
     const ipAddress = device.primary_ip?.address || device.primary_ip?.display;
     if (!ipAddress) {
+      noIpCount++;
       result.skipped++;
       result.warnings.push(`Skipped ${device.name}: no primary IP`);
       return false;
@@ -985,6 +981,10 @@ export async function importDevicesAsSessions(
   }
 
   // Create folders and sessions
+  let alreadyExistsCount = 0;
+  let noProfileCount = 0;
+  let createFailCount = 0;
+  let folderFailDeviceCount = 0;
   for (const [siteName, siteDevices] of devicesBySite) {
     // Create folder if it doesn't exist
     let folderId = folderMap.get(siteName);
@@ -995,7 +995,8 @@ export async function importDevicesAsSessions(
         folderMap.set(siteName, folderId);
         result.folders_created++;
       } catch (error) {
-        result.warnings.push(`Failed to create folder ${siteName}: ${error}`);
+        result.warnings.push(`Failed to create folder ${siteName} (${siteDevices.length} devices skipped): ${error}`);
+        folderFailDeviceCount += siteDevices.length;
         continue;
       }
     }
@@ -1025,6 +1026,7 @@ export async function importDevicesAsSessions(
 
         if (existingSession) {
           // Session already exists - skip it
+          alreadyExistsCount++;
           result.skipped++;
           result.warnings.push(`Skipped ${device.name}: session already exists`);
           continue;
@@ -1035,13 +1037,14 @@ export async function importDevicesAsSessions(
 
         // Profile is required - skip if no profile can be resolved
         if (!profileId) {
+          noProfileCount++;
           result.skipped++;
           result.warnings.push(`Skipped ${device.name}: no credential profile configured`);
           continue;
         }
 
-        // Infer CLI flavor from device manufacturer/platform
-        const cliFlavor = inferCliFlavor(device);
+        // Resolve CLI flavor from source's per-manufacturer/per-platform mappings
+        const cliFlavor = resolveCliFlavor(device, sourceConfig.cliFlavorMappings);
 
         await createSessionFn({
           name: device.name,
@@ -1054,10 +1057,34 @@ export async function importDevicesAsSessions(
         });
         result.sessions_created++;
       } catch (error) {
-        result.warnings.push(`Failed to create session for ${device.name}: ${error}`);
+        createFailCount++;
+        // Extract the most useful piece of an axios error — the server's response body
+        // when present, otherwise the message. Default toString() is unhelpful.
+        const err = error as { message?: string; response?: { data?: { error?: string } | string } };
+        const responseData = err?.response?.data;
+        const serverMsg =
+          typeof responseData === 'string'
+            ? responseData
+            : responseData?.error ?? err?.message ?? String(error);
+        result.warnings.push(`Failed to create session for ${device.name}: ${serverMsg}`);
       }
     }
   }
+
+  // Per-reason counts attached to the result so the import dialog can render a
+  // proper report. The dialog is responsible for displaying these — no console
+  // spam, no blocking alerts.
+  result.counts = {
+    fetched: devices.length,
+    with_primary_ip: devicesWithIp.length,
+    created: result.sessions_created,
+    already_exists: alreadyExistsCount,
+    no_profile: noProfileCount,
+    no_primary_ip: noIpCount,
+    folder_failed: folderFailDeviceCount,
+    create_failed: createFailCount,
+    existing_sessions: existingSessions.length,
+  };
 
   return result;
 }

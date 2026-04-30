@@ -87,7 +87,7 @@ const DANGEROUS_PATTERNS: SafetyPattern[] = [
     category: 'config-mode',
     message: 'Entering edit mode (Juniper)',
     severity: 'medium',
-    vendors: ['juniper-junos'],
+    vendors: ['juniper'],
   },
 
   // Privilege escalation
@@ -157,7 +157,7 @@ const DANGEROUS_PATTERNS: SafetyPattern[] = [
     category: 'irreversible',
     message: 'Committing configuration changes',
     severity: 'medium',
-    vendors: ['juniper-junos', 'arista-eos'],
+    vendors: ['juniper', 'arista'],
   },
 
   // Routing changes
@@ -201,7 +201,7 @@ const DANGEROUS_PATTERNS: SafetyPattern[] = [
     category: 'destructive',
     message: 'System operation will cause outage',
     severity: 'high',
-    vendors: ['juniper-junos'],
+    vendors: ['juniper'],
   },
 
   // Fortinet diagnostics that modify state
@@ -431,7 +431,7 @@ export function getSafeAlternatives(
   }
 
   // Vendor-specific alternatives
-  if (cliFlavor === 'juniper-junos') {
+  if (cliFlavor === 'juniper') {
     if (/commit/.test(lower)) {
       alternatives.push('show | compare');
       alternatives.push('commit check');

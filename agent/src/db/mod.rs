@@ -274,7 +274,7 @@ async fn migrate_sessions_table(pool: &SqlitePool) -> Result<(), DbError> {
 
 /// Migrate credential_profiles and related tables (Phase 11.6)
 /// Note: highlight_rules_json and copy_on_select columns were removed from profiles.
-/// This migration now only handles the netbox_sources device_filters column.
+/// Handles incremental column additions to netbox_sources.
 async fn migrate_credential_profiles_table(pool: &SqlitePool) -> Result<(), DbError> {
     // Add device_filters column to netbox_sources if it doesn't exist
     if !column_exists(pool, "netbox_sources", "device_filters").await? {
@@ -282,6 +282,14 @@ async fn migrate_credential_profiles_table(pool: &SqlitePool) -> Result<(), DbEr
             .execute(pool)
             .await
             .map_err(|e| DbError::Migration(format!("Failed to add device_filters column: {}", e)))?;
+    }
+
+    // Add cli_flavor_mappings column to netbox_sources if it doesn't exist
+    if !column_exists(pool, "netbox_sources", "cli_flavor_mappings").await? {
+        sqlx::query("ALTER TABLE netbox_sources ADD COLUMN cli_flavor_mappings TEXT")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to add cli_flavor_mappings column: {}", e)))?;
     }
 
     Ok(())

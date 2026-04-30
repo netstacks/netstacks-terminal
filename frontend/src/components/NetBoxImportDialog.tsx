@@ -33,6 +33,210 @@ function formatDeviceFilters(filters: DeviceFilters): string {
   return parts.length > 0 ? parts.join(' | ') : 'No filters';
 }
 
+// Categories the import warnings get bucketed into for the report panel.
+type WarningCategory =
+  | 'already_exists'
+  | 'no_primary_ip'
+  | 'no_profile'
+  | 'folder_failed'
+  | 'create_failed'
+  | 'other';
+
+const WARNING_CATEGORY_LABELS: Record<WarningCategory, string> = {
+  already_exists: 'Already imported (session exists)',
+  no_primary_ip: 'No primary IP in NetBox',
+  no_profile: 'No credential profile mapped',
+  folder_failed: 'Folder creation failed',
+  create_failed: 'Backend rejected session',
+  other: 'Other',
+};
+
+function classifyWarning(w: string): WarningCategory {
+  if (w.startsWith('Skipped ') && w.endsWith(': session already exists')) return 'already_exists';
+  if (w.startsWith('Skipped ') && w.endsWith(': no primary IP')) return 'no_primary_ip';
+  if (w.startsWith('Skipped ') && w.endsWith(': no credential profile configured')) return 'no_profile';
+  if (w.startsWith('Failed to create folder ')) return 'folder_failed';
+  if (w.startsWith('Failed to create session for ')) return 'create_failed';
+  return 'other';
+}
+
+function groupWarnings(warnings: string[]): Record<WarningCategory, string[]> {
+  const groups: Record<WarningCategory, string[]> = {
+    already_exists: [],
+    no_primary_ip: [],
+    no_profile: [],
+    folder_failed: [],
+    create_failed: [],
+    other: [],
+  };
+  for (const w of warnings) groups[classifyWarning(w)].push(w);
+  return groups;
+}
+
+// Build a plain-text version of the report for the copy-to-clipboard button.
+function buildReportText(result: SessionImportResult): string {
+  const c = result.counts;
+  const lines: string[] = ['NetBox Import Report', ''];
+  if (c) {
+    lines.push(`  Fetched from NetBox:  ${c.fetched}`);
+    lines.push(`  With primary IP:      ${c.with_primary_ip}`);
+    lines.push(`  Created:              ${c.created}`);
+    lines.push(`  Folders created:      ${result.folders_created}`);
+    lines.push(`  Already imported:     ${c.already_exists}`);
+    lines.push(`  No primary IP:        ${c.no_primary_ip}`);
+    lines.push(`  No profile mapped:    ${c.no_profile}`);
+    lines.push(`  Folder creation failed: ${c.folder_failed}`);
+    lines.push(`  Backend rejected:     ${c.create_failed}`);
+    lines.push(`  Existing sessions in DB: ${c.existing_sessions}`);
+  } else {
+    lines.push(`  Created: ${result.sessions_created}`);
+    lines.push(`  Folders: ${result.folders_created}`);
+    lines.push(`  Skipped: ${result.skipped}`);
+  }
+  if (result.warnings.length > 0) {
+    lines.push('', 'Warnings & errors:');
+    const groups = groupWarnings(result.warnings);
+    for (const cat of Object.keys(groups) as WarningCategory[]) {
+      const items = groups[cat];
+      if (items.length === 0) continue;
+      lines.push('', `[${WARNING_CATEGORY_LABELS[cat]}] (${items.length})`);
+      for (const w of items) lines.push(`  - ${w}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+interface ImportReportProps {
+  result: SessionImportResult;
+}
+
+function ImportReport({ result }: ImportReportProps) {
+  const c = result.counts;
+  const groups = groupWarnings(result.warnings);
+  const [openCategories, setOpenCategories] = useState<Set<WarningCategory>>(new Set());
+  const [copied, setCopied] = useState(false);
+
+  const toggleCategory = (cat: WarningCategory) => {
+    setOpenCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(buildReportText(result));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API can fail in some webviews — fall back to a textarea trick.
+      const ta = document.createElement('textarea');
+      ta.value = buildReportText(result);
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
+      document.body.removeChild(ta);
+    }
+  };
+
+  // Top-line totals (created / skipped-total / errored-total).
+  const skippedTotal = c
+    ? c.already_exists + c.no_primary_ip + c.no_profile
+    : result.skipped;
+  const erroredTotal = c
+    ? c.folder_failed + c.create_failed
+    : 0;
+
+  // Category visibility: only show non-empty categories so a clean import
+  // doesn't get a wall of "0" rows.
+  const visibleCategories: WarningCategory[] = (
+    ['already_exists', 'no_primary_ip', 'no_profile', 'folder_failed', 'create_failed', 'other'] as const
+  ).filter((cat) => groups[cat].length > 0);
+
+  return (
+    <div className="netbox-import-result">
+      <div className="result-summary">
+        <div className="result-stat success">
+          <span className="stat-value">{result.sessions_created}</span>
+          <span className="stat-label">Created</span>
+        </div>
+        <div className="result-stat warning">
+          <span className="stat-value">{skippedTotal}</span>
+          <span className="stat-label">Skipped</span>
+        </div>
+        <div className={`result-stat ${erroredTotal > 0 ? 'error' : 'info'}`}>
+          <span className="stat-value">{erroredTotal}</span>
+          <span className="stat-label">Errored</span>
+        </div>
+      </div>
+
+      {c && (
+        <div className="result-breakdown">
+          <div className="result-breakdown-row">
+            <span>Fetched from NetBox</span><span>{c.fetched}</span>
+          </div>
+          <div className="result-breakdown-row">
+            <span>With primary IP</span><span>{c.with_primary_ip}</span>
+          </div>
+          <div className="result-breakdown-row">
+            <span>Folders created</span><span>{result.folders_created}</span>
+          </div>
+          <div className="result-breakdown-row">
+            <span>Existing sessions in DB</span><span>{c.existing_sessions}</span>
+          </div>
+        </div>
+      )}
+
+      {visibleCategories.length > 0 && (
+        <div className="result-categories">
+          <div className="result-categories-header">
+            <label>Details</label>
+            <button className="result-copy-btn" onClick={handleCopy}>
+              {copied ? 'Copied!' : 'Copy report'}
+            </button>
+          </div>
+          {visibleCategories.map((cat) => {
+            const items = groups[cat];
+            const isOpen = openCategories.has(cat);
+            const isError = cat === 'folder_failed' || cat === 'create_failed';
+            return (
+              <div key={cat} className={`result-category ${isError ? 'error' : ''}`}>
+                <button
+                  className="result-category-header"
+                  onClick={() => toggleCategory(cat)}
+                  type="button"
+                >
+                  <span className="result-category-arrow">{isOpen ? '▼' : '▶'}</span>
+                  <span className="result-category-label">{WARNING_CATEGORY_LABELS[cat]}</span>
+                  <span className="result-category-count">{items.length}</span>
+                </button>
+                {isOpen && (
+                  <ul className="result-category-list">
+                    {items.slice(0, 200).map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                    {items.length > 200 && (
+                      <li className="more-warnings">
+                        +{items.length - 200} more (use "Copy report" to see all)
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {result.sessions_created === 0 && skippedTotal === 0 && erroredTotal === 0 && (
+        <div className="result-note">No devices matched the filter.</div>
+      )}
+    </div>
+  );
+}
+
 // Helper to check if device filters are set
 function hasDeviceFilters(filters: DeviceFilters | null | undefined): boolean {
   if (!filters) return false;
@@ -270,11 +474,16 @@ function NetBoxImportDialog({
             sourceId: selectedSource.id,
             defaultProfileId: selectedSource.default_profile_id,
             profileMappings: selectedSource.profile_mappings,
+            cliFlavorMappings: selectedSource.cli_flavor_mappings ?? {
+              by_manufacturer: {},
+              by_platform: {},
+            },
           }
         : {
             sourceId: 'manual-import',
             defaultProfileId: manualProfileId,
             profileMappings: { by_site: {}, by_role: {} },
+            cliFlavorMappings: { by_manufacturer: {}, by_platform: {} },
           };
 
       // Build filters - use saved device_filters if available, otherwise use manual selection
@@ -639,45 +848,7 @@ function NetBoxImportDialog({
               )}
 
               {importResult && (
-                <div className="netbox-import-result">
-                  <div className="result-summary">
-                    <div className="result-stat success">
-                      <span className="stat-value">{importResult.sessions_created}</span>
-                      <span className="stat-label">Sessions Created</span>
-                    </div>
-                    <div className="result-stat info">
-                      <span className="stat-value">{importResult.folders_created}</span>
-                      <span className="stat-label">Folders Created</span>
-                    </div>
-                    <div className="result-stat warning">
-                      <span className="stat-value">{importResult.skipped}</span>
-                      <span className="stat-label">Skipped (No IP)</span>
-                    </div>
-                  </div>
-
-                  {importResult.warnings.length > 0 && (
-                    <div className="result-warnings">
-                      <label>Warnings:</label>
-                      <ul>
-                        {importResult.warnings.slice(0, 10).map((warning, i) => (
-                          <li key={i}>{warning}</li>
-                        ))}
-                        {importResult.warnings.length > 10 && (
-                          <li className="more-warnings">
-                            +{importResult.warnings.length - 10} more warnings...
-                          </li>
-                        )}
-                      </ul>
-                    </div>
-                  )}
-
-                  {importResult.sessions_created === 0 && importResult.skipped > 0 && (
-                    <div className="result-note">
-                      No sessions were created because all devices lacked a primary IP address.
-                      Assign management IPs in NetBox and try again.
-                    </div>
-                  )}
-                </div>
+                <ImportReport result={importResult} />
               )}
             </div>
           )}

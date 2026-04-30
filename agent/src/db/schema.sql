@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS netbox_sources (
     url TEXT NOT NULL,
     default_profile_id TEXT REFERENCES credential_profiles(id) ON DELETE SET NULL,
     profile_mappings TEXT,  -- JSON: { by_site: {slug: profile_id}, by_role: {slug: profile_id} }
+    cli_flavor_mappings TEXT,  -- JSON: { by_manufacturer: {slug: flavor}, by_platform: {slug: flavor} }
     device_filters TEXT,    -- JSON: { sites: [], roles: [], manufacturers: [], platforms: [], statuses: [], tags: [] }
     last_sync_at TEXT,
     last_sync_filters TEXT,  -- JSON: { site: string?, role: string? }

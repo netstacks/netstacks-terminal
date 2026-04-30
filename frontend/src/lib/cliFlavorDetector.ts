@@ -20,8 +20,8 @@ export interface DeviceInfo {
  * Detection rules (in order):
  * 1. vendor contains 'cisco' AND (version contains 'NX-OS' OR platform contains 'Nexus') -> 'cisco-nxos'
  * 2. vendor contains 'cisco' -> 'cisco-ios' (default for Cisco)
- * 3. vendor contains 'juniper' -> 'juniper-junos'
- * 4. vendor contains 'arista' -> 'arista-eos'
+ * 3. vendor contains 'juniper' -> 'juniper'
+ * 4. vendor contains 'arista' -> 'arista'
  * 5. versionOutput contains 'Linux' OR 'linux' OR 'Ubuntu' OR 'CentOS' -> 'linux'
  * 6. Default: 'cisco-ios' (most common)
  *
@@ -54,12 +54,12 @@ export function detectCliFlavor(
 
   // Check for Juniper
   if (vendor.includes('juniper') || output.includes('junos') || output.includes('juniper')) {
-    return 'juniper-junos';
+    return 'juniper';
   }
 
   // Check for Arista
   if (vendor.includes('arista') || output.includes('arista') || output.includes('eos')) {
-    return 'arista-eos';
+    return 'arista';
   }
 
   // Check for Linux from version output
@@ -106,8 +106,8 @@ export function getFlavorDisplayName(flavor: CliFlavor): string {
     auto: 'Auto-Detect',
     'cisco-ios': 'Cisco IOS',
     'cisco-nxos': 'Cisco NX-OS',
-    'juniper-junos': 'Juniper JunOS',
-    'arista-eos': 'Arista EOS',
+    'juniper': 'Juniper JunOS',
+    'arista': 'Arista EOS',
     paloalto: 'Palo Alto PAN-OS',
     fortinet: 'Fortinet FortiOS',
     linux: 'Linux',

@@ -1,11 +1,19 @@
 // API client for NetBox source management
 
 import { getClient, getCurrentMode } from './client';
+import type { CliFlavor } from '../types/enrichment';
 
 // Profile mappings for NetBox source (maps site/role slugs to profile IDs)
 export interface ProfileMappings {
   by_site: Record<string, string>;
   by_role: Record<string, string>;
+}
+
+// CLI flavor mappings for NetBox source (maps manufacturer/platform slugs to CliFlavor)
+// Precedence at import time: by_platform > by_manufacturer > 'auto'
+export interface CliFlavorMappings {
+  by_manufacturer: Record<string, CliFlavor>;
+  by_platform: Record<string, CliFlavor>;
 }
 
 // Legacy sync filters (single value, used for last_sync_filters)
@@ -38,6 +46,7 @@ export interface NetBoxSource {
   url: string;
   default_profile_id: string | null;
   profile_mappings: ProfileMappings;
+  cli_flavor_mappings: CliFlavorMappings;
   device_filters: DeviceFilters | null;  // Multi-select filters for import
   last_sync_at: string | null;
   last_sync_filters: SyncFilters | null;
@@ -53,6 +62,7 @@ export interface NewNetBoxSource {
   api_token: string;
   default_profile_id?: string | null;
   profile_mappings?: ProfileMappings;
+  cli_flavor_mappings?: CliFlavorMappings;
   device_filters?: DeviceFilters | null;
 }
 
@@ -63,6 +73,7 @@ export interface UpdateNetBoxSource {
   api_token?: string;
   default_profile_id?: string | null;
   profile_mappings?: ProfileMappings;
+  cli_flavor_mappings?: CliFlavorMappings;
   device_filters?: DeviceFilters | null;
 }
 

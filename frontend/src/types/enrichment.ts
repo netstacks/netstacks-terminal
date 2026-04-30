@@ -11,8 +11,8 @@ export type CliFlavor =
   | 'linux'
   | 'cisco-ios'
   | 'cisco-nxos'
-  | 'juniper-junos'
-  | 'arista-eos'
+  | 'juniper'
+  | 'arista'
   | 'paloalto'
   | 'fortinet';
 

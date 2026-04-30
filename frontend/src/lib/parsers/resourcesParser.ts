@@ -270,9 +270,9 @@ export function parseResourcesOutput(
       return parseCiscoIos(validOutputs);
     case 'cisco-nxos':
       return parseCiscoNxos(validOutputs);
-    case 'juniper-junos':
+    case 'juniper':
       return parseJuniperJunos(validOutputs);
-    case 'arista-eos':
+    case 'arista':
       return parseAristaEos(validOutputs);
     case 'linux':
       return parseLinux(validOutputs);

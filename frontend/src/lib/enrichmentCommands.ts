@@ -36,12 +36,12 @@ export const COMMAND_SETS: Record<CliFlavor, CommandSet> = {
     resources: ['show system resources'],
     interfaces: ['show interface'],
   },
-  'juniper-junos': {
+  'juniper': {
     version: ['show version'],
     resources: ['show system uptime', 'show chassis routing-engine'],
     interfaces: ['show interfaces extensive'],
   },
-  'arista-eos': {
+  'arista': {
     version: ['show version'],
     resources: ['show processes top once'],
     interfaces: ['show interfaces'],
