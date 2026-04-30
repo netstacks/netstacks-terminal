@@ -332,7 +332,7 @@ export default function AISettingsTab() {
   const [oauth2TokenUrl, setOauth2TokenUrl] = useState('');
   const [oauth2ClientId, setOauth2ClientId] = useState('');
   const [customHeaders, setCustomHeaders] = useState('');
-  const [apiFormat, setApiFormat] = useState<'openai' | 'gemini'>('openai');
+  const [apiFormat, setApiFormat] = useState<'openai' | 'gemini' | 'vertex-anthropic'>('openai');
 
   // New model input per provider (for adding models to the list)
   const [newModelInputs, setNewModelInputs] = useState<Record<AiProviderType, string>>({
@@ -540,10 +540,13 @@ export default function AISettingsTab() {
       }
 
       // Only check API keys for enabled providers
-      const [hasAnthropic, hasOpenAI, hasOpenRouter] = await Promise.all([
+      const [hasAnthropic, hasOpenAI, hasOpenRouter, hasCustom] = await Promise.all([
         isProviderEnabled('anthropic') ? hasAiApiKey('anthropic') : Promise.resolve(false),
         isProviderEnabled('openai') ? hasAiApiKey('openai') : Promise.resolve(false),
         isProviderEnabled('openrouter') ? hasAiApiKey('openrouter') : Promise.resolve(false),
+        // Custom is always considered "enabled" — check the vault directly so
+        // the UI shows "key saved" after a reload (was hardcoded to false).
+        hasAiApiKey('custom').catch(() => false),
       ]);
 
       // Check Ollama status only if enabled
@@ -620,8 +623,8 @@ export default function AISettingsTab() {
           connectionMessage: isProviderEnabled('litellm') ? 'Configure base URL and test connection' : '',
         },
         custom: {
-          hasKey: false, // Will be set when API key is saved
-          connectionStatus: 'unconfigured',
+          hasKey: hasCustom,
+          connectionStatus: hasCustom ? 'configured' : 'unconfigured',
           connectionMessage: '',
         },
       });
@@ -874,6 +877,19 @@ export default function AISettingsTab() {
           if (authMode === 'oauth2') {
             testConfig.oauth2_token_url = oauth2TokenUrl;
             testConfig.oauth2_client_id = oauth2ClientId;
+            // IMPORTANT: include custom_headers — Test re-saves the whole
+            // config, so omitting this would wipe headers like user_email
+            // that the gateway requires.
+            if (customHeaders.trim()) {
+              const headers: Record<string, string> = {};
+              for (const line of customHeaders.split('\n')) {
+                const colonIdx = line.indexOf(':');
+                if (colonIdx > 0) {
+                  headers[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+                }
+              }
+              testConfig.custom_headers = headers;
+            }
           }
         }
         await setAiConfig(testConfig);
@@ -921,6 +937,17 @@ export default function AISettingsTab() {
           config.auth_mode = 'oauth2';
           config.oauth2_token_url = oauth2TokenUrl;
           config.oauth2_client_id = oauth2ClientId;
+          // Preserve custom_headers — same reason as the Test handler.
+          if (customHeaders.trim()) {
+            const headers: Record<string, string> = {};
+            for (const line of customHeaders.split('\n')) {
+              const colonIdx = line.indexOf(':');
+              if (colonIdx > 0) {
+                headers[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+              }
+            }
+            config.custom_headers = headers;
+          }
         }
       }
       await setAiConfig(config);
@@ -1148,16 +1175,20 @@ export default function AISettingsTab() {
                         <select
                           className="form-input"
                           value={apiFormat}
-                          onChange={(e) => setApiFormat(e.target.value as 'openai' | 'gemini')}
+                          onChange={(e) => setApiFormat(e.target.value as 'openai' | 'gemini' | 'vertex-anthropic')}
                         >
                           <option value="openai">OpenAI Compatible</option>
                           <option value="gemini">Gemini / Vertex AI</option>
+                          <option value="vertex-anthropic">Anthropic on Vertex AI</option>
                         </select>
                         {apiFormat === 'openai' && (
                           <span className="form-hint">POST {'{base_url}'}/chat/completions — standard OpenAI format</span>
                         )}
                         {apiFormat === 'gemini' && (
-                          <span className="form-hint">POST {'{base_url}'}/{'{model}'}:generateContent — Google Gemini format</span>
+                          <span className="form-hint">POST {'{base_url}'}/{'{model}'}:generateContent — appended automatically unless your Model Name already contains an action (e.g., <code>gemini-pro:streamGenerateContent</code>).</span>
+                        )}
+                        {apiFormat === 'vertex-anthropic' && (
+                          <span className="form-hint">POST {'{base_url}'}/{'{model}'}:rawPredict — appended automatically unless your Model Name already contains an action (e.g., <code>claude-sonnet-4-6:rawPredict</code>). Body uses Anthropic message schema.</span>
                         )}
                       </div>
                     )}
@@ -1171,7 +1202,13 @@ export default function AISettingsTab() {
                           className="form-input"
                           value={customModel}
                           onChange={(e) => setCustomModel(e.target.value)}
-                          placeholder={apiFormat === 'gemini' ? 'e.g., gemini-2.5-flash' : 'e.g., llama-3.1-70b'}
+                          placeholder={
+                            apiFormat === 'gemini'
+                              ? 'e.g., gemini-2.5-flash'
+                              : apiFormat === 'vertex-anthropic'
+                              ? 'e.g., claude-sonnet-4-6 or claude-sonnet-4-6:rawPredict'
+                              : 'e.g., llama-3.1-70b'
+                          }
                         />
                       </div>
                     )}

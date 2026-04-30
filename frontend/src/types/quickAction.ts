@@ -6,6 +6,10 @@ export interface AuthFlowStep {
   method: string
   path: string
   body?: string
+  /** Per-step request headers (templated). */
+  headers?: Record<string, string>
+  /** When true, sends `Authorization: Basic base64(user:pass)` from resource creds. */
+  use_basic_auth?: boolean
   extract_path: string
   store_as: string
 }

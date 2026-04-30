@@ -22,7 +22,7 @@ export interface AiConfig {
   oauth2_client_id?: string; // Client ID (client secret stored in vault as API key)
   custom_headers?: Record<string, string>; // Additional headers for API requests
   // API format for custom provider
-  api_format?: 'openai' | 'gemini'; // Default: openai
+  api_format?: 'openai' | 'gemini' | 'vertex-anthropic'; // Default: openai
 }
 
 // Model options by provider (use exact Anthropic model IDs)
