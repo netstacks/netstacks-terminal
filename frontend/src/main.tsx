@@ -108,6 +108,21 @@ async function bootstrap() {
   const result = await initializeClient();
   console.log(`[main] App mode: ${result.mode}, requires auth: ${result.requiresAuth}`);
 
+  // In standalone mode, wait for the TLS cert to be installed into the OS trust
+  // store before making any API calls. Tauri emits 'sidecar-tls-ready' once done.
+  // Enterprise mode skips this — no local agent, no cert to install.
+  if (result.mode === 'standalone') {
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      await Promise.race([
+        new Promise<void>(resolve => { listen('sidecar-tls-ready', () => resolve()); }),
+        new Promise<void>(resolve => setTimeout(resolve, 3000)),
+      ]);
+    } catch {
+      // Not in Tauri (dev/test) — proceed immediately
+    }
+  }
+
   // Populate capabilities before the app renders so all sidebar tabs are visible.
   // In standalone mode this resolves synchronously with STANDALONE_CAPABILITIES;
   // in enterprise mode it fetches from the Controller after login instead.

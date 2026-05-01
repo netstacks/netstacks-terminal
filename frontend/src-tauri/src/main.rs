@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use base64::Engine as _;
 use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
@@ -12,6 +13,27 @@ use tauri_plugin_shell::ShellExt;
 /// The token event may fire before the webview JS loads, so this provides a
 /// reliable fallback for the frontend to get the token on demand.
 struct SidecarToken(Mutex<Option<String>>);
+
+/// Returns path to the TLS cert fingerprint flag file in the agent data directory.
+/// Presence of this file (with matching content) means the cert is already in the
+/// OS trust store — skips the install prompt on subsequent launches.
+fn tls_cert_flag_path() -> std::path::PathBuf {
+    const APP_ID: &str = "com.netstacks.terminal";
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME").map(|h| format!("{}/Library/Application Support/{}", h, APP_ID)).unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let base = std::env::var("HOME").map(|h| format!("{}/.local/share/{}", h, APP_ID)).unwrap_or_default();
+    #[cfg(target_os = "windows")]
+    let base = std::env::var("APPDATA").map(|a| format!("{}\\{}", a, APP_ID)).unwrap_or_default();
+    std::path::PathBuf::from(base).join("tls_installed.txt")
+}
+
+/// Cheap fingerprint: length + first 64 chars. Good enough for change detection.
+fn cert_fingerprint(pem: &str) -> String {
+    let trimmed = pem.trim();
+    let prefix = &trimmed[..trimmed.len().min(64)];
+    format!("{}:{}", trimmed.len(), prefix)
+}
 
 /// Holds the sidecar child process so we can kill it when the app exits.
 struct SidecarChild(Mutex<Option<CommandChild>>);
@@ -265,13 +287,48 @@ fn main() {
                             let line_str = String::from_utf8_lossy(&line);
                             if let Some(token) = line_str.strip_prefix("NETSTACKS_AUTH_TOKEN=") {
                                 let token = token.trim().to_string();
-                                // Store token in managed state (for IPC command retrieval)
                                 if let Some(state) = app_handle.try_state::<SidecarToken>() {
                                     *state.0.lock().unwrap() = Some(token.clone());
                                 }
-                                // Also emit event (for live listeners if webview is ready)
                                 app_handle.emit("sidecar-auth-token", token).unwrap();
                                 println!("[sidecar] Auth token received and forwarded to frontend");
+                            } else if let Some(cert_b64) = line_str.strip_prefix("NETSTACKS_TLS_CERT=") {
+                                let pem_opt = base64::engine::general_purpose::STANDARD
+                                    .decode(cert_b64.trim().as_bytes())
+                                    .ok()
+                                    .and_then(|b| String::from_utf8(b).ok());
+                                if let Some(pem) = pem_opt {
+                                    let app = app_handle.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let fingerprint = cert_fingerprint(&pem);
+                                        let flag = tls_cert_flag_path();
+
+                                        // Skip install if this exact cert was already trusted
+                                        let already_done = std::fs::read_to_string(&flag)
+                                            .map(|s| s.trim() == fingerprint)
+                                            .unwrap_or(false);
+
+                                        if already_done {
+                                            app.emit("sidecar-tls-ready", ()).ok();
+                                            return;
+                                        }
+
+                                        // First run or cert changed — install into OS trust store.
+                                        // macOS will prompt once for login password; subsequent
+                                        // launches are silently skipped by the check above.
+                                        match install_ca_certificate(pem, "netstacks-local.crt".into()).await {
+                                            Ok(_) => {
+                                                let _ = std::fs::write(&flag, fingerprint);
+                                                app.emit("sidecar-tls-ready", ()).ok();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[sidecar] TLS cert install failed: {}", e);
+                                                // Emit anyway so app doesn't hang; HTTPS may fail
+                                                app.emit("sidecar-tls-ready", ()).ok();
+                                            }
+                                        }
+                                    });
+                                }
                             } else {
                                 println!("[sidecar] {}", line_str);
                             }

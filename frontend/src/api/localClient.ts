@@ -2,8 +2,8 @@ import axios from 'axios';
 import type { NetStacksClient } from '../types/api';
 import { appendTokenToWsUrl } from './wsHelpers';
 
-// Standalone mode connects to local agent on localhost:8080
-const LOCAL_AGENT_URL = 'http://localhost:8080';
+// Standalone mode connects to local agent on localhost:8080 over TLS
+const LOCAL_AGENT_URL = 'https://localhost:8080';
 
 // Auth token for standalone mode - set by Tauri event, never persisted
 let sidecarAuthToken: string | null = null;
@@ -56,7 +56,7 @@ export function createLocalClient(): NetStacksClient {
     baseUrl: LOCAL_AGENT_URL,
 
     wsUrl(path: string): string {
-      const base = `ws://localhost:8080${path}`;
+      const base = `wss://localhost:8080${path}`;
       const token = getSidecarAuthToken();
       return token ? appendTokenToWsUrl(base, token) : base;
     },

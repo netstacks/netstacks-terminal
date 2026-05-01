@@ -27,6 +27,13 @@ russh-sftp = "2.1"
 # PTY for local shell
 portable-pty = "0.8"
 
+# Localhost TLS (self-signed cert generation + HTTPS server)
+rcgen = "0.13"
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs"] }
+rustls-pemfile = "2"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+
 # Session management
 uuid = { version = "1", features = ["v4"] }
 

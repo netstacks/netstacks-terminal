@@ -10,12 +10,15 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use base64::Engine as _;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use sqlx::sqlite::SqlitePool;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use rand::Rng;
 use std::sync::Arc;
+use tokio_rustls::TlsAcceptor;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -39,6 +42,7 @@ mod ssh;
 mod tasks;
 mod telnet;
 mod terminal;
+mod tls;
 mod tunnels;
 mod ws;
 
@@ -106,6 +110,13 @@ fn check_enterprise_mode() -> bool {
 }
 
 fn main() {
+    // Install aws-lc-rs as the rustls crypto provider before any TLS code runs.
+    // tokio-rustls disables rustls default features so no provider is auto-selected
+    // unless we call this explicitly.
+    tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Build tokio runtime with larger worker thread stack (8MB vs default 2MB).
     // Discovery spawns concurrent SNMP walks (6-way tokio::join) and SSH
     // sessions (russh auth state machines) whose combined async Future state
@@ -134,6 +145,12 @@ async fn async_main() {
     let auth_token_bytes: [u8; 32] = rand::thread_rng().gen();
     let auth_token: String = auth_token_bytes.iter().map(|b| format!("{:02x}", b)).collect();
     println!("NETSTACKS_AUTH_TOKEN={}", auth_token);
+
+    // Load or generate the localhost TLS certificate.
+    // Cert PEM is base64-encoded on one line so Tauri can parse it from stdout.
+    let local_tls = tls::load_or_generate().await.expect("Failed to initialize localhost TLS");
+    let cert_b64 = base64::engine::general_purpose::STANDARD.encode(local_tls.cert_pem.as_bytes());
+    println!("NETSTACKS_TLS_CERT={}", cert_b64);
 
     // Initialize logging
     //
@@ -316,14 +333,41 @@ async fn async_main() {
     // Build the application
     let app = create_app(app_state, pool);
 
-    // Start server
-    // Bind to localhost only - do not expose to network
+    // Start HTTPS server on localhost only
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     assert!(addr.ip().is_loopback(), "Security: sidecar must bind to loopback address only");
-    tracing::info!("NetStacks Agent starting on http://{}", addr);
+    tracing::info!("NetStacks Agent starting on https://{}", addr);
 
+    let acceptor = TlsAcceptor::from(local_tls.server_config);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+
+    loop {
+        let (tcp, _remote_addr) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => { tracing::warn!("Accept error: {}", e); continue; }
+        };
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(e) => { tracing::debug!("TLS handshake failed: {}", e); return; }
+            };
+            let io = TokioIo::new(tls_stream);
+            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let mut app = app.clone();
+                async move {
+                    tower::Service::call(&mut app, req.map(axum::body::Body::new)).await
+                }
+            });
+            if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, svc)
+                .await
+            {
+                tracing::debug!("Connection closed: {}", e);
+            }
+        });
+    }
 }
 
 fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
