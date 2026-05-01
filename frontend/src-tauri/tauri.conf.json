@@ -64,9 +64,6 @@
     "windows": {
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.digicert.com",
-      "wix": {
-        "language": "en-US"
-      },
       "nsis": {
         "installerIcon": "./icons/icon.ico",
         "installMode": "currentUser"
