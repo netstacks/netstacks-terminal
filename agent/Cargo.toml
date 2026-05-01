@@ -1,6 +1,6 @@
 [package]
 name = "netstacks-agent"
-version = "0.0.29"
+version = "0.0.30"
 edition = "2021"
 description = "Local Agent for NetStacks Terminal — SSH/Telnet/SFTP, credential vault, and AI assistant for Personal Mode."
 license = "Apache-2.0"
