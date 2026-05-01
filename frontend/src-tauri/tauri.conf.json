@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/v2/tooling/bundler/schemas/config.schema.json",
   "productName": "NetStacks",
-  "version": "0.0.30",
+  "version": "0.1.0",
   "identifier": "com.netstacks.terminal",
   "plugins": {
     "updater": {
