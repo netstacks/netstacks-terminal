@@ -87,7 +87,7 @@ export default function SharedTerminal({ token, controllerUrl }: SharedTerminalP
 
     const fit = new FitAddon();
     xterm.loadAddon(fit);
-    xterm.loadAddon(new WebLinksAddon());
+    xterm.loadAddon(new WebLinksAddon((_event, uri) => window.open(uri, '_blank')));
 
     xterm.open(terminalRef.current);
     fit.fit();

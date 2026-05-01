@@ -64,9 +64,25 @@ impl TerminalSession {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        #[cfg(target_os = "windows")]
+        let (shell, login_flag) = {
+            let shell = ["pwsh.exe", "powershell.exe", "cmd.exe"]
+                .iter()
+                .find(|&&s| which::which(s).is_ok())
+                .map(|&s| s.to_string())
+                .unwrap_or_else(|| "cmd.exe".to_string());
+            (shell, None::<&str>)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (shell, login_flag) = (
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
+            Some("-l"),
+        );
+
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-l");
+        if let Some(flag) = login_flag {
+            cmd.arg(flag);
+        }
 
         // AUDIT FIX (EXEC-011): start from a clean env and forward only the
         // known-safe vars below. The local PTY is a full-trust shell to the
@@ -75,9 +91,15 @@ impl TerminalSession {
         // config) to arbitrary commands the user runs. The login shell will
         // set its own $HOME/$PATH/$LANG/etc. from the system profile.
         cmd.env_clear();
+        #[cfg(not(target_os = "windows"))]
         const FORWARDED_ENV: &[&str] = &[
             "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
             "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "SHELL",
+        ];
+        #[cfg(target_os = "windows")]
+        const FORWARDED_ENV: &[&str] = &[
+            "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA",
+            "TEMP", "TMP", "COMPUTERNAME", "HOMEDRIVE", "HOMEPATH",
         ];
         for var in FORWARDED_ENV {
             if let Ok(value) = std::env::var(var) {
@@ -86,7 +108,10 @@ impl TerminalSession {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| {
-            "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+            #[cfg(target_os = "windows")]
+            return r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem".to_string();
+            #[cfg(not(target_os = "windows"))]
+            return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string();
         }));
 
         let _child = pair.slave.spawn_command(cmd)?;

@@ -1874,7 +1874,14 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
     })
     // Load addons
     const fitAddon = new FitAddon()
-    const webLinksAddon = new WebLinksAddon()
+    const webLinksAddon = new WebLinksAddon(async (_event, uri) => {
+      try {
+        const { open } = await import('@tauri-apps/plugin-shell')
+        await open(uri)
+      } catch {
+        window.open(uri, '_blank')
+      }
+    })
     const searchAddon = new SearchAddon()
 
     terminal.loadAddon(fitAddon)
