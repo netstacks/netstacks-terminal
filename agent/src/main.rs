@@ -117,6 +117,16 @@ fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
+    // --init-tls: generate the localhost TLS cert + fingerprint flag, then exit.
+    // Invoked by the Windows installer so the cert can be added to the user's
+    // trust store during the install wizard (when the security prompt fits the
+    // user's mental model) instead of on first app launch.
+    if std::env::args().any(|a| a == "--init-tls") {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
+        rt.block_on(init_tls_and_exit());
+        return;
+    }
+
     // Build tokio runtime with larger worker thread stack (8MB vs default 2MB).
     // Discovery spawns concurrent SNMP walks (6-way tokio::join) and SSH
     // sessions (russh auth state machines) whose combined async Future state
@@ -128,6 +138,23 @@ fn main() {
         .expect("Failed to build tokio runtime");
 
     runtime.block_on(async_main());
+}
+
+/// Generate (or load) the localhost TLS cert and write a fingerprint flag
+/// file matching the format the Tauri shell expects, so it knows the cert
+/// is already in the OS trust store on first launch.
+async fn init_tls_and_exit() {
+    let local_tls = tls::load_or_generate()
+        .await
+        .expect("Failed to initialize localhost TLS");
+    let flag_path = tls::data_dir().join("tls_installed.txt");
+    let fingerprint = {
+        let trimmed = local_tls.cert_pem.trim();
+        let prefix = &trimmed[..trimmed.len().min(64)];
+        format!("{}:{}", trimmed.len(), prefix)
+    };
+    std::fs::write(&flag_path, fingerprint).expect("Failed to write TLS flag file");
+    println!("TLS cert initialized at {}", flag_path.display());
 }
 
 async fn async_main() {
