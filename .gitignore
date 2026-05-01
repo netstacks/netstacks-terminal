@@ -36,6 +36,12 @@ license-server/keys/
 # Planning documents
 .planning/
 
+# Git worktrees (created via using-git-worktrees skill)
+.worktrees/
+
+# Superpowers brainstorming session artifacts (mockups, server state)
+.superpowers/
+
 # Local-only dev / release tooling — never published to the public repo
 terminal-dev.sh
 build-windows.sh
