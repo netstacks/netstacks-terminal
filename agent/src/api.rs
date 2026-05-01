@@ -5341,6 +5341,54 @@ pub async fn test_api_resource(
     Ok(Json(result))
 }
 
+/// Body for the per-step auth-flow test endpoint. Carries any extra
+/// `{{var}}` substitutions the user wants to feed in (typically empty —
+/// step 1 uses creds; later steps inherit from earlier-step extractions).
+#[derive(Debug, serde::Deserialize)]
+pub struct TestAuthStepRequest {
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, String>,
+}
+
+/// Run a single step of an API resource's multi-step auth flow and return a
+/// detailed result so the user can debug the step in isolation.
+pub async fn test_auth_flow_step(
+    State(state): State<Arc<AppState>>,
+    Path((id, step_index)): Path<(String, usize)>,
+    body: Option<Json<TestAuthStepRequest>>,
+) -> Result<Json<crate::quick_actions::AuthStepTestResult>, ApiError> {
+    let resource = state
+        .provider
+        .get_api_resource(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: format!("API resource not found: {}", id),
+            code: "NOT_FOUND".to_string(),
+        })?;
+
+    let steps = resource.auth_flow.as_deref().unwrap_or(&[]);
+    let step = steps.get(step_index).ok_or_else(|| ApiError {
+        error: format!(
+            "Step index {} is out of range (resource has {} step(s))",
+            step_index,
+            steps.len()
+        ),
+        code: "VALIDATION".to_string(),
+    })?;
+
+    let credentials = state
+        .provider
+        .get_api_resource_credentials(&id)
+        .await
+        .ok()
+        .flatten();
+    let extra = body.map(|b| b.0.variables).unwrap_or_default();
+
+    let result =
+        crate::quick_actions::test_auth_step(&resource, credentials.as_ref(), step, &extra).await;
+    Ok(Json(result))
+}
+
 // === Quick Actions API ===
 
 /// List all quick actions
@@ -5366,8 +5414,16 @@ pub async fn create_quick_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateQuickActionRequest>,
 ) -> Result<(StatusCode, Json<QuickAction>), ApiError> {
-    let action = state.provider.create_quick_action(&req).await?;
-    Ok((StatusCode::CREATED, Json(action)))
+    match state.provider.create_quick_action(&req).await {
+        Ok(action) => Ok((StatusCode::CREATED, Json(action))),
+        Err(e) => {
+            eprintln!(
+                "[DEBUG] create_quick_action FAILED: name={} api_resource_id={} method={} path={} error={:?}",
+                req.name, req.api_resource_id, req.method, req.path, e
+            );
+            Err(e.into())
+        }
+    }
 }
 
 /// Update a quick action
@@ -5421,8 +5477,15 @@ pub async fn execute_inline_quick_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExecuteInlineQuickActionRequest>,
 ) -> Result<Json<QuickActionResult>, ApiError> {
+    eprintln!(
+        "[DEBUG] execute_inline_quick_action: api_resource_id={} method={} path={} variables={:?}",
+        req.api_resource_id, req.method, req.path, req.variables.keys().collect::<Vec<_>>()
+    );
     let resource = state.provider.get_api_resource(&req.api_resource_id).await?
-        .ok_or_else(|| ApiError { error: "API resource not found".to_string(), code: "NOT_FOUND".to_string() })?;
+        .ok_or_else(|| {
+            eprintln!("[DEBUG] execute_inline_quick_action: api_resource_id '{}' not found in DB", req.api_resource_id);
+            ApiError { error: format!("API resource '{}' not found", req.api_resource_id), code: "NOT_FOUND".to_string() }
+        })?;
     let credentials = state.provider.get_api_resource_credentials(&req.api_resource_id).await.ok().flatten();
 
     let result = crate::quick_actions::execute_action(
@@ -5433,7 +5496,7 @@ pub async fn execute_inline_quick_action(
         &req.headers,
         req.body.as_deref(),
         req.json_extract_path.as_deref(),
-        &std::collections::HashMap::new(),
+        &req.variables,
     ).await;
 
     Ok(Json(result))

@@ -5,6 +5,8 @@ import {
   updateApiResource,
   deleteApiResource,
   testApiResource,
+  testAuthFlowStep,
+  type AuthStepTestResult,
 } from '../api/quickActions'
 import type {
   ApiResource,
@@ -86,6 +88,10 @@ function ApiResourceDialog({
   const [error, setError] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<QuickActionResult | null>(null)
   const [testing, setTesting] = useState(false)
+  // Per-step test results, keyed by step index. Each entry is the rich result
+  // returned by /api-resources/:id/auth-flow/:idx/test. Cleared on save.
+  const [stepResults, setStepResults] = useState<Record<number, AuthStepTestResult>>({})
+  const [stepTesting, setStepTesting] = useState<number | null>(null)
 
   const handleSave = async () => {
     if (!name.trim() || !baseUrl.trim()) {
@@ -192,6 +198,40 @@ function ApiResourceDialog({
 
   const removeAuthFlowStep = (index: number) => {
     setAuthFlow(authFlow.filter((_, i) => i !== index))
+    setStepResults((prev) => {
+      const next = { ...prev }
+      delete next[index]
+      return next
+    })
+  }
+
+  const handleTestStep = async (index: number) => {
+    if (!resource?.id) {
+      setError('Save the resource first — per-step test runs against the saved configuration.')
+      return
+    }
+    setStepTesting(index)
+    try {
+      const result = await testAuthFlowStep(resource.id, index)
+      setStepResults((prev) => ({ ...prev, [index]: result }))
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: string } }; message?: string }
+      setStepResults((prev) => ({
+        ...prev,
+        [index]: {
+          success: false,
+          status_code: 0,
+          url: '',
+          response_preview: null,
+          extracted_value: null,
+          store_as: authFlow[index]?.store_as || '',
+          error: e?.response?.data?.error || e?.message || 'Step test failed',
+          duration_ms: 0,
+        },
+      }))
+    } finally {
+      setStepTesting(null)
+    }
   }
 
   return (
@@ -275,7 +315,21 @@ function ApiResourceDialog({
                 <div key={index} className="auth-flow-step">
                   <div className="auth-flow-step-header">
                     <span>Step {index + 1}</span>
-                    <button className="btn-icon-small" onClick={() => removeAuthFlowStep(index)}>{Icons.trash}</button>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        className="btn-small"
+                        onClick={() => handleTestStep(index)}
+                        disabled={!resource?.id || stepTesting === index}
+                        title={
+                          resource?.id
+                            ? `Run step ${index + 1} in isolation against the saved resource`
+                            : 'Save the resource before testing individual steps'
+                        }
+                      >
+                        {stepTesting === index ? 'Testing…' : '▶ Test'}
+                      </button>
+                      <button className="btn-icon-small" onClick={() => removeAuthFlowStep(index)}>{Icons.trash}</button>
+                    </div>
                   </div>
                   <div className="auth-flow-step-fields">
                     <select value={step.method} onChange={(e) => updateAuthFlowStep(index, 'method', e.target.value)}>
@@ -312,6 +366,40 @@ function ApiResourceDialog({
                     <input type="text" value={step.extract_path} onChange={(e) => updateAuthFlowStep(index, 'extract_path', e.target.value)} placeholder="Extract path (e.g., api_key)" />
                     <input type="text" value={step.store_as} onChange={(e) => updateAuthFlowStep(index, 'store_as', e.target.value)} placeholder="Store as (e.g., api_key)" />
                   </div>
+
+                  {stepResults[index] && (
+                    <div className={`step-test-result ${stepResults[index].success ? 'ok' : 'err'}`}>
+                      <div className="step-test-result-row">
+                        <strong>{stepResults[index].success ? '✓ Success' : '✗ Failed'}</strong>
+                        <span className="step-test-meta">
+                          HTTP {stepResults[index].status_code} · {stepResults[index].duration_ms}ms
+                        </span>
+                      </div>
+                      {stepResults[index].url && (
+                        <div className="step-test-meta-row">
+                          <span className="step-test-label">URL</span>
+                          <code>{stepResults[index].url}</code>
+                        </div>
+                      )}
+                      {stepResults[index].extracted_value && (
+                        <div className="step-test-meta-row">
+                          <span className="step-test-label">
+                            Captured <code>{`{{${stepResults[index].store_as}}}`}</code>
+                          </span>
+                          <code className="step-test-value">{stepResults[index].extracted_value}</code>
+                        </div>
+                      )}
+                      {stepResults[index].error && (
+                        <div className="step-test-error">{stepResults[index].error}</div>
+                      )}
+                      {stepResults[index].response_preview && (
+                        <details className="step-test-body">
+                          <summary>Response body (first 1000 chars)</summary>
+                          <pre>{stepResults[index].response_preview}</pre>
+                        </details>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

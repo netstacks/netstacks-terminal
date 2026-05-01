@@ -352,6 +352,10 @@ export default function QuickActionDialog({
         headers: resolvedHeaders,
         body: resolvedBody,
         json_extract_path: jsonExtractPath || undefined,
+        // Forward test variables so backend-side substitution (e.g. inside
+        // resource default_headers like `Authorization: {{api_key}}`) can
+        // also see anything the user typed in Test Variables.
+        variables: testVarValues,
       })
       setTestResult(result)
     } catch {

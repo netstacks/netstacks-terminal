@@ -51,6 +51,34 @@ export async function testApiResource(id: string): Promise<QuickActionResult> {
   return data
 }
 
+export interface AuthStepTestResult {
+  success: boolean
+  status_code: number
+  url: string
+  response_preview?: string | null
+  extracted_value?: string | null
+  store_as: string
+  error?: string | null
+  duration_ms: number
+}
+
+/**
+ * Run a single auth-flow step in isolation against a saved resource. Returns
+ * the request URL, response preview, extracted value, and any error so the
+ * user can debug each step independently.
+ */
+export async function testAuthFlowStep(
+  resourceId: string,
+  stepIndex: number,
+  variables: Record<string, string> = {},
+): Promise<AuthStepTestResult> {
+  const { data } = await getClient().http.post(
+    `/api-resources/${resourceId}/auth-flow/${stepIndex}/test`,
+    { variables },
+  )
+  return data
+}
+
 // === Quick Actions ===
 
 export async function listQuickActions(): Promise<QuickAction[]> {

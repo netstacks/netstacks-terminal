@@ -2211,6 +2211,10 @@ pub struct ExecuteInlineQuickActionRequest {
     pub headers: serde_json::Value,
     pub body: Option<String>,
     pub json_extract_path: Option<String>,
+    /// Test-time template variables (e.g. {"node_lookup": "ac:a0:..."}).
+    /// Empty by default for backward compatibility.
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, String>,
 }
 
 /// Request to execute a quick action with user-provided template variables
