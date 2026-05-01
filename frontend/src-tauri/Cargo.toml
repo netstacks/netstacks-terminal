@@ -1,6 +1,6 @@
 [package]
 name = "netstacks"
-version = "0.0.30"
+version = "0.1.0"
 description = "AI-powered SSH terminal for network engineers"
 authors = ["NetStacks <hello@netstacks.net>"]
 edition = "2021"
