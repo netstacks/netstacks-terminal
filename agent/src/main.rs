@@ -636,6 +636,10 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/api-resources", get(api::list_api_resources).post(api::create_api_resource))
         .route("/api-resources/:id", get(api::get_api_resource).put(api::update_api_resource).delete(api::delete_api_resource))
         .route("/api-resources/:id/test", post(api::test_api_resource))
+        .route(
+            "/api-resources/:id/auth-flow/:step_index/test",
+            post(api::test_auth_flow_step),
+        )
         // Quick Actions
         .route("/quick-actions", get(api::list_quick_actions).post(api::create_quick_action))
         .route("/quick-actions/:id", get(api::get_quick_action).put(api::update_quick_action).delete(api::delete_quick_action))

@@ -120,6 +120,218 @@ fn build_http_client(resource: &ApiResource) -> Result<reqwest::Client, String> 
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
+/// Result of running a single auth-flow step in isolation. Used by the
+/// per-step Test button so users can debug each step independently.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuthStepTestResult {
+    /// Whether the step succeeded end-to-end (HTTP success + parse + extract).
+    pub success: bool,
+    /// HTTP status code returned by the step's URL. 0 if the request failed
+    /// before getting a response (network error / DNS / TLS).
+    pub status_code: u16,
+    /// Final URL the request was sent to (post-substitution), so the user can
+    /// see exactly what got hit.
+    pub url: String,
+    /// First 1000 chars of the response body. Truncated for UI sanity.
+    pub response_preview: Option<String>,
+    /// The extracted value (the thing that would be stored as the next
+    /// variable). Always a string; non-string JSON gets `.to_string()`d.
+    pub extracted_value: Option<String>,
+    /// The variable name the value would be stored under, mirrored back so
+    /// the UI can label it without re-reading the step config.
+    pub store_as: String,
+    /// Human-readable error if anything went wrong.
+    pub error: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// Execute a single auth-flow step against the given resource and return a
+/// rich result for the UI's per-step test feature. Does NOT chain into other
+/// steps — it's a debug primitive.
+pub async fn test_auth_step(
+    resource: &ApiResource,
+    credentials: Option<&StoredApiResourceCredential>,
+    step: &AuthFlowStep,
+    extra_variables: &HashMap<String, String>,
+) -> AuthStepTestResult {
+    let start = Instant::now();
+
+    // Build base variables from credentials + caller-supplied vars (caller
+    // may have additional `{{var}}` placeholders to substitute, e.g. captured
+    // outputs from a prior step the user pasted in).
+    let mut variables: HashMap<String, String> = HashMap::new();
+    if let Some(creds) = credentials {
+        if let Some(u) = &creds.username {
+            variables.insert("username".to_string(), u.clone());
+        }
+        if let Some(p) = &creds.password {
+            variables.insert("password".to_string(), p.clone());
+        }
+    }
+    for (k, v) in extra_variables {
+        variables.insert(k.clone(), v.clone());
+    }
+
+    let resolved_path = substitute_variables(&step.path, &variables);
+    let url = format!(
+        "{}/{}",
+        resource.base_url.trim_end_matches('/'),
+        resolved_path.trim_start_matches('/'),
+    );
+
+    let client = match build_http_client(resource) {
+        Ok(c) => c,
+        Err(e) => {
+            return AuthStepTestResult {
+                success: false,
+                status_code: 0,
+                url,
+                response_preview: None,
+                extracted_value: None,
+                store_as: step.store_as.clone(),
+                error: Some(format!("Failed to build HTTP client: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let method: reqwest::Method = match step.method.parse() {
+        Ok(m) => m,
+        Err(_) => {
+            return AuthStepTestResult {
+                success: false,
+                status_code: 0,
+                url,
+                response_preview: None,
+                extracted_value: None,
+                store_as: step.store_as.clone(),
+                error: Some(format!("Invalid HTTP method: {}", step.method)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let mut req = client.request(method, &url);
+    for (k, v) in &step.headers {
+        req = req.header(k, substitute_variables(v, &variables));
+    }
+    if step.use_basic_auth {
+        match (variables.get("username"), variables.get("password")) {
+            (Some(u), Some(p)) if !u.is_empty() => {
+                req = req.basic_auth(u, Some(p));
+            }
+            _ => {
+                return AuthStepTestResult {
+                    success: false,
+                    status_code: 0,
+                    url,
+                    response_preview: None,
+                    extracted_value: None,
+                    store_as: step.store_as.clone(),
+                    error: Some(
+                        "Basic Auth is required by this step but the resource has no username/password stored.".to_string(),
+                    ),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+        }
+    }
+    if let Some(body_template) = &step.body {
+        if !body_template.is_empty() {
+            let body = substitute_variables(body_template, &variables);
+            req = req.header("Content-Type", "application/json").body(body);
+        }
+    }
+
+    let response = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return AuthStepTestResult {
+                success: false,
+                status_code: 0,
+                url,
+                response_preview: None,
+                extracted_value: None,
+                store_as: step.store_as.clone(),
+                error: Some(format!("Request failed: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    let preview: String = body_text.chars().take(1000).collect();
+
+    if !status.is_success() {
+        return AuthStepTestResult {
+            success: false,
+            status_code: status.as_u16(),
+            url,
+            response_preview: Some(preview),
+            extracted_value: None,
+            store_as: step.store_as.clone(),
+            error: Some(format!("Endpoint returned HTTP {}", status)),
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    // Parse + extract.
+    let json: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return AuthStepTestResult {
+                success: false,
+                status_code: status.as_u16(),
+                url,
+                response_preview: Some(preview),
+                extracted_value: None,
+                store_as: step.store_as.clone(),
+                error: Some(format!(
+                    "Response was not JSON ({}). Check the Headers — most APIs require Accept: application/json.",
+                    e
+                )),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let extracted = match json_extract(&json, &step.extract_path) {
+        Some(v) => v,
+        None => {
+            return AuthStepTestResult {
+                success: false,
+                status_code: status.as_u16(),
+                url,
+                response_preview: Some(preview),
+                extracted_value: None,
+                store_as: step.store_as.clone(),
+                error: Some(format!(
+                    "Failed to extract '{}' from response. Verify the JSON path matches the response body shown above.",
+                    step.extract_path
+                )),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let extracted_str = match &extracted {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string().trim_matches('"').to_string(),
+    };
+
+    AuthStepTestResult {
+        success: true,
+        status_code: status.as_u16(),
+        url,
+        response_preview: Some(preview),
+        extracted_value: Some(extracted_str),
+        store_as: step.store_as.clone(),
+        error: None,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
 /// Resolve multi-step authentication, returning extracted variables.
 async fn resolve_multi_step_auth(
     client: &reqwest::Client,

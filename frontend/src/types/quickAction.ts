@@ -121,4 +121,7 @@ export interface ExecuteInlineRequest {
   headers?: Record<string, string>
   body?: string
   json_extract_path?: string
+  /** Test-time template variables — backend uses these for any {{var}} that
+      isn't already substituted client-side (e.g. inside resource headers). */
+  variables?: Record<string, string>
 }
