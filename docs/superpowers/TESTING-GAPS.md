@@ -49,3 +49,45 @@ re-added or a standalone replacement ships.
   standalone agent serves a single user and has no analytics aggregation.
 - **Re-cover when**: A standalone usage-summary endpoint ships (e.g. a
   per-feature token counter visible in Settings → AI).
+
+## Coverage gaps surfaced during Sub-project 0
+
+These are areas where existing tests technically pass but don't actually
+exercise the feature — flagged here so subsequent sub-projects close the gap.
+
+### Phase 3 — mock LLM integration silently skips
+
+- **Affected tests**: `ai_mock_llm_chat_response`, `ai_mock_llm_generate_script`,
+  `ai_mock_llm_profile_injection`, `ai_mock_llm_system_prompt_forwarded`
+- **What's happening**: Each test attempts to write a provider config that
+  points the agent at the mock LLM (`http://localhost:8090`). The PUT succeeds
+  but the agent still returns `503 Service Unavailable` on the chat call. The
+  tests detect the 503 and silently skip ("Mock LLM config saved but agent
+  still returns 503 — provider config format may differ"). They pass without
+  having actually exercised the LLM round-trip.
+- **Root cause** (hypothesis): the `ai.provider_config` JSON shape the test
+  writes doesn't match what the current agent expects (likely needs a
+  different provider type than `"custom"` or a different field set for the
+  mock LLM URL).
+- **Re-cover where**: Sub-project 2 (AI sanitization comprehensive) and
+  Sub-project 3 (AI prompt wiring) — both depend on the mock LLM round-trip
+  actually working. Fix the provider-config shape there.
+
+## Phase pass status (after Sub-project 0)
+
+Cold-start re-run of `./run-tests.sh all`:
+
+| Phase | Tests | Status |
+|---|---|---|
+| 1  Foundation         | 9  | ✅ green |
+| 2  Sessions           | 12 | ✅ green |
+| 3  AI + Sanitization  | 41 | ✅ green (mock LLM tests skip, see gap above) |
+| 4  Terminal/WebSocket | 13 | ✅ green |
+| 5  Features           | 16 | ✅ green |
+| 6  SNMP/Discovery     | 13 | ✅ green |
+| 8  Edge Cases         | 16 | ✅ green |
+| 14 Devices            | 14 | ✅ green (was 19; 5 removed-feature deletions) |
+| 15 MOP Steps          | 11 | ✅ green (was 12; 1 removed-feature deletion) |
+| **Total**             | **145** | **✅ all green** |
+
+Frontend Vitest: 36/36 green (App + aiModes + modePrompts + 2 Pact contracts).
