@@ -38,3 +38,14 @@ re-added or a standalone replacement ships.
   `/agent-definitions`, is for AI agent definitions and has no enable/disable.
 - **Re-cover when**: A standalone deployment grows multi-agent topology
   awareness (e.g. peer agents in a mesh).
+
+## Phase 15 — MOP steps
+
+### `token_analytics_by_feature` (was: `GET /admin/analytics/tokens/by-feature`)
+
+- **Removed from**: `tests/api/tests/phase15_mop_steps.rs`
+- **Reason**: `/admin/analytics/*` is controller-only — token usage analytics
+  across users/teams/features is part of the multi-tenant admin surface. The
+  standalone agent serves a single user and has no analytics aggregation.
+- **Re-cover when**: A standalone usage-summary endpoint ships (e.g. a
+  per-feature token counter visible in Settings → AI).
