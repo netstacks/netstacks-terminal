@@ -1421,6 +1421,22 @@ struct OpenAIAgentRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
+    /// Set to `true` for the streaming `/chat/completions?stream=true` path.
+    /// Reused by every OpenAI-compatible provider (OpenAI, Ollama, OpenRouter,
+    /// LiteLLM).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    /// Asks OpenAI-compatible servers to include `usage` on the final stream
+    /// chunk. Without this we don't know token counts after a streaming call.
+    /// Most OpenAI-compat servers (Ollama, OpenRouter, LiteLLM) silently
+    /// ignore the option if they don't support it.
+    #[serde(rename = "stream_options", skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OpenAIStreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1430,7 +1446,7 @@ struct OpenAIMessage {
 }
 
 /// OpenAI message with tool call support
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAIAgentMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1442,14 +1458,14 @@ struct OpenAIAgentMessage {
 }
 
 /// OpenAI tool definition (converted from Anthropic format)
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAITool {
     #[serde(rename = "type")]
     tool_type: String,
     function: OpenAIFunction,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAIFunction {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1528,6 +1544,55 @@ struct OpenAIError {
     message: String,
     #[serde(rename = "type")]
     error_type: Option<String>,
+}
+
+// ===== OpenAI-compatible streaming chunk types =====
+// Used by OpenAI, Ollama (OpenAI-compatible mode), OpenRouter, and LiteLLM.
+// Format: each SSE `data: {...}` line is one OpenAIStreamChunk; the literal
+// line `data: [DONE]` marks end of stream.
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamChunk {
+    #[serde(default)]
+    choices: Vec<OpenAIStreamChoice>,
+    #[serde(default)]
+    usage: Option<OpenAIUsage>,
+    #[serde(default)]
+    error: Option<OpenAIError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamChoice {
+    #[serde(default)]
+    delta: OpenAIStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAIStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAIStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAIStreamFunction>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAIStreamFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// Send an HTTP request with OAuth2 token invalidation on 401.
@@ -2332,6 +2397,47 @@ impl OpenAIProvider {
             });
         })
     }
+
+    /// Native streaming for plain OpenAI `/chat/completions?stream=true`.
+    /// Reuses the shared OpenAI-compat stream parser (same one used by Ollama,
+    /// OpenRouter, and LiteLLM — they all speak this wire format).
+    fn openai_agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+        let temperature = options.as_ref().and_then(|o| o.temperature).map(|t| t as f32).unwrap_or(0.7);
+
+        let request = OpenAIAgentRequest {
+            model: self.model.clone(),
+            messages: agent_messages_to_openai_compat(system_prompt, messages),
+            max_tokens,
+            temperature: Some(temperature),
+            tools: anthropic_tools_to_openai(tools),
+            stream: Some(true),
+            stream_options: Some(OpenAIStreamOptions { include_usage: true }),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+
+        Box::pin(async_stream::stream! {
+            let response = match self.send_request(self.client.post(&url).json(&request)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+            let mut inner = parse_openai_compatible_stream(response);
+            use futures::StreamExt;
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
+    }
 }
 
 /// Translate one of our generic agent content blocks into the wire-format
@@ -2352,6 +2458,260 @@ fn anthropic_block_to_agent_block(b: ContentBlock) -> AgentContentBlock {
         ContentBlock::ToolUse { id, name, input } => AgentContentBlock::ToolUse { id, name, input },
         ContentBlock::ToolResult { tool_use_id, content, is_error } => AgentContentBlock::ToolResult { tool_use_id, content, is_error },
     }
+}
+
+/// Convert generic agent messages into OpenAI-compatible chat-completion
+/// messages. Honours the system prompt by prepending it as a system message.
+/// Tool round-trips: ToolUse → assistant message with `tool_calls`, ToolResult
+/// → message with `role: "tool"` and `tool_call_id`. Shared by every provider
+/// that speaks OpenAI's chat completions message format (OpenAI, Ollama,
+/// OpenRouter, LiteLLM) — used both for non-streaming and streaming paths.
+fn agent_messages_to_openai_compat(
+    system_prompt: String,
+    messages: Vec<AgentMessage>,
+) -> Vec<OpenAIAgentMessage> {
+    let mut out: Vec<OpenAIAgentMessage> = Vec::with_capacity(messages.len() + 1);
+    if !system_prompt.is_empty() {
+        out.push(OpenAIAgentMessage {
+            role: "system".to_string(),
+            content: Some(system_prompt),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+    for m in messages {
+        match m.content {
+            AgentContent::Text(text) => {
+                out.push(OpenAIAgentMessage {
+                    role: m.role,
+                    content: Some(text),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            AgentContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        AgentContentBlock::Text { text } => {
+                            out.push(OpenAIAgentMessage {
+                                role: m.role.clone(),
+                                content: Some(text),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                        }
+                        AgentContentBlock::ToolUse { id, name, input } => {
+                            out.push(OpenAIAgentMessage {
+                                role: "assistant".to_string(),
+                                content: None,
+                                tool_calls: Some(vec![OpenAIToolCall {
+                                    id,
+                                    call_type: "function".to_string(),
+                                    function: OpenAIFunctionCall {
+                                        name,
+                                        arguments: serde_json::to_string(&input).unwrap_or_default(),
+                                    },
+                                }]),
+                                tool_call_id: None,
+                            });
+                        }
+                        AgentContentBlock::ToolResult { tool_use_id, content, .. } => {
+                            out.push(OpenAIAgentMessage {
+                                role: "tool".to_string(),
+                                content: Some(content),
+                                tool_calls: None,
+                                tool_call_id: Some(tool_use_id),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Convert an Anthropic-style tool definition (the canonical wire shape we use
+/// internally) into an OpenAI-compatible function tool definition. Used by
+/// OpenAI, Ollama, OpenRouter, and LiteLLM — which all speak OpenAI's chat
+/// completions tool format.
+fn anthropic_tools_to_openai(tools: Option<Vec<serde_json::Value>>) -> Option<Vec<OpenAITool>> {
+    tools.map(|tools| {
+        tools.into_iter().map(|t| {
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let description = t.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let parameters = t.get("input_schema").cloned();
+            OpenAITool {
+                tool_type: "function".to_string(),
+                function: OpenAIFunction { name, description, parameters },
+            }
+        }).collect()
+    })
+}
+
+/// Parse an OpenAI-compatible SSE chat-completions stream into our generic
+/// `StreamEvent` enum. Used by every provider that speaks OpenAI's chat
+/// completions wire format (OpenAI, Ollama in OpenAI-compat mode, OpenRouter,
+/// LiteLLM).
+///
+/// OpenAI streaming differs from Anthropic in two important ways:
+///
+/// 1. Tool calls have no explicit "block stop" event mid-stream. The first
+///    chunk for a tool call carries `id` + `function.name`; subsequent chunks
+///    for the same `index` carry incremental `function.arguments` strings.
+///    We have to detect "this is a new tool call" by tracking which indices
+///    we've already seen, and we have to emit `ToolUseEnd` either when a new
+///    tool-call index appears OR when the message finishes.
+///
+/// 2. Token usage is only present on the final chunk if the request includes
+///    `stream_options: { include_usage: true }`. Callers should set that.
+///
+/// The literal line `data: [DONE]` marks end of stream.
+fn parse_openai_compatible_stream(
+    response: reqwest::Response,
+) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send>> {
+    Box::pin(async_stream::stream! {
+        use futures::StreamExt;
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+        let mut stop_reason: Option<String> = None;
+        // Tool calls in flight, keyed by their `index` field. Value is whether
+        // we've already emitted ToolUseStart for that index (so we know to emit
+        // ToolUseEnd before starting a new one or before ending the stream).
+        let mut active_tool_index: Option<usize> = None;
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            let chunk = match chunk_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    yield Err(AiError::RequestFailed(format!("Stream read error: {}", e)));
+                    return;
+                }
+            };
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() || line.starts_with("event:") || line == ":" {
+                    continue;
+                }
+                let Some(data) = line.strip_prefix("data: ") else { continue; };
+
+                // OpenAI marks end of stream with the literal "[DONE]" sentinel.
+                if data.trim() == "[DONE]" {
+                    if active_tool_index.take().is_some() {
+                        yield Ok(StreamEvent::ToolUseEnd);
+                    }
+                    yield Ok(StreamEvent::Done {
+                        stop_reason,
+                        usage: Some(TokenUsage {
+                            input_tokens,
+                            output_tokens,
+                            total_tokens: Some(input_tokens + output_tokens),
+                        }),
+                    });
+                    return;
+                }
+
+                let chunk_resp: OpenAIStreamChunk = match serde_json::from_str(data) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("OpenAI-compat SSE parse error: {} — data: {}", e, &data[..data.len().min(200)]);
+                        continue;
+                    }
+                };
+
+                if let Some(error) = chunk_resp.error {
+                    yield Err(AiError::RequestFailed(format!(
+                        "{}: {}",
+                        error.error_type.unwrap_or_else(|| "error".to_string()),
+                        error.message
+                    )));
+                    return;
+                }
+
+                if let Some(usage) = chunk_resp.usage {
+                    input_tokens = usage.prompt_tokens;
+                    output_tokens = usage.completion_tokens;
+                }
+
+                let Some(choice) = chunk_resp.choices.into_iter().next() else { continue; };
+
+                if let Some(text) = choice.delta.content {
+                    if !text.is_empty() {
+                        // If a tool call was open, close it before emitting text.
+                        if active_tool_index.take().is_some() {
+                            yield Ok(StreamEvent::ToolUseEnd);
+                        }
+                        yield Ok(StreamEvent::ContentDelta { text });
+                    }
+                }
+
+                if let Some(tool_calls) = choice.delta.tool_calls {
+                    for tc in tool_calls {
+                        // A new tool call starts when we see an index different
+                        // from the currently-active one AND we have a name + id.
+                        let starts_new = active_tool_index != Some(tc.index)
+                            && tc.id.is_some()
+                            && tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some();
+
+                        if starts_new {
+                            if active_tool_index.take().is_some() {
+                                yield Ok(StreamEvent::ToolUseEnd);
+                            }
+                            let id = tc.id.clone().unwrap_or_default();
+                            let name = tc.function.as_ref()
+                                .and_then(|f| f.name.clone())
+                                .unwrap_or_default();
+                            active_tool_index = Some(tc.index);
+                            yield Ok(StreamEvent::ToolUseStart { id, name });
+                        }
+
+                        // Stream the incremental arguments JSON if present.
+                        if let Some(func) = tc.function {
+                            if let Some(args) = func.arguments {
+                                if !args.is_empty() {
+                                    yield Ok(StreamEvent::ToolInputDelta { delta: args });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(reason) = choice.finish_reason {
+                    if active_tool_index.take().is_some() {
+                        yield Ok(StreamEvent::ToolUseEnd);
+                    }
+                    // Map OpenAI finish_reason to our generic vocabulary —
+                    // matches what the non-streaming OpenAI agent_chat path uses.
+                    stop_reason = Some(match reason.as_str() {
+                        "tool_calls" | "function_call" => "tool_use".to_string(),
+                        "stop" => "end_turn".to_string(),
+                        "length" => "max_tokens".to_string(),
+                        _ => reason,
+                    });
+                }
+            }
+        }
+
+        // Stream ended without an explicit [DONE] sentinel — emit Done so the
+        // client doesn't hang.
+        if active_tool_index.take().is_some() {
+            yield Ok(StreamEvent::ToolUseEnd);
+        }
+        yield Ok(StreamEvent::Done {
+            stop_reason,
+            usage: Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens: Some(input_tokens + output_tokens),
+            }),
+        });
+    })
 }
 
 #[async_trait]
@@ -2517,6 +2877,8 @@ impl AiProvider for OpenAIProvider {
             max_tokens,
             temperature: Some(temperature),
             tools: openai_tools,
+            stream: None,
+            stream_options: None,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -2580,11 +2942,10 @@ impl AiProvider for OpenAIProvider {
         Ok(AgentResponse { content, stop_reason, usage })
     }
 
-    /// Override the default trait stream impl so VertexAnthropic and Gemini
-    /// formats use their dedicated streaming endpoints (real progressive SSE)
-    /// instead of buffering the whole response in `agent_chat` and synthesising
-    /// a single batch of events at the end. The plain OpenAI format still
-    /// falls back to the default trait impl for now.
+    /// Override the default trait stream impl so every API format uses its
+    /// dedicated streaming endpoint (real progressive SSE) instead of
+    /// buffering the whole response in `agent_chat` and synthesising a single
+    /// batch of events at the end.
     fn agent_chat_stream(
         &self,
         system_prompt: String,
@@ -2600,34 +2961,7 @@ impl AiProvider for OpenAIProvider {
                 self.gemini_agent_chat_stream(system_prompt, messages, tools, options)
             }
             ApiFormat::OpenAI => {
-                // Fall back to trait default: call agent_chat, synthesise events.
-                let fut = self.agent_chat(system_prompt, messages, tools, options);
-                Box::pin(async_stream::stream! {
-                    match fut.await {
-                        Ok(response) => {
-                            for block in &response.content {
-                                match block {
-                                    AgentContentBlock::Text { text } => {
-                                        yield Ok(StreamEvent::ContentDelta { text: text.clone() });
-                                    }
-                                    AgentContentBlock::ToolUse { id, name, input } => {
-                                        yield Ok(StreamEvent::ToolUseStart { id: id.clone(), name: name.clone() });
-                                        yield Ok(StreamEvent::ToolInputDelta {
-                                            delta: serde_json::to_string(input).unwrap_or_default(),
-                                        });
-                                        yield Ok(StreamEvent::ToolUseEnd);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            yield Ok(StreamEvent::Done {
-                                stop_reason: response.stop_reason,
-                                usage: response.usage,
-                            });
-                        }
-                        Err(e) => yield Ok(StreamEvent::Error { message: e.to_string() }),
-                    }
-                })
+                self.openai_agent_chat_stream(system_prompt, messages, tools, options)
             }
         }
     }
@@ -2768,6 +3102,99 @@ impl AiProvider for OllamaProvider {
         result
     }
 
+    /// Native streaming via Ollama's OpenAI-compatible `/v1/chat/completions`
+    /// endpoint with `stream: true`. Reuses the shared OpenAI-compat parser.
+    /// If the model returns a "does not support tools" error on the first
+    /// chunk, we retry once without tools (mirrors the non-streaming
+    /// `agent_chat` fallback).
+    fn agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+        let temperature = options.as_ref().and_then(|o| o.temperature).map(|t| t as f32).unwrap_or(0.7);
+        let openai_messages = agent_messages_to_openai_compat(system_prompt, messages);
+        let openai_tools = anthropic_tools_to_openai(tools);
+
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let model = self.model.clone();
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+
+        Box::pin(async_stream::stream! {
+            let request = OpenAIAgentRequest {
+                model: model.clone(),
+                messages: openai_messages.clone(),
+                max_tokens,
+                temperature: Some(temperature),
+                tools: openai_tools.clone(),
+                stream: Some(true),
+                stream_options: Some(OpenAIStreamOptions { include_usage: true }),
+            };
+
+            let mut response = match client.post(&url).json(&request).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(if e.is_timeout() {
+                        AiError::Timeout
+                    } else if e.is_connect() {
+                        AiError::NotConfigured(format!(
+                            "Cannot connect to Ollama at {}. Is it running? Start with: ollama serve",
+                            base_url
+                        ))
+                    } else {
+                        AiError::RequestFailed(e.to_string())
+                    });
+                    return;
+                }
+            };
+
+            // If the model rejected tools, retry once without them so streaming
+            // still works on tool-less models (mirrors agent_chat fallback).
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if openai_tools.is_some() && body.contains("does not support tools") {
+                    tracing::info!("Ollama model {} doesn't support tools, retrying stream without tools", model);
+                    let retry = OpenAIAgentRequest {
+                        model,
+                        messages: openai_messages,
+                        max_tokens,
+                        temperature: Some(temperature),
+                        tools: None,
+                        stream: Some(true),
+                        stream_options: Some(OpenAIStreamOptions { include_usage: true }),
+                    };
+                    response = match client.post(&url).json(&retry).send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            yield Err(AiError::RequestFailed(format!("Retry without tools failed: {}", e)));
+                            return;
+                        }
+                    };
+                    if !response.status().is_success() {
+                        let s = response.status();
+                        let b = response.text().await.unwrap_or_default();
+                        yield Err(AiError::RequestFailed(format!("HTTP {}: {}", s, b)));
+                        return;
+                    }
+                } else {
+                    yield Err(AiError::RequestFailed(format!("HTTP {}: {}", status, body)));
+                    return;
+                }
+            }
+
+            let mut inner = parse_openai_compatible_stream(response);
+            use futures::StreamExt;
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
+    }
+
     fn provider_name(&self) -> &str {
         "Ollama"
     }
@@ -2862,6 +3289,8 @@ impl OllamaProvider {
             max_tokens,
             temperature: Some(temperature),
             tools: openai_tools,
+            stream: None,
+            stream_options: None,
         };
 
         let url = format!("{}/v1/chat/completions", self.base_url);
@@ -3028,6 +3457,10 @@ struct OpenRouterAgentRequest {
     /// Transforms to apply (e.g., "middle-out" for automatic prompt compression)
     #[serde(skip_serializing_if = "Option::is_none")]
     transforms: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(rename = "stream_options", skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OpenAIStreamOptions>,
 }
 
 /// OpenRouter API provider (OpenAI-compatible at openrouter.ai)
@@ -3227,6 +3660,8 @@ impl AiProvider for OpenRouterProvider {
             tools: openai_tools,
             // Enable middle-out transform to automatically compress prompts that exceed context window
             transforms: Some(vec!["middle-out".to_string()]),
+            stream: None,
+            stream_options: None,
         };
 
         let response = self
@@ -3311,6 +3746,74 @@ impl AiProvider for OpenRouterProvider {
         });
 
         Ok(AgentResponse { content, stop_reason, usage })
+    }
+
+    /// Native streaming via OpenRouter's OpenAI-compatible chat completions
+    /// endpoint with `stream: true`. Reuses the shared OpenAI-compat parser.
+    /// Bearer auth + the same NetStacks-identifying headers as `agent_chat`.
+    fn agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+        let temperature = options.as_ref().and_then(|o| o.temperature).map(|t| t as f32).unwrap_or(0.7);
+
+        let request = OpenRouterAgentRequest {
+            model: self.model.clone(),
+            messages: agent_messages_to_openai_compat(system_prompt, messages),
+            max_tokens,
+            temperature: Some(temperature),
+            tools: anthropic_tools_to_openai(tools),
+            transforms: Some(vec!["middle-out".to_string()]),
+            stream: Some(true),
+            stream_options: Some(OpenAIStreamOptions { include_usage: true }),
+        };
+
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+
+        Box::pin(async_stream::stream! {
+            let response = match client
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .header("HTTP-Referer", "https://netstacks.net")
+                .header("X-Title", "NetStacks")
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(if e.is_timeout() {
+                        AiError::Timeout
+                    } else {
+                        AiError::RequestFailed(e.to_string())
+                    });
+                    return;
+                }
+            };
+
+            let status = response.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                yield Err(AiError::RateLimited);
+                return;
+            }
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                yield Err(AiError::RequestFailed(format!("HTTP {}: {}", status, body)));
+                return;
+            }
+
+            let mut inner = parse_openai_compatible_stream(response);
+            use futures::StreamExt;
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
     }
 
     fn provider_name(&self) -> &str {
@@ -3526,6 +4029,8 @@ impl AiProvider for LiteLLMProvider {
             max_tokens,
             temperature: Some(temperature),
             tools: openai_tools,
+            stream: None,
+            stream_options: None,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -3620,6 +4125,75 @@ impl AiProvider for LiteLLMProvider {
         });
 
         Ok(AgentResponse { content, stop_reason, usage })
+    }
+
+    /// Native streaming via LiteLLM's OpenAI-compatible chat completions
+    /// endpoint with `stream: true`. Optional Bearer auth — same auth pattern
+    /// as the non-streaming `agent_chat`.
+    fn agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+        let temperature = options.as_ref().and_then(|o| o.temperature).map(|t| t as f32).unwrap_or(0.7);
+
+        let request = OpenAIAgentRequest {
+            model: self.model.clone(),
+            messages: agent_messages_to_openai_compat(system_prompt, messages),
+            max_tokens,
+            temperature: Some(temperature),
+            tools: anthropic_tools_to_openai(tools),
+            stream: Some(true),
+            stream_options: Some(OpenAIStreamOptions { include_usage: true }),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+
+        Box::pin(async_stream::stream! {
+            let mut req_builder = client.post(&url).header("Content-Type", "application/json");
+            if let Some(ref key) = api_key {
+                req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
+            }
+
+            let response = match req_builder.json(&request).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(if e.is_timeout() {
+                        AiError::Timeout
+                    } else if e.is_connect() {
+                        AiError::NotConfigured(format!(
+                            "Cannot connect to LiteLLM proxy at {}. Is it running?",
+                            url
+                        ))
+                    } else {
+                        AiError::RequestFailed(e.to_string())
+                    });
+                    return;
+                }
+            };
+
+            let status = response.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                yield Err(AiError::RateLimited);
+                return;
+            }
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                yield Err(AiError::RequestFailed(format!("HTTP {}: {}", status, body)));
+                return;
+            }
+
+            let mut inner = parse_openai_compatible_stream(response);
+            use futures::StreamExt;
+            while let Some(event) = inner.next().await {
+                yield event;
+            }
+        })
     }
 
     fn provider_name(&self) -> &str {
