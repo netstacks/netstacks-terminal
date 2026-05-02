@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use crate::models::PortForward;
 use crate::ssh::{SshSession, SshConfig, SshAuth};
 use crate::telnet::{TelnetConfig, TelnetSession};
+use crate::utf8_decoder::Utf8Decoder;
 
 /// Message types for terminal communication
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -126,6 +127,7 @@ impl TerminalSession {
         // Spawn a task to read from PTY and send to output channel
         let reader_handle = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
+            let mut decoder = Utf8Decoder::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -133,7 +135,10 @@ impl TerminalSession {
                         break;
                     }
                     Ok(n) => {
-                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let data = decoder.decode(&buf[..n]);
+                        if data.is_empty() {
+                            continue;
+                        }
                         if output_tx.send(TerminalMessage::Output(data)).is_err() {
                             break;
                         }
@@ -241,6 +246,7 @@ impl TerminalSession {
             // Spawn reader task for PTY output
             let reader_handle = tokio::task::spawn_blocking(move || {
                 let mut buf = [0u8; 4096];
+                let mut decoder = Utf8Decoder::new();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => {
@@ -248,7 +254,10 @@ impl TerminalSession {
                             break;
                         }
                         Ok(n) => {
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let data = decoder.decode(&buf[..n]);
+                            if data.is_empty() {
+                                continue;
+                            }
                             if output_tx.send(TerminalMessage::Output(data)).is_err() {
                                 break;
                             }
@@ -299,13 +308,17 @@ impl TerminalSession {
 
         // Spawn a task to read from SSH session and send to output channel
         let reader_handle = tokio::spawn(async move {
+            let mut decoder = Utf8Decoder::new();
             loop {
                 match session_for_reader.recv().await {
                     Ok(Some(data)) => {
                         if data.is_empty() {
                             continue;
                         }
-                        let text = String::from_utf8_lossy(&data).to_string();
+                        let text = decoder.decode(&data);
+                        if text.is_empty() {
+                            continue;
+                        }
                         if output_tx.send(TerminalMessage::Output(text)).is_err() {
                             break;
                         }
@@ -355,10 +368,14 @@ impl TerminalSession {
         // Spawn reader task (same pattern as SSH)
         let reader_session = session.clone();
         let reader_handle = tokio::spawn(async move {
+            let mut decoder = Utf8Decoder::new();
             loop {
                 match reader_session.recv().await {
                     Ok(Some(data)) => {
-                        let text = String::from_utf8_lossy(&data).to_string();
+                        let text = decoder.decode(&data);
+                        if text.is_empty() {
+                            continue;
+                        }
                         if output_tx.send(TerminalMessage::Output(text)).is_err() {
                             break;
                         }

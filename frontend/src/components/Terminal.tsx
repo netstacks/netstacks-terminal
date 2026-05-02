@@ -1000,6 +1000,12 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
             setShowReconnectOverlay(false)
             setAttemptCount(0)
             setCountdown(reconnectDelay)
+            // Re-send the actual terminal size now that the DOM is laid out.
+            // The initial size in the WS query string can be stale because
+            // fit() runs synchronously before measurement is complete; if the
+            // server-side TTY is sized wrong, TUIs (e.g. Ink-based CLIs) emit
+            // cursor-positioning escapes that land off-by-N cells.
+            handleResize()
             // Fetch session context and show popup if any exists
             if (sessionId) {
               refreshSessionContextsRef.current().then((contexts) => {
