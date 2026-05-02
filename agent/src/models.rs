@@ -753,6 +753,12 @@ pub struct CredentialProfile {
     #[serde(default)]
     pub auto_commands: Vec<String>,
 
+    /// Optional default jump host for sessions/tunnels using this profile.
+    /// `None` means direct connection. Sessions/tunnels can override by
+    /// setting their own `jump_host_id` to a different value.
+    #[serde(default)]
+    pub jump_host_id: Option<String>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -786,6 +792,8 @@ pub struct NewCredentialProfile {
     pub cli_flavor: CliFlavor,
     #[serde(default)]
     pub auto_commands: Vec<String>,
+    #[serde(default)]
+    pub jump_host_id: Option<String>,
 }
 
 /// Request to update a credential profile (all fields optional for partial updates)
@@ -807,6 +815,7 @@ pub struct UpdateCredentialProfile {
     pub reconnect_delay: Option<u32>,
     pub cli_flavor: Option<CliFlavor>,
     pub auto_commands: Option<Vec<String>>,
+    pub jump_host_id: Option<Option<String>>,
 }
 
 /// Credential for a profile (stored encrypted in vault)
@@ -3192,4 +3201,53 @@ pub struct UpdateGroupRequest {
     pub default_launch_action: Option<Option<LaunchAction>>,
     #[serde(default)]
     pub last_used_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_profile_serde_round_trip_includes_jump_host_id() {
+        let json = r#"{
+            "id": "p1",
+            "name": "Test",
+            "username": "admin",
+            "auth_type": "password",
+            "key_path": null,
+            "port": 22,
+            "keepalive_interval": 30,
+            "connection_timeout": 10,
+            "terminal_theme": null,
+            "default_font_size": null,
+            "default_font_family": null,
+            "scrollback_lines": 1000,
+            "local_echo": false,
+            "auto_reconnect": false,
+            "reconnect_delay": 5,
+            "cli_flavor": "auto",
+            "auto_commands": [],
+            "jump_host_id": "jh-1",
+            "created_at": "2026-05-02T00:00:00Z",
+            "updated_at": "2026-05-02T00:00:00Z"
+        }"#;
+        let p: CredentialProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p.jump_host_id.as_deref(), Some("jh-1"));
+    }
+
+    #[test]
+    fn credential_profile_jump_host_id_defaults_to_none_when_missing() {
+        let json = r#"{
+            "id": "p1", "name": "Test", "username": "admin",
+            "auth_type": "password", "key_path": null,
+            "port": 22, "keepalive_interval": 30, "connection_timeout": 10,
+            "terminal_theme": null, "default_font_size": null, "default_font_family": null,
+            "scrollback_lines": 1000, "local_echo": false, "auto_reconnect": false,
+            "reconnect_delay": 5, "cli_flavor": "auto", "auto_commands": [],
+            "created_at": "2026-05-02T00:00:00Z",
+            "updated_at": "2026-05-02T00:00:00Z"
+        }"#;
+        let p: CredentialProfile = serde_json::from_str(json).unwrap();
+        assert!(p.jump_host_id.is_none());
+    }
 }
