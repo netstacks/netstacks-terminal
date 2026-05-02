@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -1178,8 +1179,11 @@ pub struct OpenAIProvider {
     model: String,
     base_url: String,
     client: reqwest::Client,
-    /// Optional OAuth2 token manager for providers that use OAuth2 instead of static API keys.
-    oauth2: Option<super::oauth2::OAuth2TokenManager>,
+    /// Optional OAuth2 token manager for providers that use OAuth2 instead of
+    /// static API keys. Stored as `Arc` so multiple providers built per-request
+    /// share the same in-memory token cache (see
+    /// `OAuth2TokenManager::get_or_create_shared`).
+    oauth2: Option<Arc<super::oauth2::OAuth2TokenManager>>,
     /// Optional custom headers to include on all API requests (e.g., user_email for Apigee).
     custom_headers: std::collections::HashMap<String, String>,
     /// API request format (OpenAI or Gemini/Vertex AI).
@@ -1209,6 +1213,11 @@ impl OpenAIProvider {
     }
 
     /// Create a provider with OAuth2 client_credentials authentication.
+    ///
+    /// Reuses a process-wide `OAuth2TokenManager` for the given config so the
+    /// token cache survives per-request provider construction. Without this,
+    /// every chat turn would trigger a brand-new token fetch even though the
+    /// previously-issued token is still good for ~30 minutes.
     pub fn with_oauth2(
         model: String,
         base_url: String,
@@ -1216,7 +1225,7 @@ impl OpenAIProvider {
         api_format: ApiFormat,
     ) -> Result<Self, AiError> {
         let custom_headers = oauth2_config.custom_headers.clone();
-        let token_manager = super::oauth2::OAuth2TokenManager::new(oauth2_config);
+        let token_manager = super::oauth2::OAuth2TokenManager::get_or_create_shared(oauth2_config);
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
