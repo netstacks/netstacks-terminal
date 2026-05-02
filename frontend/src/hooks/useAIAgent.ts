@@ -886,7 +886,8 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
 
       case 'run_command': {
         const sessionId = input.session_id as string;
-        let command = input.command as string;
+        const singleCommand = input.command as string | undefined;
+        const commandList = input.commands as string[] | undefined;
 
         const session = sessions.find(s => s.id === sessionId);
         if (!session) {
@@ -894,6 +895,25 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
         }
         if (!session.connected) {
           return { content: `Session ${session.name} is not connected`, is_error: true };
+        }
+        if (!onExecuteCommand) {
+          return { content: 'Command execution not available', is_error: true };
+        }
+
+        // Resolve to a Vec<string>. Mutually-exclusive command/commands;
+        // matches the ai_ssh_execute contract.
+        let commands: string[];
+        if (singleCommand && commandList) {
+          return { content: 'Use either `command` or `commands`, not both.', is_error: true };
+        } else if (commandList && commandList.length > 0) {
+          if (commandList.length > 10) {
+            return { content: '`commands` array must have at most 10 entries.', is_error: true };
+          }
+          commands = commandList;
+        } else if (singleCommand) {
+          commands = [singleCommand];
+        } else {
+          return { content: 'Either `command` or `commands` is required.', is_error: true };
         }
 
         // AUDIT FIX (EXEC-002): client-side read-only pre-flight removed —
@@ -903,53 +923,82 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
         // give false confidence.
 
         // Disable paging for AI-executed commands so output doesn't block.
-        //
-        // BUG FIX: previously this branch fired for `linux || auto`, which
-        // meant the Linux env-var prefix (PAGER=cat SYSTEMD_PAGER= ...) got
-        // injected onto every command for any session whose flavor wasn't
-        // explicitly tagged — including IOS-XR / IOS-XE / Junos sessions
-        // where the device replies "% Invalid input detected at '^' marker."
-        // Now we ONLY apply the Linux wrapper when the session is explicitly
-        // Linux. For `auto`, do nothing — the AI's system prompt instructs it
-        // to probe (`show version`) and then call `set_session_cli_flavor`
-        // before issuing platform-specific paging-disable commands.
+        // Only applied when the session's flavor is explicitly Linux or
+        // Juniper. For 'auto' (and every other vendor), do nothing — the
+        // AI's system prompt tells it to probe + call set_session_cli_flavor
+        // first, then issue the platform's own paging-disable command.
         const flavor: CliFlavor = sessionFlavorOverridesRef.current.get(sessionId)
           ?? session.cliFlavor
           ?? 'auto';
-        if (flavor === 'linux') {
-          // Inline env vars disable pagers for most Unix tools (less, more, systemctl, git, etc.)
-          command = `PAGER=cat SYSTEMD_PAGER= GIT_PAGER=cat LESS=-FRX ${command}`;
-        } else if (flavor === 'juniper') {
-          // Juniper: pipe through no-more to suppress paging
-          if (!command.includes('| no-more')) {
-            command = `${command} | no-more`;
+        const wrapForPaging = (cmd: string): string => {
+          if (flavor === 'linux') {
+            return `PAGER=cat SYSTEMD_PAGER= GIT_PAGER=cat LESS=-FRX ${cmd}`;
+          }
+          if (flavor === 'juniper' && !cmd.includes('| no-more')) {
+            return `${cmd} | no-more`;
+          }
+          return cmd;
+        };
+
+        // Single-command path keeps the legacy return shape (raw output string).
+        if (commands.length === 1) {
+          try {
+            const output = await onExecuteCommand(sessionId, wrapForPaging(commands[0]));
+            return { content: output, is_error: false };
+          } catch (err) {
+            return {
+              content: `Command failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+              is_error: true,
+            };
           }
         }
-        // Cisco IOS / IOS-XR / NX-OS / Arista EOS: handled by system prompt
-        // (`terminal length 0`). Palo Alto/Fortinet: handled by system prompt.
-        // Auto: do nothing — let the AI probe + set the flavor first.
 
-        // Execute the command
-        if (!onExecuteCommand) {
-          return { content: 'Command execution not available', is_error: true };
+        // Batch path: run each command sequentially in the open terminal,
+        // assemble per-command sections with `=== [N] command ===` headers
+        // so the AI can read it as one stream and still know which output
+        // belongs to which command.
+        const sections: string[] = [];
+        let anyFailed = false;
+        for (let i = 0; i < commands.length; i++) {
+          const cmd = commands[i];
+          let sectionBody: string;
+          try {
+            sectionBody = await onExecuteCommand(sessionId, wrapForPaging(cmd));
+          } catch (err) {
+            anyFailed = true;
+            sectionBody = `[error] ${err instanceof Error ? err.message : 'Unknown error'}`;
+          }
+          sections.push(`=== [${i + 1}] ${cmd} ===\n${sectionBody}`);
         }
-
-        try {
-          const output = await onExecuteCommand(sessionId, command);
-          return { content: output, is_error: false };
-        } catch (err) {
-          return {
-            content: `Command failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
-            is_error: true,
-          };
-        }
+        return {
+          content: sections.join('\n\n'),
+          is_error: anyFailed,
+        };
       }
 
       case 'ai_ssh_execute': {
-        // AI SSH Execute - connects directly to device using saved session credentials
+        // AI SSH Execute - connects directly to device using saved session credentials.
+        // Supports BATCH MODE: pass `commands: string[]` (max 10) instead of `command`
+        // to run several commands over a single SSH connection (~10x faster than calling
+        // this tool N times because it avoids per-command SSH handshake/auth overhead).
         const sessionId = input.session_id as string;
-        const command = input.command as string;
+        const command = input.command as string | undefined;
+        const commands = input.commands as string[] | undefined;
+        const stopOnError = input.stop_on_error as boolean | undefined;
         const timeoutSecs = (input.timeout_secs as number) || 30;
+
+        if ((!command || command.length === 0) && (!commands || commands.length === 0)) {
+          return {
+            content: 'Either `command` (single string) or `commands` (array of strings, max 10) is required.',
+            is_error: true,
+          };
+        }
+        if (command && commands) {
+          return {
+            content: 'Use either `command` or `commands`, not both.',
+            is_error: true,
+          };
+        }
 
         // AUDIT FIX (EXEC-002): client-side pre-flight removed; backend's
         // CommandFilter at /api/ai/ssh-execute is the source of truth and
@@ -962,7 +1011,9 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
             ...(isEnterpriseMode
               ? { session_definition_id: sessionId }
               : { session_id: sessionId }),
-            command: command,
+            ...(command !== undefined ? { command } : {}),
+            ...(commands !== undefined ? { commands } : {}),
+            ...(stopOnError !== undefined ? { stop_on_error: stopOnError } : {}),
             timeout_secs: timeoutSecs,
           });
 

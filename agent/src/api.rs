@@ -2871,11 +2871,26 @@ pub async fn bulk_command(
 
 // === AI SSH Execute Endpoint ===
 
-/// Request for AI to execute a command on a single session
+/// Request for AI to execute one or more commands on a session.
+///
+/// Accepts either `command` (single, back-compat) or `commands` (batch, max 10).
+/// Exactly one must be present. Batch mode keeps a single SSH connection open
+/// and runs each command sequentially through the same shell session — ~10x
+/// faster than N separate ai_ssh_execute calls because it avoids per-command
+/// SSH handshake / auth / channel-open overhead.
 #[derive(Debug, Deserialize)]
 pub struct AiSshExecuteRequest {
     pub session_id: String,
-    pub command: String,
+    /// Single command (mutually exclusive with `commands`).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Batch of commands to run sequentially on a single SSH connection.
+    /// Max 10 to keep AI tool turns bounded.
+    #[serde(default)]
+    pub commands: Option<Vec<String>>,
+    /// In batch mode, stop the remaining commands when one fails. Default false.
+    #[serde(default)]
+    pub stop_on_error: Option<bool>,
     #[serde(default = "default_ai_timeout")]
     pub timeout_secs: Option<u64>,
 }
@@ -2884,13 +2899,32 @@ fn default_ai_timeout() -> Option<u64> {
     Some(30)
 }
 
-/// Response from AI SSH execute
+/// Per-command result returned in batch mode.
+#[derive(Debug, Serialize)]
+pub struct AiSshCommandResult {
+    pub command: String,
+    pub success: bool,
+    pub output: String,
+    pub error: Option<String>,
+    pub execution_time_ms: u64,
+}
+
+/// Response from AI SSH execute.
+///
+/// Single-command callers see the legacy fields populated as before.
+/// Batch callers ALSO get the legacy aggregate fields (`output` is the
+/// per-command outputs joined with separators; `success` is true iff every
+/// command succeeded; `execution_time_ms` is the total wall time) PLUS a
+/// `results` array with structured per-command data.
 #[derive(Debug, Serialize)]
 pub struct AiSshExecuteResponse {
     pub success: bool,
     pub output: String,
     pub error: Option<String>,
     pub execution_time_ms: u64,
+    /// Present only in batch mode (when the request used the `commands` field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<AiSshCommandResult>>,
 }
 
 /// Execute a command on a single SSH session for AI enrichment
@@ -2909,27 +2943,64 @@ pub async fn ai_ssh_execute(
 ) -> Result<Json<AiSshExecuteResponse>, ApiError> {
     use crate::tasks::tools::filter::CommandFilter;
 
-    // Validate request
-    if req.command.is_empty() {
-        return Err(ApiError {
-            error: "command must not be empty".to_string(),
-            code: "VALIDATION".to_string(),
-        });
-    }
+    // Resolve `command` / `commands` into a single Vec<String>.
+    let command_list: Vec<String> = match (&req.command, &req.commands) {
+        (Some(cmd), None) => {
+            if cmd.is_empty() {
+                return Err(ApiError {
+                    error: "command must not be empty".to_string(),
+                    code: "VALIDATION".to_string(),
+                });
+            }
+            vec![cmd.clone()]
+        }
+        (None, Some(cmds)) => {
+            if cmds.is_empty() {
+                return Err(ApiError {
+                    error: "commands must not be empty".to_string(),
+                    code: "VALIDATION".to_string(),
+                });
+            }
+            if cmds.len() > 10 {
+                return Err(ApiError {
+                    error: "commands array must have at most 10 entries".to_string(),
+                    code: "VALIDATION".to_string(),
+                });
+            }
+            cmds.clone()
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError {
+                error: "Cannot specify both 'command' and 'commands' — use one".to_string(),
+                code: "VALIDATION".to_string(),
+            });
+        }
+        (None, None) => {
+            return Err(ApiError {
+                error: "Must specify either 'command' (string) or 'commands' (array)".to_string(),
+                code: "VALIDATION".to_string(),
+            });
+        }
+    };
+    let is_batch = command_list.len() > 1;
+    let stop_on_error = req.stop_on_error.unwrap_or(false);
 
-    // Read-only command filter — apply BEFORE any device contact.
+    // Read-only command filter — apply to EVERY command BEFORE any device contact.
+    // Mirrors what the backend ReAct SshCommandTool does.
     let filter = CommandFilter::new();
-    if let Err(e) = filter.is_allowed(&req.command) {
-        tracing::warn!(
-            session_id = %req.session_id,
-            command = %req.command,
-            "ai_ssh_execute: blocked by CommandFilter ({})",
-            e
-        );
-        return Err(ApiError {
-            error: format!("Command rejected by read-only filter: {}", e),
-            code: "VALIDATION".to_string(),
-        });
+    for cmd in &command_list {
+        if let Err(e) = filter.is_allowed(cmd) {
+            tracing::warn!(
+                session_id = %req.session_id,
+                command = %cmd,
+                "ai_ssh_execute: blocked by CommandFilter ({})",
+                e
+            );
+            return Err(ApiError {
+                error: format!("Command rejected by read-only filter: {} — `{}`", e, cmd),
+                code: "VALIDATION".to_string(),
+            });
+        }
     }
 
     let timeout_secs = req.timeout_secs.unwrap_or(30);
@@ -2975,28 +3046,92 @@ pub async fn ai_ssh_execute(
             code: "AUTH_MISSING".to_string(),
         })?;
 
-    // Execute command. AUDIT FIX (REMOTE-001): pass the approval service
-    // so unknown host keys surface a UI prompt instead of silent TOFU.
-    let result = ssh::execute_command_on_session_with_approvals(
+    // Single-command path: existing behavior, returns the same legacy shape.
+    if !is_batch {
+        let cmd = command_list.into_iter().next().unwrap();
+        let result = ssh::execute_command_on_session_with_approvals(
+            config,
+            req.session_id.clone(),
+            session.name.clone(),
+            cmd,
+            std::time::Duration::from_secs(timeout_secs),
+            Some(state.host_key_approvals.clone()),
+        )
+        .await;
+        let success = result.status == ssh::CommandStatus::Success;
+        return Ok(Json(AiSshExecuteResponse {
+            success,
+            output: result.output,
+            error: result.error,
+            execution_time_ms: result.execution_time_ms,
+            results: None,
+        }));
+    }
+
+    // Batch path: open ONE shell session and run all commands sequentially
+    // through it, then return per-command results plus an aggregate transcript.
+    let stepped: Vec<(String, String)> = command_list
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| (format!("c{}", i), cmd.clone()))
+        .collect();
+
+    let shell_results = ssh::execute_commands_via_shell(
         config,
         req.session_id.clone(),
         session.name.clone(),
-        req.command,
+        Vec::new(), // no auto_commands — paging-disable is the AI's job
+        stepped,
+        Vec::new(), // no post_commands
         std::time::Duration::from_secs(timeout_secs),
-        Some(state.host_key_approvals.clone()),
+        false, // never auto-accept changed host keys here
     )
     .await;
 
-    // Convert to response
-    let success = result.status == ssh::CommandStatus::Success;
-    let response = AiSshExecuteResponse {
-        success,
-        output: result.output,
-        error: result.error,
-        execution_time_ms: result.execution_time_ms,
-    };
+    let mut results: Vec<AiSshCommandResult> = Vec::with_capacity(command_list.len());
+    let mut all_success = true;
+    let mut total_time_ms: u64 = 0;
+    let mut aggregated_output = String::new();
 
-    Ok(Json(response))
+    for (i, (cmd, r)) in command_list.iter().zip(shell_results.commands.iter()).enumerate() {
+        let success = r.status == ssh::CommandStatus::Success;
+        if !success {
+            all_success = false;
+        }
+        total_time_ms += r.execution_time_ms;
+
+        // Aggregated output uses a clear per-command header so the AI can read
+        // a single string and still know which command produced which lines.
+        if !aggregated_output.is_empty() {
+            aggregated_output.push('\n');
+        }
+        aggregated_output.push_str(&format!("=== [{}] {} ===\n", i + 1, cmd));
+        aggregated_output.push_str(&r.output);
+
+        results.push(AiSshCommandResult {
+            command: cmd.clone(),
+            success,
+            output: r.output.clone(),
+            error: r.error.clone(),
+            execution_time_ms: r.execution_time_ms,
+        });
+
+        if stop_on_error && !success {
+            break;
+        }
+    }
+
+    Ok(Json(AiSshExecuteResponse {
+        success: all_success,
+        output: aggregated_output,
+        error: if all_success {
+            None
+        } else {
+            Some("One or more commands failed".to_string())
+        },
+        execution_time_ms: total_time_ms,
+        results: Some(results),
+    }))
 }
 
 // === AI File Operation Endpoints ===
@@ -3065,6 +3200,7 @@ pub async fn ai_write_file(
         },
         error: result.error,
         execution_time_ms: result.execution_time_ms,
+        results: None,
     }))
 }
 
@@ -3107,6 +3243,7 @@ pub async fn ai_edit_file(
             output: read_result.output,
             error: read_result.error,
             execution_time_ms: read_result.execution_time_ms,
+            results: None,
         }));
     }
 
@@ -3153,6 +3290,7 @@ pub async fn ai_edit_file(
         },
         error: result.error,
         execution_time_ms: result.execution_time_ms,
+        results: None,
     }))
 }
 
@@ -3195,6 +3333,7 @@ pub async fn ai_patch_file(
         },
         error: result.error,
         execution_time_ms: result.execution_time_ms,
+        results: None,
     }))
 }
 

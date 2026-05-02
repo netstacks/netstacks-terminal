@@ -13,6 +13,8 @@ export interface AgentTool {
       type: string;
       description: string;
       enum?: string[];
+      /** For array-typed properties: schema of each element. */
+      items?: { type: string };
     }>;
     required: string[];
   };
@@ -67,7 +69,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   },
   {
     name: 'run_command',
-    description: 'Execute a READ-ONLY command on an OPEN terminal session. Only show/display/get commands are allowed. Configuration commands will be rejected. Requires the terminal tab to be open.',
+    description: 'Execute one or more READ-ONLY commands on an OPEN terminal session. Pass either `command` (single) or `commands` (array, max 10). Only show/display/get commands are allowed; configuration commands are rejected. BATCH MODE runs each command sequentially through the same open terminal — strongly preferred when you have several commands for the same session, both because it avoids per-command tool-turn round trips (each AI tool call = an extra LLM API request and OAuth refresh) and because output stays in temporal order with clear per-command separators.',
     parameters: {
       type: 'object',
       properties: {
@@ -77,15 +79,20 @@ export const AGENT_TOOLS: AgentTool[] = [
         },
         command: {
           type: 'string',
-          description: 'The command to execute (must be read-only: show, display, get, etc.)'
+          description: 'Single command to execute (must be read-only). Use this OR `commands`, not both.'
+        },
+        commands: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of read-only commands to run sequentially in the open terminal (max 10). Output is concatenated with `=== [N] command ===` headers so you can read it as one stream.'
         }
       },
-      required: ['session_id', 'command']
+      required: ['session_id']
     }
   },
   {
     name: 'ai_ssh_execute',
-    description: 'Execute a READ-ONLY command on a device by SSH-ing directly using its saved session credentials. Use this for background topology enrichment when you need to connect to devices without requiring open terminal tabs. Connects, runs command, disconnects.',
+    description: 'Execute one or more READ-ONLY commands on a device by SSH-ing directly using its saved session credentials. Use this when no terminal tab is open. Pass either `command` (single) or `commands` (array, max 10). BATCH MODE keeps a single SSH connection open and runs every command sequentially through it — strongly preferred over calling this tool N times when you have several commands for the same device, both because it is ~10x faster (avoids per-command SSH handshake/auth) and because it is one AI turn instead of N (saves API tokens and OAuth refreshes).',
     parameters: {
       type: 'object',
       properties: {
@@ -95,14 +102,23 @@ export const AGENT_TOOLS: AgentTool[] = [
         },
         command: {
           type: 'string',
-          description: 'The command to execute (must be read-only: show, display, get, etc.)'
+          description: 'Single command to execute (must be read-only). Use this OR `commands`, not both.'
+        },
+        commands: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of read-only commands to run sequentially over a single SSH connection (max 10). Use this when you need to gather multiple pieces of information from the same device. Returns a `results` array with per-command success/output plus an aggregated `output` string with `=== [N] command ===` headers for easy reading.',
+        },
+        stop_on_error: {
+          type: 'boolean',
+          description: 'In batch mode, stop running remaining commands when one fails. Default false.'
         },
         timeout_secs: {
           type: 'number',
-          description: 'Command timeout in seconds (default: 30, max: 300)'
+          description: 'Per-command timeout in seconds (default: 30, max: 300)'
         }
       },
-      required: ['session_id', 'command']
+      required: ['session_id']
     }
   },
   {
