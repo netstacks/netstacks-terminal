@@ -322,9 +322,31 @@ export default function PromptsSettingsTab() {
   const favorites = prompts.filter(p => p.is_favorite);
   const others = prompts.filter(p => !p.is_favorite);
 
-  // Render order: 4 mode prompts first, then 4 specialized tasks. UI grouping
-  // (subsection headers) is added in the next task.
-  const systemKeys: SystemKey[] = [...MODE_KEYS, ...TASK_KEYS];
+  const renderSystemPromptItem = (key: SystemKey) => {
+    const meta = SYSTEM_PROMPT_META[key];
+    const value = getPromptValue(key);
+    return (
+      <div key={key} className="prompt-item">
+        <div className="prompt-item-header">
+          <span className="prompt-item-icon">{'\u{1F916}'}</span>
+          <span className="prompt-item-name">{meta.label}</span>
+          <div className="prompt-item-actions">
+            <button onClick={() => handleEditSystem(key)} title="Edit">{'✎'}</button>
+            <button
+              onClick={() => handleResetSystem(key)}
+              title="Reset to default"
+              disabled={!value}
+            >
+              {'↺'}
+            </button>
+          </div>
+        </div>
+        <div className="prompt-item-preview">
+          {value ? value.substring(0, 60) + '...' : 'Using default prompt'}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="prompts-settings">
@@ -336,34 +358,17 @@ export default function PromptsSettingsTab() {
         <p className="prompts-section-description">
           These control how the AI behaves in different contexts.
         </p>
+
+        <div className="prompts-subsection-title">AI Modes</div>
         <div className="prompts-list">
-          {systemKeys.map(key => {
-            const meta = SYSTEM_PROMPT_META[key];
-            const value = getPromptValue(key);
-            return (
-              <div key={key} className="prompt-item">
-                <div className="prompt-item-header">
-                  <span className="prompt-item-icon">{'\u{1F916}'}</span>
-                  <span className="prompt-item-name">{meta.label}</span>
-                  <div className="prompt-item-actions">
-                    <button onClick={() => handleEditSystem(key)} title="Edit">{'\u270E'}</button>
-                    <button
-                      onClick={() => handleResetSystem(key)}
-                      title="Reset to default"
-                      disabled={!value}
-                    >
-                      {'\u21BA'}
-                    </button>
-                  </div>
-                </div>
-                <div className="prompt-item-preview">
-                  {value
-                    ? value.substring(0, 60) + '...'
-                    : 'Using default prompt'}
-                </div>
-              </div>
-            );
-          })}
+          {MODE_KEYS.map(key => renderSystemPromptItem(key))}
+        </div>
+
+        <div className="prompts-subsection-title prompts-subsection-title--spaced">
+          Specialized Tasks
+        </div>
+        <div className="prompts-list">
+          {TASK_KEYS.map(key => renderSystemPromptItem(key))}
         </div>
       </div>
 
