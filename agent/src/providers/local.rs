@@ -138,6 +138,7 @@ impl SessionRow {
             cli_flavor: match self.cli_flavor.as_deref() {
                 Some("linux") => CliFlavor::Linux,
                 Some("cisco-ios") => CliFlavor::CiscoIos,
+                Some("cisco-xr") | Some("cisco-iosxr") | Some("cisco-ios-xr") => CliFlavor::CiscoIosXr,
                 Some("cisco-nxos") => CliFlavor::CiscoNxos,
                 Some("juniper") => CliFlavor::Juniper,
                 Some("arista") => CliFlavor::Arista,
@@ -1334,6 +1335,7 @@ impl DataProvider for LocalDataProvider {
             CliFlavor::Auto => "auto",
             CliFlavor::Linux => "linux",
             CliFlavor::CiscoIos => "cisco-ios",
+            CliFlavor::CiscoIosXr => "cisco-xr",
             CliFlavor::CiscoNxos => "cisco-nxos",
             CliFlavor::Juniper => "juniper",
             CliFlavor::Arista => "arista",
@@ -1461,6 +1463,7 @@ impl DataProvider for LocalDataProvider {
             CliFlavor::Auto => "auto",
             CliFlavor::Linux => "linux",
             CliFlavor::CiscoIos => "cisco-ios",
+            CliFlavor::CiscoIosXr => "cisco-xr",
             CliFlavor::CiscoNxos => "cisco-nxos",
             CliFlavor::Juniper => "juniper",
             CliFlavor::Arista => "arista",

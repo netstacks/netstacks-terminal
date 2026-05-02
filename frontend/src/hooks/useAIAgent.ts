@@ -39,7 +39,7 @@ import {
   createRecommendationMessage,
   type ConfigRecommendation,
 } from '../api/agent';
-import { listSessions as apiListSessions, listFolders as apiListFolders, type CliFlavor, type Session, type Folder } from '../api/sessions';
+import { listSessions as apiListSessions, listFolders as apiListFolders, updateSession as apiUpdateSession, type CliFlavor, type Session, type Folder } from '../api/sessions';
 import { listEnterpriseSessionDefinitions, listUserFolders as apiListUserFolders } from '../api/enterpriseSessions';
 import { getCurrentMode } from '../api/client';
 import { useCapabilitiesStore } from '../stores/capabilitiesStore';
@@ -511,6 +511,14 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
   const conversationRef = useRef<AgentChatMessage[]>(buildInitialConversation());
   // Track if we should stop the loop
   const stopRequestedRef = useRef(false);
+
+  // CLI-flavor overrides set by the AI via `set_session_cli_flavor` after
+  // probing a session whose stored flavor was 'auto' (or wrong). Reads in
+  // `run_command` consult this map first, then fall back to the prop value.
+  // The override sticks for the lifetime of this hook instance — the
+  // backend persistence happens too, but we don't wait for the sessions
+  // prop to round-trip before honoring the AI's decision on the next call.
+  const sessionFlavorOverridesRef = useRef<Map<string, CliFlavor>>(new Map());
   // AbortController for canceling in-flight requests
   const abortControllerRef = useRef<AbortController | null>(null);
   // Pending approval resolution
@@ -894,9 +902,21 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
         // possibly-stale flag would either reject legitimate commands or
         // give false confidence.
 
-        // Disable paging for AI-executed commands so output doesn't block
-        const flavor = session.cliFlavor || 'auto';
-        if (flavor === 'linux' || flavor === 'auto') {
+        // Disable paging for AI-executed commands so output doesn't block.
+        //
+        // BUG FIX: previously this branch fired for `linux || auto`, which
+        // meant the Linux env-var prefix (PAGER=cat SYSTEMD_PAGER= ...) got
+        // injected onto every command for any session whose flavor wasn't
+        // explicitly tagged — including IOS-XR / IOS-XE / Junos sessions
+        // where the device replies "% Invalid input detected at '^' marker."
+        // Now we ONLY apply the Linux wrapper when the session is explicitly
+        // Linux. For `auto`, do nothing — the AI's system prompt instructs it
+        // to probe (`show version`) and then call `set_session_cli_flavor`
+        // before issuing platform-specific paging-disable commands.
+        const flavor: CliFlavor = sessionFlavorOverridesRef.current.get(sessionId)
+          ?? session.cliFlavor
+          ?? 'auto';
+        if (flavor === 'linux') {
           // Inline env vars disable pagers for most Unix tools (less, more, systemctl, git, etc.)
           command = `PAGER=cat SYSTEMD_PAGER= GIT_PAGER=cat LESS=-FRX ${command}`;
         } else if (flavor === 'juniper') {
@@ -905,8 +925,9 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
             command = `${command} | no-more`;
           }
         }
-        // Cisco IOS/NX-OS/Arista EOS: handled by system prompt (terminal length 0)
-        // Palo Alto/Fortinet: handled by system prompt
+        // Cisco IOS / IOS-XR / NX-OS / Arista EOS: handled by system prompt
+        // (`terminal length 0`). Palo Alto/Fortinet: handled by system prompt.
+        // Auto: do nothing — let the AI probe + set the flavor first.
 
         // Execute the command
         if (!onExecuteCommand) {
@@ -996,6 +1017,39 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
             is_error: true,
           };
         }
+      }
+
+      case 'set_session_cli_flavor': {
+        const sessionId = input.session_id as string;
+        const rawFlavor = input.flavor as string;
+        const validFlavors: CliFlavor[] = ['linux', 'cisco-ios', 'cisco-xr', 'cisco-nxos', 'juniper', 'arista', 'paloalto', 'fortinet'];
+        if (!validFlavors.includes(rawFlavor as CliFlavor)) {
+          return {
+            content: `Invalid flavor "${rawFlavor}". Must be one of: ${validFlavors.join(', ')}.`,
+            is_error: true,
+          };
+        }
+        const flavor = rawFlavor as CliFlavor;
+        const session = sessions.find(s => s.id === sessionId);
+        if (!session) {
+          return { content: `Session ${sessionId} not found`, is_error: true };
+        }
+        // Apply the override immediately so the very next run_command picks
+        // the right paging strategy without waiting for the sessions prop to
+        // round-trip from a re-fetch.
+        sessionFlavorOverridesRef.current.set(sessionId, flavor);
+        // Best-effort persist to backend so the change survives reloads.
+        // Errors here are non-fatal — the override map keeps us correct for
+        // this session even if persistence fails.
+        try {
+          await apiUpdateSession(sessionId, { cli_flavor: flavor });
+        } catch (err) {
+          console.warn(`Failed to persist cli_flavor=${flavor} for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return {
+          content: `CLI flavor for session ${session.name} set to ${flavor}. Subsequent run_command calls will use the appropriate paging strategy automatically.`,
+          is_error: false,
+        };
       }
 
       case 'recommend_config': {

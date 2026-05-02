@@ -10,6 +10,7 @@ export const CLI_FLAVOR_OPTIONS: { value: CliFlavor; label: string }[] = [
   { value: 'auto', label: 'Auto-detect' },
   { value: 'linux', label: 'Linux/Unix Shell' },
   { value: 'cisco-ios', label: 'Cisco IOS/IOS-XE' },
+  { value: 'cisco-xr', label: 'Cisco IOS-XR' },
   { value: 'cisco-nxos', label: 'Cisco NX-OS' },
   { value: 'juniper', label: 'Juniper Junos' },
   { value: 'arista', label: 'Arista EOS' },

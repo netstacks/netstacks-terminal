@@ -476,6 +476,7 @@ fn cli_flavor_to_netmiko(flavor: &CliFlavor) -> &'static str {
         CliFlavor::Auto => "autodetect",
         CliFlavor::Linux => "linux",
         CliFlavor::CiscoIos => "cisco_ios",
+        CliFlavor::CiscoIosXr => "cisco_xr",
         CliFlavor::CiscoNxos => "cisco_nxos",
         CliFlavor::Juniper => "juniper_junos",
         CliFlavor::Arista => "arista_eos",

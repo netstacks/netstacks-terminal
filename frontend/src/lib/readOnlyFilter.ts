@@ -64,6 +64,15 @@ const VENDOR_SAFE_PATTERNS: Record<CliFlavor, RegExp[]> = {
     /^terminal\s+length\s+\d+/i,  // Pagination control
     /^more\s+/i,
   ],
+  'cisco-xr': [
+    /^show\s+/i,
+    /^ping\s+/i,
+    /^traceroute\s+/i,
+    /^terminal\s+length\s+\d+/i,
+    /^terminal\s+exec\s+prompt\s+/i,  // IOS-XR terminal display tweaks
+    /^admin\s+show\s+/i,  // IOS-XR admin-mode read-only show commands
+    /^more\s+/i,
+  ],
   'cisco-nxos': [
     /^show\s+/i,
     /^ping\s+/i,
