@@ -3,6 +3,7 @@
 // Import topology types for context
 import type { DeviceType, DeviceStatus, ConnectionStatus, ProtocolSession } from '../types/topology';
 import type { CliFlavor } from '../types/enrichment';
+import type { AIMode } from '../lib/aiModes';
 import axios from 'axios';
 import { getClient, getCurrentMode } from './client';
 
@@ -1211,6 +1212,40 @@ export async function setScriptPrompt(prompt: string | null): Promise<void> {
       await getClient().http.put(`${prefix}/ai.script_prompt`, prompt);
     } else {
       await getClient().http.put(`${prefix}/ai.script_prompt`, { value: prompt });
+    }
+  }
+}
+
+// --- Per-mode AI prompts (ai.mode_prompt.<mode>) ---
+// One settings key per mode: chat, operator, troubleshoot, copilot.
+// Empty / null / 404 = "use built-in default" (see MODE_PROMPTS in lib/aiModes.ts).
+
+export async function getModePrompt(mode: AIMode): Promise<string | null> {
+  try {
+    const prefix = settingsPrefix();
+    const res = await getClient().http.get(`${prefix}/ai.mode_prompt.${mode}`);
+    const data = res.data;
+    if (data === null) return null;
+    if (getCurrentMode() === 'enterprise') {
+      return typeof data === 'string' && data.trim() ? data : null;
+    }
+    const val = data.value ?? null;
+    return val && val.trim() ? val : null;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) return null;
+    return null;
+  }
+}
+
+export async function setModePrompt(mode: AIMode, prompt: string | null): Promise<void> {
+  const prefix = settingsPrefix();
+  if (!prompt || !prompt.trim()) {
+    try { await getClient().http.delete(`${prefix}/ai.mode_prompt.${mode}`); } catch { /* ok */ }
+  } else {
+    if (getCurrentMode() === 'enterprise') {
+      await getClient().http.put(`${prefix}/ai.mode_prompt.${mode}`, prompt);
+    } else {
+      await getClient().http.put(`${prefix}/ai.mode_prompt.${mode}`, { value: prompt });
     }
   }
 }
