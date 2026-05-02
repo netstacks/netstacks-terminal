@@ -621,15 +621,29 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
     if (getCurrentMode() === 'enterprise') return;
     if (!useCapabilitiesStore.getState().hasFeature('local_ai_tools')) return;
     let cancelled = false;
-    listMcpServers()
-      .then(servers => {
-        if (cancelled) return;
-        const connected = servers.filter(s => s.connected);
-        setMcpServers(connected);
-        mcpServersRef.current = connected;
-      })
-      .catch(() => { /* MCP servers unavailable */ });
-    return () => { cancelled = true; };
+
+    // Refresh whenever called. Initial mount + every `mcp-state-changed` event
+    // dispatched by api/mcp.ts after add/delete/connect/disconnect/tool-toggle.
+    // Without this, toggling a tool in Settings → AI → MCP Servers wouldn't
+    // reach the AI side panel until a full page reload, because mcpServers was
+    // a one-shot fetch on mount.
+    const fetchMcpServers = () => {
+      listMcpServers()
+        .then(servers => {
+          if (cancelled) return;
+          const connected = servers.filter(s => s.connected);
+          setMcpServers(connected);
+          mcpServersRef.current = connected;
+        })
+        .catch(() => { /* MCP servers unavailable */ });
+    };
+
+    fetchMcpServers();
+    window.addEventListener('mcp-state-changed', fetchMcpServers);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('mcp-state-changed', fetchMcpServers);
+    };
   }, []);
 
   // Convert MCP tools to AgentTool format (only enabled tools)
