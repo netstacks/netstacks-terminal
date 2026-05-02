@@ -1250,6 +1250,73 @@ export async function setModePrompt(mode: AIMode, prompt: string | null): Promis
   }
 }
 
+/**
+ * Pure migration decision: given the current troubleshoot override and the
+ * legacy AI config, decide whether to migrate the legacy systemPrompt into
+ * the new ai.mode_prompt.troubleshoot key.
+ *
+ * Migration runs only when the new key is empty AND the legacy field is
+ * non-empty after trim.
+ *
+ * Pure / no IO — exposed for unit testing. Callers should not invoke it
+ * directly; use getAllModePrompts() which wires this with the real settings.
+ */
+export type ModePromptMigrationDecision =
+  | { migrate: false }
+  | { migrate: true; value: string; clearedConfig: AiConfig };
+
+export function decideModePromptMigration(
+  troubleshootValue: string | null,
+  legacyConfig: AiConfig | null,
+): ModePromptMigrationDecision {
+  if (troubleshootValue && troubleshootValue.trim()) return { migrate: false };
+  if (!legacyConfig) return { migrate: false };
+  const legacy = legacyConfig.systemPrompt;
+  if (!legacy || !legacy.trim()) return { migrate: false };
+  return {
+    migrate: true,
+    value: legacy,
+    clearedConfig: { ...legacyConfig, systemPrompt: undefined },
+  };
+}
+
+/**
+ * Batch-load all four mode prompt overrides AND run the one-shot migration
+ * from the legacy ai.provider_config.systemPrompt field into ai.mode_prompt.troubleshoot.
+ *
+ * Migration logic is encapsulated in `decideModePromptMigration` (pure, tested);
+ * this function performs the IO and applies the decision.
+ *
+ * Idempotent: subsequent calls find troubleshoot populated and skip.
+ * Failures inside the migration are logged but never thrown.
+ */
+export async function getAllModePrompts(): Promise<Record<AIMode, string | null>> {
+  const modes: AIMode[] = ['chat', 'operator', 'troubleshoot', 'copilot'];
+  const values = await Promise.all(modes.map(m => getModePrompt(m)));
+  const result: Record<AIMode, string | null> = {
+    chat: values[0],
+    operator: values[1],
+    troubleshoot: values[2],
+    copilot: values[3],
+  };
+
+  if (!result.troubleshoot) {
+    try {
+      const cfg = await getAiConfig();
+      const decision = decideModePromptMigration(result.troubleshoot, cfg);
+      if (decision.migrate) {
+        await setModePrompt('troubleshoot', decision.value);
+        await setAiConfig(decision.clearedConfig);
+        result.troubleshoot = decision.value;
+      }
+    } catch (err) {
+      console.warn('Mode-prompt migration skipped:', err);
+    }
+  }
+
+  return result;
+}
+
 // ============================================
 // AI Memory API
 // ============================================
