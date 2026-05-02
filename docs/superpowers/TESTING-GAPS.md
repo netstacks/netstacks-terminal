@@ -55,6 +55,42 @@ re-added or a standalone replacement ships.
 These are areas where existing tests technically pass but don't actually
 exercise the feature — flagged here so subsequent sub-projects close the gap.
 
+### Sub-project 1 wave 4 — SFTP test depends on a clean known_hosts
+
+- **Affected tests**: `coverage_sftp.rs::sftp_full_lifecycle`
+- **What's happening**: The agent's SFTP `check_server_key` uses strict TOFU
+  via `host_keys::HostKeyStore::verify_or_store(.., auto_accept_changed=false)`
+  and reads `~/.ssh/known_hosts` (the user's real file, shared with system
+  ssh). When the mock SSH container is rebuilt, the new ed25519 host key
+  doesn't match the entry the previous container left behind, and SFTP
+  connect fails with `russh::Error::UnknownKey` ("Unknown server key"). The
+  WebSocket SSH handler (phase 4) is unaffected because it goes through
+  `ssh::ClientHandler` with the host-key approval service, which auto-TOFUs
+  unknown keys. SFTP's handler doesn't have an approval service wired.
+- **Workaround**: Run `ssh-keygen -R "127.0.0.1:2222"` after a `setup-mocks.sh`
+  rebuild; the next SFTP connect TOFU-stores the new key.
+- **Fix later**: Either teach `setup-mocks.sh` to clear stale `:2222` entries
+  before starting the agent, OR wire the host-key approval service into the
+  SFTP handler so unknown/changed keys can be accepted programmatically in
+  test mode (matches the WS SSH path).
+
+### Sub-project 1 wave 4 — AI LLM endpoints all hit the 503 fallback
+
+- **Affected tests**: `coverage_ai_files.rs::{ai_chat_responds, ai_agent_chat_responds, ai_generate_script_responds, ai_analyze_highlights_responds}`
+- **What's happening**: Same root cause as the Phase 3 mock-LLM gap below —
+  the test environment's `ai.provider_config` doesn't get accepted by the
+  agent, so every LLM-dependent endpoint returns `503 NOT_CONFIGURED`. The
+  wave-4 tests assert `is_success() || ai_unavailable(status)`; in practice
+  4 of 5 LLM-dependent endpoints exercise the 503 branch. The fifth
+  (`ai_agent_chat_stream_responds`) returns 200 because SSE upgrades before
+  the LLM is invoked — the error event arrives in-stream.
+- **Wired-and-tested without LLM**: profile CRUD, memory CRUD, knowledge-pack
+  sizes, sanitization-test round-trip, ssh-execute / write-file / edit-file
+  / patch-file (4xx for unknown session), config-mode lifecycle.
+- **Re-cover when**: Sub-project 2 / 3 fixes the provider-config shape, the
+  same `coverage_ai_files.rs` tests will start exercising the 2xx branch and
+  surface latent LLM-round-trip bugs without any test rewrite.
+
 ### Phase 3 — mock LLM integration silently skips
 
 - **Affected tests**: `ai_mock_llm_chat_response`, `ai_mock_llm_generate_script`,
