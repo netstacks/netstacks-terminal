@@ -295,3 +295,81 @@ After cold-start (`teardown.sh` + `setup-mocks.sh` + clean test DB):
 | **Grand total**     | **240** | **all green from cold start** |
 
 Frontend Vitest unaffected: 36/36 still green.
+
+---
+
+# Sub-project 2 — AI integration tests (sanitization + prompt wiring + chat round-trips)
+
+Completed 2026-05-02. Builds on Sub-project 0's mock-LLM round-trip fix to convert the four `phase3_ai::ai_mock_llm_*` smoke probes into a comprehensive end-to-end suite that proves the wires between `/api/ai/*` endpoints and a Claude-compatible provider actually carry sanitization, profile injection, mode-prompt overrides, AI memories, knowledge-pack content, tool definitions, and SSE stream events.
+
+**Artifact:** `tests/api/tests/coverage_ai_integration.rs` (gitignored — 26 net-new tests, all green from cold start). Additive to `coverage_ai_files.rs` and `phase3_ai.rs` — no existing tests modified or replaced.
+
+## Coverage added (9 areas, 26 tests)
+
+| Area | Tests | What's now proven |
+|---|---:|---|
+| 1. Sanitization round-trip                 | 8 | `SanitizingProvider` actually scrubs user messages AND `system_prompt` BEFORE the LLM sees them. Covers Cisco enable-secret hashes, generic `password=`, SNMP communities, RSA private keys, AWS access keys, optional IP redaction (when toggled in `ai.sanitization_config`), system-prompt scrubbing on `/agent-chat`, and a "safe text passes through unaltered" sentinel. |
+| 2. Profile injection edge cases            | 2 | (a) Profile with rich fields (multi-vendor weights, multiple safety rules) flows through to the system prompt verbatim. (b) `DELETE /api/ai/profile` actually removes personality from the next chat's system prompt — tested with a unique sentinel name. |
+| 3. Mode-prompt overrides                   | 3 | The `feat/ai-mode-prompt-overrides` branch is **frontend-only** — see below. Tests prove the agent-side guarantees the feature depends on: (a) `ai.mode_prompt.{chat,operator,troubleshoot,copilot}` settings keys are persistable via the generic `/api/settings/:key` CRUD; (b) a sentinel-bearing system_prompt POSTed to `/agent-chat` flows through sanitization to the LLM; (c) `req.system_prompt` REPLACES `AGENT_SYSTEM_PROMPT` (verified by length-shrink: small override yields a much shorter prompt than baseline). |
+| 4. Tool use                                | 3 | `tools` array forwarded to the LLM verbatim (mock returns matching tool name in `tool_use` block, agent surfaces it with `stop_reason: "tool_use"`). Synthetic `test:tool_use` trigger lets us probe the parsing path in isolation. Multi-turn `tool_result → final assistant text` cycle works (assistant's response after a tool_result is `end_turn`, not another tool call). |
+| 5. Streaming                               | 2 | `/api/ai/agent-chat-stream` actually emits SSE events: `Content-Type: text/event-stream`, multiple `data: ...` lines, `content_delta` events, and a final `done` event. Also proves the unconfigured path returns 503 before opening the stream. (Required extending the mock LLM to honour `stream: true` on `/v1/messages` — see below.) |
+| 6. AI memories injection                   | 2 | Memories created via `POST /api/ai/memory` appear in the next agent-chat's system prompt under a `NETWORK MEMORY` header; deleting a memory removes it from subsequent prompts; with zero memories, the `NETWORK MEMORY` section is absent. |
+| 7. Knowledge-pack injection                | 1 | A profile with `vendor_weights.cisco=1.0` and `domain_focus.routing=1.0` pulls in the cisco vendor + routing domain packs, observable in the system prompt the LLM receives (system prompt grows past 3KB, contains "cisco" + IOS/show/interface tells). |
+| 8. Generate-script constraints             | 3 | (a) Default `\`\`\`python` fence parsed into `script` + `explanation`. (b) Non-python fence (`\`\`\`cisco`) handled — body extracted into `script`. (c) Provider error → 5xx with structured `{error, code}` JSON, never a panic or silent OK. (Note: `GenerateScriptRequest` has no `target_session_id` field — that part of the original task was infeasible and dropped.) |
+| 9. Mode-aware analyze-highlights           | 2 | Round-trip works through the mock LLM with a small highlights array; `model` override accepted on the request body. |
+
+**Cold-start re-run:**
+- `coverage_ai_integration` → 26/26 green
+- `phase3_ai` → 41/41 green (mock-LLM extensions did not break existing tests)
+- `coverage_ai_files` → 14/14 green
+- `coverage_drift` → 1/1 green (no new routes, no entries needed in `EXPECTED_COVERAGE`)
+
+## Mock LLM extensions
+
+Three additive triggers in `tests/mocks/llm-server/server.py` — all are pure echoes that bypass tool/script flow, so existing scenarios (default text, `who are you`, `test:system_prompt`, `test:onboarding`, highlight analysis, script generation, tool_use-on-`tools`-presence) are unchanged.
+
+| Trigger | Purpose |
+|---|---|
+| `test:echo_messages` in user content | Mock returns `ECHO_MESSAGES: {json}` whose `echoed_messages` field is the verbatim concatenation of all messages it received (including `tool_result` content). Lets sanitization tests assert `[REDACTED]` is present and the secret is absent in what the LLM was asked to read. |
+| `test:echo_system` in user content | Mock returns `ECHO_SYSTEM: {json}` with the FULL system prompt (no length truncation). Lets profile/memory/knowledge-pack/mode-prompt tests grep for sentinels in the prompt the LLM received. |
+| `test:tool_use` in user content | Mock emits a synthetic tool_use block even without a `tools` array, exercising the agent's tool_use-response parsing in isolation. |
+| `test:script_cisco` in user content | Mock emits a `\`\`\`cisco`-fenced code block so generate-script's non-python-fence path can be exercised. |
+| `test:script_error` in user content | Mock returns HTTP 500 with an Anthropic-style `{type: error, error: ...}` body so the agent's provider-error translation can be exercised. |
+| `stream: true` on `/v1/messages` | Mock now emits a real Anthropic-style SSE event sequence (`message_start` → `content_block_start` → 2× `content_block_delta` → `content_block_stop` → `message_delta` → `message_stop`), letting `/api/ai/agent-chat-stream` round-trip be tested with real chunked decoding. |
+
+A multi-turn tool branch was added too: when the most recent message contains a `tool_result` block, the mock returns a final `end_turn` text message that includes a preview of the messages text, instead of trying to call another tool. This was needed for the multi-turn tool flow test (#4c).
+
+The mock LLM container needs a rebuild after these changes (`docker compose -f tests/docker-compose.test.yml up -d --build mock-llm`); `setup-mocks.sh` already does `--build` so a fresh `setup-mocks.sh` picks up the new server automatically.
+
+## Mode-prompt overrides — what the branch actually does
+
+The `feat/ai-mode-prompt-overrides` branch ships a **frontend-only** feature (see `docs/superpowers/specs/2026-05-02-ai-mode-prompt-overrides-design.md`). Per-mode system-prompt overrides live at four new generic settings keys (`ai.mode_prompt.chat`, `.operator`, `.troubleshoot`, `.copilot`). The frontend's `getModeSystemPrompt(mode, isEnterprise, overrides)` composer in `aiModes.ts` substitutes the override for the per-mode `## Mode: X` block, keeps `NETSTACKS_IDENTITY` and the enterprise/standalone addendum, and POSTs the composed result to `/api/ai/agent-chat` as `system_prompt`. A one-shot migration moves any saved `ai.provider_config.systemPrompt` into `ai.mode_prompt.troubleshoot`.
+
+The agent makes no schema decisions about which keys exist — it just stores arbitrary settings and reads `req.system_prompt` from the chat request. So the agent-side test surface is small:
+
+1. The four new `ai.mode_prompt.*` settings keys are addressable (PUT/GET/DELETE round-trip works on each).
+2. A composed system_prompt with a sentinel sentence flows through sanitization to the LLM verbatim.
+3. `req.system_prompt` REPLACES `AGENT_SYSTEM_PROMPT` (length-shrink check) so the override actually wins over the agent's hardcoded default.
+
+All three are now covered. Frontend mode composition / migration / UI behaviour is covered by the existing Vitest suite (see `frontend/src/lib/aiModes.test.ts` and `frontend/src/lib/modePrompts.test.ts`, 36/36 green) and is out of scope here.
+
+## Bugs surfaced
+
+None. No agent code touched in Sub-project 2 — every test passes against the in-flight `feat/ai-mode-prompt-overrides` branch as-is. Sanitization, profile injection, memory injection, tool-use plumbing, SSE streaming, generate-script error mapping, and analyze-highlights round-tripping all work as designed.
+
+## Infeasible / dropped
+
+- **Generate-script with `target session_id`** — the task spec asked for a "generate script with target session_id — assert SSH context flows through" test, but `GenerateScriptRequest` (`agent/src/ai/chat.rs:228-236`) only has `prompt`, `provider`, `model`. There is no session_id parameter and no SSH context plumbed into script generation. This is a scope question for the agent, not a test gap — flagging here so it gets re-considered if/when the request shape grows.
+- **Knowledge-pack injection — exact pack-content matching** — the test asserts on stable substrings (vendor name + IOS/show/interface keywords) and total prompt length > 3KB rather than full pack content equality. This is intentional: pack contents (`agent/src/ai/knowledge_packs/*.rs`) are static `&str` constants that will evolve. A length-and-keyword assertion is much more durable than a content snapshot.
+- **Streaming — drop-mid-stream / error event mid-stream** — the SSE test reads the full stream and asserts on data-line count + presence of `content_delta` and `done` events. Testing mid-stream errors (e.g., the LLM disconnects after the first delta) would require either a richer mock trigger that emits half a stream + closes, or a proxy in front of the mock. Deferred — happy-path streaming round-trip is the higher-value coverage.
+
+## Final pass status
+
+| Suite | Tests | Status |
+|---|---:|---|
+| `coverage_ai_integration` (NEW)            | 26  | green from cold start |
+| `phase3_ai` (regression check)             | 41  | green (mock-LLM extensions backwards-compatible) |
+| `coverage_ai_files` (regression check)     | 14  | green |
+| `coverage_drift` (regression check)        | 1   | green (no new routes — coverage is additive) |
+
+No commits in this sub-project — `tests/` is gitignored, mock-LLM changes are gitignored, no agent fixes were needed. TESTING-GAPS.md updated (this section, committed).
