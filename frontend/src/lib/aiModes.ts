@@ -96,7 +96,7 @@ When referencing devices, always use their device ID (UUID) for tool calls, not 
 When the user asks about configuration changes, check config backups first, then cross-reference with MOPs and audit logs.
 When presenting findings, be specific — include dates, config lines, and references to related MOPs or incidents.`
 
-const MODE_PROMPTS: Record<AIMode, string> = {
+export const MODE_PROMPTS: Record<AIMode, string> = {
   chat: `## Mode: Chat
 
 You are in chat mode. You do NOT have access to any tools — you cannot execute commands, search backups, or interact with devices. Provide helpful answers based on your networking knowledge and understanding of the NetStacks platform.
@@ -234,11 +234,23 @@ Config backup history, incidents, alerts, and stacks are enterprise-only feature
 
 /**
  * Get the system prompt for a given AI mode.
- * This is NOT user-editable — it's the platform's base prompt.
+ * Composes: NETSTACKS_IDENTITY + (override-or-default mode block) + tier addendum.
  * User AI Engineer Profiles are appended on top by the caller.
+ *
+ * @param mode - The active AI mode
+ * @param isEnterprise - Whether the user is on the Enterprise tier
+ * @param overrides - Optional per-mode prompt overrides from Settings → Prompts.
+ *                   When the override for `mode` is a non-empty string, it
+ *                   replaces the built-in `MODE_PROMPTS[mode]` block.
+ *                   `NETSTACKS_IDENTITY` and the addendum are not affected.
  */
-export function getModeSystemPrompt(mode: AIMode, isEnterprise: boolean): string {
-  const modePrompt = MODE_PROMPTS[mode]
+export function getModeSystemPrompt(
+  mode: AIMode,
+  isEnterprise: boolean,
+  overrides?: Partial<Record<AIMode, string | null>>,
+): string {
+  const override = overrides?.[mode]
+  const modePrompt = (override && override.trim()) ? override : MODE_PROMPTS[mode]
   const addendum = mode === 'chat' ? ''
     : isEnterprise ? ENTERPRISE_ADDENDUM
     : STANDALONE_ADDENDUM
