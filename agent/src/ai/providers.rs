@@ -466,6 +466,23 @@ struct VertexAnthropicRequest {
     messages: Vec<AnthropicMessage>,
 }
 
+/// Anthropic-on-Vertex request format for agent chat — supports tools and
+/// content-block messages (so tool_use round-trips work). Same wire shape as
+/// native Anthropic agent requests minus the `model` field (the model is in
+/// the URL on Vertex). Set `stream: Some(true)` for `:streamRawPredict`.
+#[derive(Debug, Serialize)]
+struct VertexAnthropicAgentRequest {
+    anthropic_version: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicAgentMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
 /// Anthropic API request format with tools (for agent chat)
 #[derive(Debug, Serialize)]
 pub struct AnthropicAgentRequest {
@@ -1870,6 +1887,471 @@ impl OpenAIProvider {
             .find_map(|c| if c.content_type == "text" { c.text } else { None })
             .ok_or_else(|| AiError::InvalidResponse("No text content in Vertex Anthropic response".to_string()))
     }
+
+    /// Anthropic-on-Vertex agent chat with full tool support.
+    ///
+    /// Wire format mirrors native Anthropic agent calls — same `system`,
+    /// `messages` (with content blocks for tool_use/tool_result round-trips),
+    /// `tools`, and `max_tokens` fields — except the model goes in the URL
+    /// rather than the body, and `anthropic_version: "vertex-2023-10-16"` is
+    /// required to pin the contract version.
+    ///
+    /// Auth and 401-invalidation are handled by `send_request` (OAuth2 bearer
+    /// token from GCP IAM, refreshed on demand).
+    async fn vertex_anthropic_agent_chat(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Result<AgentResponse, AiError> {
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+
+        let anthropic_messages: Vec<AnthropicAgentMessage> = messages
+            .into_iter()
+            .map(|m| {
+                let content = match m.content {
+                    AgentContent::Text(text) => AnthropicAgentContent::Text(text),
+                    AgentContent::Blocks(blocks) => AnthropicAgentContent::Blocks(
+                        blocks.into_iter().map(agent_block_to_anthropic_block).collect(),
+                    ),
+                };
+                AnthropicAgentMessage { role: m.role, content }
+            })
+            .collect();
+
+        let request = VertexAnthropicAgentRequest {
+            anthropic_version: "vertex-2023-10-16".to_string(),
+            max_tokens,
+            system: if system_prompt.is_empty() { None } else { Some(system_prompt) },
+            messages: anthropic_messages,
+            tools: tools.filter(|t| !t.is_empty()),
+            stream: None,
+        };
+
+        let url = build_model_action_url(&self.base_url, &self.model, "rawPredict");
+        let response = self.send_request(self.client.post(&url).json(&request)).await?;
+        let response_text = response.text().await.map_err(|e| {
+            AiError::InvalidResponse(format!("Failed to read Vertex Anthropic agent response: {}", e))
+        })?;
+
+        let api_response: AnthropicAgentResponse = serde_json::from_str(&response_text).map_err(|e| {
+            AiError::InvalidResponse(format!(
+                "Failed to parse Vertex Anthropic agent response: {} — body: {}",
+                e,
+                &response_text[..response_text.len().min(400)]
+            ))
+        })?;
+
+        let content: Vec<AgentContentBlock> = api_response
+            .content
+            .into_iter()
+            .map(anthropic_block_to_agent_block)
+            .collect();
+
+        let usage = Some(TokenUsage {
+            input_tokens: api_response.usage.input_tokens,
+            output_tokens: api_response.usage.output_tokens,
+            total_tokens: Some(api_response.usage.input_tokens + api_response.usage.output_tokens),
+        });
+
+        Ok(AgentResponse {
+            content,
+            stop_reason: api_response.stop_reason,
+            usage,
+        })
+    }
+
+    /// Anthropic-on-Vertex streaming agent chat. Hits `:streamRawPredict` and
+    /// translates the standard Anthropic SSE event stream
+    /// (message_start / content_block_start / content_block_delta /
+    /// content_block_stop / message_delta / message_stop) into our generic
+    /// `StreamEvent` enum so the frontend's existing handler works unchanged.
+    fn vertex_anthropic_agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+
+        let anthropic_messages: Vec<AnthropicAgentMessage> = messages
+            .into_iter()
+            .map(|m| {
+                let content = match m.content {
+                    AgentContent::Text(text) => AnthropicAgentContent::Text(text),
+                    AgentContent::Blocks(blocks) => AnthropicAgentContent::Blocks(
+                        blocks.into_iter().map(agent_block_to_anthropic_block).collect(),
+                    ),
+                };
+                AnthropicAgentMessage { role: m.role, content }
+            })
+            .collect();
+
+        let request = VertexAnthropicAgentRequest {
+            anthropic_version: "vertex-2023-10-16".to_string(),
+            max_tokens,
+            system: if system_prompt.is_empty() { None } else { Some(system_prompt) },
+            messages: anthropic_messages,
+            tools: tools.filter(|t| !t.is_empty()),
+            stream: Some(true),
+        };
+
+        let url = build_model_action_url(&self.base_url, &self.model, "streamRawPredict");
+
+        Box::pin(async_stream::stream! {
+            let response = match self.send_request(self.client.post(&url).json(&request)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+
+            use futures::StreamExt;
+            let mut byte_stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut input_tokens: u32 = 0;
+            let mut output_tokens: u32 = 0;
+            let mut stop_reason: Option<String> = None;
+            let mut tool_use_indices = std::collections::HashSet::<usize>::new();
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        yield Err(AiError::RequestFailed(format!("Stream read error: {}", e)));
+                        return;
+                    }
+                };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() || line.starts_with("event:") || line == ":" {
+                        continue;
+                    }
+                    let Some(data) = line.strip_prefix("data: ") else { continue; };
+
+                    let event: AnthropicStreamEvent = match serde_json::from_str(data) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("Vertex Anthropic SSE parse error: {} — data: {}", e, data);
+                            continue;
+                        }
+                    };
+
+                    match event {
+                        AnthropicStreamEvent::MessageStart { message } => {
+                            if let Some(usage) = message.usage {
+                                input_tokens = usage.input_tokens;
+                            }
+                        }
+                        AnthropicStreamEvent::ContentBlockStart { index, content_block } => {
+                            match content_block {
+                                AnthropicStreamContentBlock::ToolUse { id, name } => {
+                                    tool_use_indices.insert(index);
+                                    yield Ok(StreamEvent::ToolUseStart { id, name });
+                                }
+                                AnthropicStreamContentBlock::Text { .. } => {}
+                            }
+                        }
+                        AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
+                            match delta {
+                                AnthropicStreamDelta::TextDelta { text } => {
+                                    yield Ok(StreamEvent::ContentDelta { text });
+                                }
+                                AnthropicStreamDelta::InputJsonDelta { partial_json } => {
+                                    yield Ok(StreamEvent::ToolInputDelta { delta: partial_json });
+                                }
+                            }
+                        }
+                        AnthropicStreamEvent::ContentBlockStop { index } => {
+                            if tool_use_indices.remove(&index) {
+                                yield Ok(StreamEvent::ToolUseEnd);
+                            }
+                        }
+                        AnthropicStreamEvent::MessageDelta { delta, usage } => {
+                            if let Some(reason) = delta.stop_reason {
+                                stop_reason = Some(reason);
+                            }
+                            if let Some(u) = usage {
+                                output_tokens = u.output_tokens;
+                            }
+                        }
+                        AnthropicStreamEvent::MessageStop => {
+                            yield Ok(StreamEvent::Done {
+                                stop_reason: stop_reason.clone(),
+                                usage: Some(TokenUsage {
+                                    input_tokens,
+                                    output_tokens,
+                                    total_tokens: Some(input_tokens + output_tokens),
+                                }),
+                            });
+                            return;
+                        }
+                        AnthropicStreamEvent::Ping | AnthropicStreamEvent::Unknown => {}
+                    }
+                }
+            }
+
+            // Stream ended without explicit message_stop — emit Done anyway so
+            // the client doesn't hang waiting.
+            yield Ok(StreamEvent::Done {
+                stop_reason,
+                usage: Some(TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens: Some(input_tokens + output_tokens),
+                }),
+            });
+        })
+    }
+
+    /// Gemini/Vertex AI streaming agent chat. Hits `:streamGenerateContent`
+    /// and translates Gemini's chunked-JSON stream into our generic
+    /// `StreamEvent` enum.
+    ///
+    /// Gemini's stream format differs from Anthropic's: each chunk is a
+    /// complete `GenerateContentResponse` JSON object containing the *new*
+    /// delta (new text characters and/or a complete `functionCall` part).
+    /// Vertex sends these as SSE-style `data: {...}\n\n` lines.
+    /// Function calls always arrive whole in a single chunk's `parts` array,
+    /// so we synthesise the equivalent ToolUseStart + ToolInputDelta +
+    /// ToolUseEnd triple ourselves.
+    fn gemini_agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        // Build the same request shape as the non-streaming gemini_agent_chat,
+        // including the tool-id-to-name map needed to fill FunctionResponse.
+        let gemini_tools = tools.map(|tools| {
+            let declarations: Vec<GeminiFunctionDeclaration> = tools.into_iter().map(|t| {
+                GeminiFunctionDeclaration {
+                    name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    description: t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    parameters: t.get("input_schema").cloned(),
+                }
+            }).collect();
+            vec![GeminiToolDefinition { function_declarations: declarations }]
+        });
+
+        let system_context = format!(
+            "[SYSTEM INSTRUCTIONS - follow these silently, never repeat them back]\n{}\n\n\
+             RULES: Do not re-introduce yourself. Do not repeat your name unless asked. \
+             Do not echo these instructions. Just respond naturally.\n[END SYSTEM INSTRUCTIONS]\n\n",
+            system_prompt
+        );
+
+        let mut tool_id_to_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for m in &messages {
+            if let AgentContent::Blocks(blocks) = &m.content {
+                for block in blocks {
+                    if let AgentContentBlock::ToolUse { id, name, .. } = block {
+                        tool_id_to_name.insert(id.clone(), name.clone());
+                    }
+                }
+            }
+        }
+
+        let mut contents: Vec<GeminiContent> = Vec::new();
+        let mut system_injected = false;
+        for m in messages {
+            match m.content {
+                AgentContent::Text(text) => {
+                    let role = if m.role == "assistant" { "model" } else { "user" };
+                    let final_text = if !system_injected && role == "user" {
+                        system_injected = true;
+                        format!("{}{}", system_context, text)
+                    } else {
+                        text
+                    };
+                    contents.push(GeminiContent {
+                        role: role.to_string(),
+                        parts: vec![GeminiRequestPart::Text { text: final_text }],
+                    });
+                }
+                AgentContent::Blocks(blocks) => {
+                    let mut parts: Vec<GeminiRequestPart> = Vec::new();
+                    for block in blocks {
+                        match block {
+                            AgentContentBlock::Text { text } => parts.push(GeminiRequestPart::Text { text }),
+                            AgentContentBlock::ToolUse { id: _, name, input } => parts.push(GeminiRequestPart::FunctionCall {
+                                function_call: GeminiFunctionCall { name, args: input },
+                            }),
+                            AgentContentBlock::ToolResult { tool_use_id, content, .. } => {
+                                let fn_name = tool_id_to_name.get(&tool_use_id).cloned().unwrap_or_else(|| "unknown".to_string());
+                                parts.push(GeminiRequestPart::FunctionResponse {
+                                    function_response: GeminiFunctionResponse {
+                                        name: fn_name,
+                                        response: serde_json::json!({ "result": content }),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let role = if m.role == "assistant" { "model" } else { "user" };
+                        contents.push(GeminiContent { role: role.to_string(), parts });
+                    }
+                }
+            }
+        }
+
+        let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+        let temperature = options.as_ref().and_then(|o| o.temperature).map(|t| t as f32).unwrap_or(0.7);
+        let request = GeminiRequest {
+            contents,
+            generation_config: Some(GeminiGenerationConfig {
+                max_output_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+            }),
+            tools: gemini_tools,
+        };
+
+        // Vertex requires `?alt=sse` on streamGenerateContent for SSE framing;
+        // without it the response is a streamed JSON array which is harder to
+        // parse incrementally. The action also belongs in the URL (model can
+        // already include a `:streamGenerateContent` suffix via build_model_action_url).
+        let base_action_url = build_model_action_url(&self.base_url, &self.model, "streamGenerateContent");
+        let url = if base_action_url.contains('?') {
+            format!("{}&alt=sse", base_action_url)
+        } else {
+            format!("{}?alt=sse", base_action_url)
+        };
+
+        Box::pin(async_stream::stream! {
+            let response = match self.send_request(self.client.post(&url).json(&request)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+
+            use futures::StreamExt;
+            let mut byte_stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut input_tokens: u32 = 0;
+            let mut output_tokens: u32 = 0;
+            let mut stop_reason: Option<String> = None;
+            let mut had_tool_use = false;
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        yield Err(AiError::RequestFailed(format!("Stream read error: {}", e)));
+                        return;
+                    }
+                };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() || line.starts_with("event:") || line == ":" {
+                        continue;
+                    }
+                    let Some(data) = line.strip_prefix("data: ") else { continue; };
+
+                    let chunk_resp: GeminiResponse = match serde_json::from_str(data) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("Vertex Gemini SSE parse error: {} — data: {}", e, &data[..data.len().min(200)]);
+                            continue;
+                        }
+                    };
+
+                    if let Some(error) = chunk_resp.error {
+                        yield Err(AiError::RequestFailed(format!("Gemini error {}: {}", error.code, error.message)));
+                        return;
+                    }
+
+                    if let Some(usage) = chunk_resp.usage_metadata {
+                        input_tokens = usage.prompt_token_count;
+                        output_tokens = usage.candidates_token_count;
+                    }
+
+                    let candidate = match chunk_resp.candidates.and_then(|c| c.into_iter().next()) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    if let Some(reason) = candidate.finish_reason.clone() {
+                        stop_reason = Some(reason);
+                    }
+
+                    let parts = match candidate.content.and_then(|c| c.parts) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    for part in parts {
+                        if let Some(text) = part.text {
+                            if !text.is_empty() {
+                                yield Ok(StreamEvent::ContentDelta { text });
+                            }
+                        }
+                        if let Some(fc) = part.function_call {
+                            had_tool_use = true;
+                            let id = format!("call_{}", uuid::Uuid::new_v4());
+                            yield Ok(StreamEvent::ToolUseStart { id, name: fc.name });
+                            yield Ok(StreamEvent::ToolInputDelta {
+                                delta: serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".to_string()),
+                            });
+                            yield Ok(StreamEvent::ToolUseEnd);
+                        }
+                    }
+                }
+            }
+
+            // Map Gemini's finish_reason to our generic stop_reason vocabulary
+            // (matches non-streaming gemini_agent_chat for consistency).
+            let mapped_reason = stop_reason.map(|r| match r.as_str() {
+                "STOP" if had_tool_use => "tool_use".to_string(),
+                "STOP" => "end_turn".to_string(),
+                "MAX_TOKENS" => "max_tokens".to_string(),
+                _ => r,
+            });
+
+            yield Ok(StreamEvent::Done {
+                stop_reason: mapped_reason,
+                usage: Some(TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens: Some(input_tokens + output_tokens),
+                }),
+            });
+        })
+    }
+}
+
+/// Translate one of our generic agent content blocks into the wire-format
+/// content block used by both native Anthropic and Anthropic-on-Vertex.
+fn agent_block_to_anthropic_block(b: AgentContentBlock) -> ContentBlock {
+    match b {
+        AgentContentBlock::Text { text } => ContentBlock::Text { text },
+        AgentContentBlock::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },
+        AgentContentBlock::ToolResult { tool_use_id, content, is_error } => ContentBlock::ToolResult { tool_use_id, content, is_error },
+    }
+}
+
+/// Inverse of `agent_block_to_anthropic_block` — used when turning an
+/// Anthropic API response into our generic `AgentResponse`.
+fn anthropic_block_to_agent_block(b: ContentBlock) -> AgentContentBlock {
+    match b {
+        ContentBlock::Text { text } => AgentContentBlock::Text { text },
+        ContentBlock::ToolUse { id, name, input } => AgentContentBlock::ToolUse { id, name, input },
+        ContentBlock::ToolResult { tool_use_id, content, is_error } => AgentContentBlock::ToolResult { tool_use_id, content, is_error },
+    }
 }
 
 #[async_trait]
@@ -1948,31 +2430,9 @@ impl AiProvider for OpenAIProvider {
         if self.api_format == ApiFormat::Gemini {
             return self.gemini_agent_chat(system_prompt, messages, tools, options).await;
         }
-        // Vertex Anthropic: tools not yet wired through this path; degrade
-        // gracefully to a plain chat call so single-shot AI use still works.
-        // (Tool-use plumbing for Vertex Anthropic is a follow-up.)
+        // Vertex Anthropic: full tool support via dedicated agent path.
         if self.api_format == ApiFormat::VertexAnthropic {
-            let last_user = messages
-                .iter()
-                .rev()
-                .find_map(|m| match &m.content {
-                    AgentContent::Text(t) => Some(t.clone()),
-                    AgentContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
-                        AgentContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    }),
-                })
-                .unwrap_or_default();
-            let chat_messages = vec![
-                ChatMessage { role: "system".to_string(), content: system_prompt },
-                ChatMessage { role: "user".to_string(), content: last_user },
-            ];
-            let text = self.vertex_anthropic_chat_completion(chat_messages, None).await?;
-            return Ok(AgentResponse {
-                content: vec![AgentContentBlock::Text { text }],
-                stop_reason: Some("end_turn".to_string()),
-                usage: None,
-            });
+            return self.vertex_anthropic_agent_chat(system_prompt, messages, tools, options).await;
         }
 
         // Convert Anthropic-style tools to OpenAI format
@@ -2118,6 +2578,58 @@ impl AiProvider for OpenAIProvider {
         });
 
         Ok(AgentResponse { content, stop_reason, usage })
+    }
+
+    /// Override the default trait stream impl so VertexAnthropic and Gemini
+    /// formats use their dedicated streaming endpoints (real progressive SSE)
+    /// instead of buffering the whole response in `agent_chat` and synthesising
+    /// a single batch of events at the end. The plain OpenAI format still
+    /// falls back to the default trait impl for now.
+    fn agent_chat_stream(
+        &self,
+        system_prompt: String,
+        messages: Vec<AgentMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        options: Option<AgentChatOptions>,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, AiError>> + Send + '_>> {
+        match self.api_format {
+            ApiFormat::VertexAnthropic => {
+                self.vertex_anthropic_agent_chat_stream(system_prompt, messages, tools, options)
+            }
+            ApiFormat::Gemini => {
+                self.gemini_agent_chat_stream(system_prompt, messages, tools, options)
+            }
+            ApiFormat::OpenAI => {
+                // Fall back to trait default: call agent_chat, synthesise events.
+                let fut = self.agent_chat(system_prompt, messages, tools, options);
+                Box::pin(async_stream::stream! {
+                    match fut.await {
+                        Ok(response) => {
+                            for block in &response.content {
+                                match block {
+                                    AgentContentBlock::Text { text } => {
+                                        yield Ok(StreamEvent::ContentDelta { text: text.clone() });
+                                    }
+                                    AgentContentBlock::ToolUse { id, name, input } => {
+                                        yield Ok(StreamEvent::ToolUseStart { id: id.clone(), name: name.clone() });
+                                        yield Ok(StreamEvent::ToolInputDelta {
+                                            delta: serde_json::to_string(input).unwrap_or_default(),
+                                        });
+                                        yield Ok(StreamEvent::ToolUseEnd);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            yield Ok(StreamEvent::Done {
+                                stop_reason: response.stop_reason,
+                                usage: response.usage,
+                            });
+                        }
+                        Err(e) => yield Ok(StreamEvent::Error { message: e.to_string() }),
+                    }
+                })
+            }
+        }
     }
 
     fn provider_name(&self) -> &str {
