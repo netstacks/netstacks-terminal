@@ -6,7 +6,8 @@
 //! Tokens are cached in-memory and refreshed automatically before expiry.
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -67,8 +68,32 @@ pub struct OAuth2TokenManager {
     cached_token: Arc<RwLock<Option<CachedToken>>>,
 }
 
+/// Process-wide registry of token managers, deduplicated by OAuth2 config.
+///
+/// Each NetStacks chat request currently constructs a fresh `AiProvider`
+/// (`create_provider(config)` is called per request — see `ai/chat.rs`).
+/// Without this registry, every request would also construct a fresh
+/// `OAuth2TokenManager` with an empty `cached_token`, causing a new token
+/// fetch on every single chat turn — even when the previously-issued token
+/// has 29 minutes of life left.
+///
+/// We key on (token_url, client_id, client_secret) so that a config change
+/// (e.g., user rotates their secret in Settings) gets a fresh manager
+/// without breaking in-flight requests using the old config.
+fn registry() -> &'static StdMutex<HashMap<String, Arc<OAuth2TokenManager>>> {
+    static REGISTRY: OnceLock<StdMutex<HashMap<String, Arc<OAuth2TokenManager>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn config_cache_key(config: &OAuth2Config) -> String {
+    format!("{}|{}|{}", config.token_url, config.client_id, config.client_secret)
+}
+
 impl OAuth2TokenManager {
     /// Create a new token manager with the given OAuth2 configuration.
+    ///
+    /// Prefer `get_or_create_shared` for chat hot paths so the token cache
+    /// survives across per-request provider constructions.
     pub fn new(config: OAuth2Config) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -81,6 +106,30 @@ impl OAuth2TokenManager {
             client,
             cached_token: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Return a process-wide-shared `OAuth2TokenManager` for the given config.
+    ///
+    /// All callers passing the same (token_url, client_id, client_secret)
+    /// triple get the same `Arc<OAuth2TokenManager>` — and therefore the
+    /// same in-memory token cache — so a token issued with `expires_in=1799`
+    /// is reused for nearly half an hour instead of being re-fetched on
+    /// every chat call.
+    ///
+    /// The registry uses a sync `std::sync::Mutex` so this stays callable
+    /// from sync constructors. The held critical section is tiny (HashMap
+    /// lookup + clone of an Arc) so the sync lock has no perf cost on the
+    /// hot path. The token cache itself remains `tokio::sync::RwLock`-based
+    /// for the read-heavy `get_token` path.
+    pub fn get_or_create_shared(config: OAuth2Config) -> Arc<Self> {
+        let key = config_cache_key(&config);
+        let mut registry = registry().lock().expect("OAuth2 registry mutex poisoned");
+        if let Some(existing) = registry.get(&key) {
+            return existing.clone();
+        }
+        let manager = Arc::new(Self::new(config));
+        registry.insert(key, manager.clone());
+        manager
     }
 
     /// Get a valid access token, fetching or refreshing as needed.
