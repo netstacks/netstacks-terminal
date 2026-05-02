@@ -114,6 +114,7 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), DbError> {
     migrate_tunnels_table(pool).await?;
     migrate_ai_memory_table(pool).await?;
     migrate_scripts_provenance(pool).await?;
+    migrate_credential_profile_jump_host(pool).await?;
     seed_default_settings(pool).await?;
 
     Ok(())
@@ -134,6 +135,21 @@ async fn migrate_scripts_provenance(pool: &SqlitePool) -> Result<(), DbError> {
             .execute(pool)
             .await
             .map_err(|e| DbError::Migration(format!("Failed to add scripts.approved: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Add `jump_host_id` to `credential_profiles` so a profile can declare a
+/// default jump host for any session/tunnel that uses it.
+async fn migrate_credential_profile_jump_host(pool: &SqlitePool) -> Result<(), DbError> {
+    if !column_exists(pool, "credential_profiles", "jump_host_id").await? {
+        sqlx::query(
+            "ALTER TABLE credential_profiles ADD COLUMN jump_host_id TEXT \
+             REFERENCES jump_hosts(id) ON DELETE SET NULL"
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| DbError::Migration(format!("Failed to add credential_profiles.jump_host_id: {}", e)))?;
     }
     Ok(())
 }
