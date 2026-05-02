@@ -30,6 +30,8 @@ mod biometric;
 mod cert_manager;
 mod crypto;
 mod db;
+#[cfg(any(debug_assertions, feature = "dev-routes"))]
+mod dev;
 mod discovery;
 mod docs;
 mod integrations;
@@ -808,6 +810,10 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/tunnels/:id/stop", post(api::stop_tunnel))
         .route("/tunnels/:id/reconnect", post(api::reconnect_tunnel))
         .with_state(app_state.clone());
+
+    // Dev-only route introspection (cfg-gated; absent from release builds).
+    #[cfg(any(debug_assertions, feature = "dev-routes"))]
+    let api_routes = api_routes.route("/dev/routes", get(dev::routes_handler));
 
     // Scripts state (separate from app state)
     let scripts_state = Arc::new(scripts::ScriptsState {

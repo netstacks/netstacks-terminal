@@ -8,6 +8,10 @@ repository = "https://github.com/netstacks/netstacks-terminal"
 homepage = "https://netstacks.net"
 authors = ["NetStacks <hello@netstacks.net>"]
 
+[features]
+default = []
+dev-routes = []
+
 [dependencies]
 # Web server
 axum = { version = "0.7", features = ["ws"] }
