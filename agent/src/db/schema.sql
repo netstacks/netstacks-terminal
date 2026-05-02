@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS credential_profiles (
     reconnect_delay INTEGER NOT NULL DEFAULT 5,
     cli_flavor TEXT NOT NULL DEFAULT 'auto',
     auto_commands TEXT,
+    jump_host_id TEXT REFERENCES jump_hosts(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
