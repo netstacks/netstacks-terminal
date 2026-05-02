@@ -91,6 +91,38 @@ exercise the feature — flagged here so subsequent sub-projects close the gap.
   same `coverage_ai_files.rs` tests will start exercising the 2xx branch and
   surface latent LLM-round-trip bugs without any test rewrite.
 
+### Sub-project 1 wave 7 — `/api/docs/` and `/api/scripts/` trailing-slash mismatch
+
+- **Affected tests**: `coverage_docs.rs::document_full_round_trip_with_versions_and_render`,
+  `coverage_scripts.rs::script_full_round_trip`
+- **What's happening**: `agent/src/main.rs` registers two nested routers with
+  `.route("/", ...)`:
+  ```rust
+  let scripts_routes = TrackedRouter::new()
+      .route("/", get(scripts::list_scripts).post(scripts::create_script))
+      ...;
+  let docs_routes = TrackedRouter::new()
+      .route("/", get(docs::list_documents).post(docs::create_document))
+      ...;
+  // ... mounted under `/api/scripts` and `/api/docs`
+  ```
+  `TrackedRouter` reports the resulting route as `/api/scripts/` /
+  `/api/docs/` (with the trailing slash from the inner `/` path). The drift
+  table records that string. But the *actual* HTTP route axum serves is
+  `/api/scripts` / `/api/docs` — without the trailing slash — because axum
+  collapses the empty-path nested route. Hitting the slash-suffixed URL
+  returns 404/405. Wave 7 tests work around this by issuing requests against
+  the no-slash path while leaving the COVERS comment pointing at the
+  drift-table form.
+- **Why this is mildly annoying**: It's a minor honesty problem in the drift
+  table — the listed path is *not* what the agent answers on. It also breaks
+  any consumer that follows the `/dev/routes` listing literally (though the
+  frontend talks to the no-slash path so it isn't broken in practice).
+- **Fix later**: Either change `scripts_routes` / `docs_routes` to attach
+  list/create on the parent path explicitly (`api_routes.route("/scripts",
+  ...)`), or teach `TrackedRouter::nest_tracked` to drop the trailing slash
+  when the inner path is `/`.
+
 ### Phase 3 — mock LLM integration silently skips
 
 - **Affected tests**: `ai_mock_llm_chat_response`, `ai_mock_llm_generate_script`,
