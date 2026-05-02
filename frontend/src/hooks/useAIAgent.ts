@@ -1004,18 +1004,36 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
         // CommandFilter at /api/ai/ssh-execute is the source of truth and
         // consults the server-side config-mode state.
 
+        // Compute the axios per-call timeout. The default localClient timeout
+        // is 30s, but a batch of N commands at `timeoutSecs`/each can take up
+        // to (N × timeoutSecs) seconds plus SSH handshake overhead. Without
+        // this override the AI's batch calls were aborting client-side with
+        // "timeout of 30000ms exceeded" even though the device was still
+        // happily responding. Cap at 10 minutes since that's the upper bound
+        // of any sane interactive batch.
+        const cmdCount = commands?.length ?? 1;
+        const handshakeOverheadMs = 15_000;
+        const axiosTimeoutMs = Math.min(
+          600_000,
+          (timeoutSecs * cmdCount * 1000) + handshakeOverheadMs,
+        );
+
         // Call backend endpoint — field name differs by mode
         try {
           const isEnterpriseMode = getCurrentMode() === 'enterprise';
-          const response = await getClient().http.post('/ai/ssh-execute', {
-            ...(isEnterpriseMode
-              ? { session_definition_id: sessionId }
-              : { session_id: sessionId }),
-            ...(command !== undefined ? { command } : {}),
-            ...(commands !== undefined ? { commands } : {}),
-            ...(stopOnError !== undefined ? { stop_on_error: stopOnError } : {}),
-            timeout_secs: timeoutSecs,
-          });
+          const response = await getClient().http.post(
+            '/ai/ssh-execute',
+            {
+              ...(isEnterpriseMode
+                ? { session_definition_id: sessionId }
+                : { session_id: sessionId }),
+              ...(command !== undefined ? { command } : {}),
+              ...(commands !== undefined ? { commands } : {}),
+              ...(stopOnError !== undefined ? { stop_on_error: stopOnError } : {}),
+              timeout_secs: timeoutSecs,
+            },
+            { timeout: axiosTimeoutMs },
+          );
 
           const result = response.data;
 
