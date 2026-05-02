@@ -7,13 +7,10 @@ import {
   type QuickPrompt,
 } from '../api/quickPrompts';
 import {
-  DEFAULT_SYSTEM_PROMPT,
   DEFAULT_AI_DISCOVERY_PROMPT,
   DEFAULT_TOPOLOGY_PROMPT,
   DEFAULT_SCRIPT_PROMPT,
   DEFAULT_AGENT_PROMPT,
-  getAiConfig,
-  setAiConfig,
   getDiscoveryPrompt as apiGetDiscoveryPrompt,
   setDiscoveryPrompt as apiSetDiscoveryPrompt,
   getTopologyPrompt as apiGetTopologyPrompt,
@@ -22,12 +19,26 @@ import {
   setScriptPrompt as apiSetScriptPrompt,
   getAiAgentConfig,
   setAiAgentConfig,
+  getAllModePrompts,
+  setModePrompt,
 } from '../api/ai';
+import { MODE_PROMPTS, type AIMode } from '../lib/aiModes';
 import { getSettings } from '../hooks/useSettings';
 import './PromptsSettingsTab.css';
 import AITabInput from './AITabInput';
 
-type SystemKey = 'troubleshooting' | 'discovery' | 'topology' | 'script' | 'agent';
+type SystemKey =
+  | 'chat'
+  | 'operator'
+  | 'troubleshoot'
+  | 'copilot'
+  | 'discovery'
+  | 'topology'
+  | 'script'
+  | 'agent';
+
+const MODE_KEYS: SystemKey[] = ['chat', 'operator', 'troubleshoot', 'copilot'];
+const TASK_KEYS: SystemKey[] = ['discovery', 'topology', 'script', 'agent'];
 
 interface EditorState {
   isOpen: boolean;
@@ -37,10 +48,25 @@ interface EditorState {
 }
 
 const SYSTEM_PROMPT_META: Record<SystemKey, { label: string; editorTitle: string; default: string }> = {
-  troubleshooting: {
-    label: 'AI Troubleshooting (Side Panel)',
-    editorTitle: 'Edit AI Troubleshooting Prompt',
-    default: DEFAULT_SYSTEM_PROMPT,
+  chat: {
+    label: 'Chat Mode',
+    editorTitle: 'Edit Chat Mode Prompt',
+    default: MODE_PROMPTS.chat,
+  },
+  operator: {
+    label: 'Operator Mode',
+    editorTitle: 'Edit Operator Mode Prompt',
+    default: MODE_PROMPTS.operator,
+  },
+  troubleshoot: {
+    label: 'Troubleshoot Mode',
+    editorTitle: 'Edit Troubleshoot Mode Prompt',
+    default: MODE_PROMPTS.troubleshoot,
+  },
+  copilot: {
+    label: 'Copilot Mode',
+    editorTitle: 'Edit Copilot Mode Prompt',
+    default: MODE_PROMPTS.copilot,
   },
   discovery: {
     label: 'AI Discovery (Topology Enrichment)',
@@ -69,28 +95,37 @@ export default function PromptsSettingsTab() {
   const [loading, setLoading] = useState(true);
   const [editor, setEditor] = useState<EditorState>({ isOpen: false, mode: 'create' });
 
-  // System prompt overrides (empty string = using default)
-  const [troubleshootingPrompt, setTroubleshootingPrompt] = useState('');
+  // Per-mode prompt overrides (empty string = using default)
+  const [modePrompts, setModePrompts] = useState<Record<AIMode, string>>({
+    chat: '',
+    operator: '',
+    troubleshoot: '',
+    copilot: '',
+  });
+
+  // Specialized-task prompt overrides (empty string = using default)
   const [discoveryPrompt, setDiscoveryPrompt] = useState('');
   const [topologyPrompt, setTopologyPrompt] = useState('');
   const [scriptPrompt, setScriptPrompt] = useState('');
   const [agentPrompt, setAgentPrompt] = useState('');
 
-  // Load prompts and system prompt overrides
   useEffect(() => {
     listQuickPrompts()
       .then(setPrompts)
       .catch(console.error)
       .finally(() => setLoading(false));
 
-    // Load troubleshooting system prompt from backend API
-    getAiConfig()
-      .then(config => {
-        if (config?.systemPrompt) {
-          setTroubleshootingPrompt(config.systemPrompt);
-        }
+    // Load all four mode-prompt overrides (also runs the one-shot legacy migration)
+    getAllModePrompts()
+      .then(overrides => {
+        setModePrompts({
+          chat: overrides.chat ?? '',
+          operator: overrides.operator ?? '',
+          troubleshoot: overrides.troubleshoot ?? '',
+          copilot: overrides.copilot ?? '',
+        });
       })
-      .catch(err => console.debug('Could not load AI config:', err));
+      .catch(err => console.debug('Could not load mode prompts:', err));
 
     // Load discovery prompt from backend, with one-time localStorage migration
     apiGetDiscoveryPrompt()
@@ -98,7 +133,6 @@ export default function PromptsSettingsTab() {
         if (val) {
           setDiscoveryPrompt(val);
         } else {
-          // Migrate from localStorage if backend has no value
           const legacy = localStorage.getItem('netstacks:aiDiscoveryPrompt');
           if (legacy) {
             setDiscoveryPrompt(legacy);
@@ -110,17 +144,14 @@ export default function PromptsSettingsTab() {
       })
       .catch(console.error);
 
-    // Load topology prompt
     apiGetTopologyPrompt()
       .then(val => { if (val) setTopologyPrompt(val); })
       .catch(console.error);
 
-    // Load script prompt
     apiGetScriptPrompt()
       .then(val => { if (val) setScriptPrompt(val); })
       .catch(console.error);
 
-    // Load agent prompt from agent config
     getAiAgentConfig()
       .then(config => {
         if (config?.system_prompt && config.system_prompt !== DEFAULT_AGENT_PROMPT) {
@@ -128,12 +159,15 @@ export default function PromptsSettingsTab() {
         }
       })
       .catch(console.error);
-
   }, []);
 
   const getPromptValue = (key: SystemKey): string => {
     switch (key) {
-      case 'troubleshooting': return troubleshootingPrompt;
+      case 'chat':
+      case 'operator':
+      case 'troubleshoot':
+      case 'copilot':
+        return modePrompts[key];
       case 'discovery': return discoveryPrompt;
       case 'topology': return topologyPrompt;
       case 'script': return scriptPrompt;
@@ -156,12 +190,12 @@ export default function PromptsSettingsTab() {
   const handleResetSystem = useCallback(async (key: SystemKey) => {
     try {
       switch (key) {
-        case 'troubleshooting': {
-          setTroubleshootingPrompt('');
-          const currentConfig = await getAiConfig();
-          if (currentConfig) {
-            await setAiConfig({ ...currentConfig, systemPrompt: undefined });
-          }
+        case 'chat':
+        case 'operator':
+        case 'troubleshoot':
+        case 'copilot': {
+          setModePrompts(prev => ({ ...prev, [key]: '' }));
+          await setModePrompt(key, null);
           break;
         }
         case 'discovery':
@@ -182,11 +216,10 @@ export default function PromptsSettingsTab() {
           if (agentConfig) {
             await setAiAgentConfig({ ...agentConfig, system_prompt: DEFAULT_AGENT_PROMPT });
           }
-          // Also update localStorage settings so useSettings consumers see the default
           const settings = getSettings();
           const stored = localStorage.getItem('netstacks-settings');
           const parsed = stored ? JSON.parse(stored) : {};
-          parsed['ai.agent.systemPrompt'] = settings['ai.agent.systemPrompt']; // keep default
+          parsed['ai.agent.systemPrompt'] = settings['ai.agent.systemPrompt'];
           localStorage.setItem('netstacks-settings', JSON.stringify(parsed));
           break;
         }
@@ -234,22 +267,12 @@ export default function PromptsSettingsTab() {
         } else if (editor.mode === 'system' && editor.systemKey) {
           const key = editor.systemKey;
           switch (key) {
-            case 'troubleshooting': {
-              setTroubleshootingPrompt(prompt);
-              try {
-                const currentConfig = await getAiConfig();
-                if (currentConfig) {
-                  await setAiConfig({ ...currentConfig, systemPrompt: prompt || undefined });
-                } else {
-                  await setAiConfig({
-                    provider: 'anthropic',
-                    model: 'claude-sonnet-4-20250514',
-                    systemPrompt: prompt || undefined,
-                  });
-                }
-              } catch (err) {
-                console.error('Failed to sync troubleshooting prompt:', err);
-              }
+            case 'chat':
+            case 'operator':
+            case 'troubleshoot':
+            case 'copilot': {
+              setModePrompts(prev => ({ ...prev, [key]: prompt }));
+              await setModePrompt(key, prompt || null);
               break;
             }
             case 'discovery':
@@ -280,7 +303,6 @@ export default function PromptsSettingsTab() {
                   system_prompt: effectivePrompt,
                 });
               }
-              // Also sync to localStorage for useSettings consumers
               const stored = localStorage.getItem('netstacks-settings');
               const parsed = stored ? JSON.parse(stored) : {};
               parsed['ai.agent.systemPrompt'] = effectivePrompt;
@@ -300,7 +322,9 @@ export default function PromptsSettingsTab() {
   const favorites = prompts.filter(p => p.is_favorite);
   const others = prompts.filter(p => !p.is_favorite);
 
-  const systemKeys: SystemKey[] = ['troubleshooting', 'discovery', 'topology', 'script', 'agent'];
+  // Render order: 4 mode prompts first, then 4 specialized tasks. UI grouping
+  // (subsection headers) is added in the next task.
+  const systemKeys: SystemKey[] = [...MODE_KEYS, ...TASK_KEYS];
 
   return (
     <div className="prompts-settings">
