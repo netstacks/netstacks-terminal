@@ -125,3 +125,17 @@ fn infer_methods<S>(router: &MethodRouter<S>) -> Vec<String> {
     }
     methods
 }
+
+use std::sync::OnceLock;
+
+/// Global registry populated once at startup by main.rs after all routes are composed.
+/// Read by the /api/dev/routes handler.
+pub static REGISTERED_ROUTES: OnceLock<Vec<RouteInfo>> = OnceLock::new();
+
+pub fn set_global_routes(routes: Vec<RouteInfo>) {
+    let _ = REGISTERED_ROUTES.set(routes);
+}
+
+pub fn get_global_routes() -> Vec<RouteInfo> {
+    REGISTERED_ROUTES.get().cloned().unwrap_or_default()
+}
