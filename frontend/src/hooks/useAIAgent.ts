@@ -44,8 +44,8 @@ import { listEnterpriseSessionDefinitions, listUserFolders as apiListUserFolders
 import { getCurrentMode } from '../api/client';
 import { useCapabilitiesStore } from '../stores/capabilitiesStore';
 import { useAuthStore } from '../stores/authStore';
-import { getModeSystemPrompt as getModeSystemPromptFn } from '../lib/aiModes';
-import { getTopologyPrompt, DEFAULT_TOPOLOGY_PROMPT } from '../api/ai';
+import { getModeSystemPrompt as getModeSystemPromptFn, type AIMode } from '../lib/aiModes';
+import { getTopologyPrompt, DEFAULT_TOPOLOGY_PROMPT, getAllModePrompts } from '../api/ai';
 import type { Document, DocumentCategory } from '../api/docs';
 import { listMcpServers, executeMcpTool, type McpServer } from '../api/mcp';
 import { createTask, getTask } from '../api/tasks';
@@ -528,6 +528,10 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
   // Custom topology prompt loaded from backend settings
   const topologyPromptRef = useRef<string | null>(null);
 
+  // Per-mode prompt overrides loaded from backend settings (Settings → Prompts → AI Modes).
+  // null/empty for a given mode = "use built-in default from MODE_PROMPTS".
+  const modeOverridesRef = useRef<Partial<Record<AIMode, string | null>>>({});
+
   // Script context ref for stable access in callAgentApi
   const scriptContextRef = useRef(scriptContext);
   scriptContextRef.current = scriptContext;
@@ -575,6 +579,14 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
         .catch(() => { topologyPromptRef.current = null; });
     }
   }, [topologyCallbacks]);
+
+  // Load per-mode prompt overrides on mount. Mirrors the topology prompt
+  // pattern — refresh is implicit on hook remount.
+  useEffect(() => {
+    getAllModePrompts()
+      .then(overrides => { modeOverridesRef.current = overrides; })
+      .catch(() => { modeOverridesRef.current = {}; });
+  }, []);
 
   // Check if AI terminal mode (remote file tools) is enabled
   const [aiTerminalMode, setAiTerminalMode] = useState(false);
@@ -2227,7 +2239,11 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
     // Set mode-based system prompt as the default
     if (aiModeRef.current) {
       const isEnterprise = useCapabilitiesStore.getState().isEnterprise?.() ?? false;
-      requestBody.system_prompt = getModeSystemPromptFn(aiModeRef.current, isEnterprise);
+      requestBody.system_prompt = getModeSystemPromptFn(
+        aiModeRef.current,
+        isEnterprise,
+        modeOverridesRef.current,
+      );
     }
 
     // Override with special context prompts when active
@@ -2333,7 +2349,11 @@ Guidelines:
     // Set mode-based system prompt as the default
     if (aiModeRef.current) {
       const isEnterprise = useCapabilitiesStore.getState().isEnterprise?.() ?? false;
-      requestBody.system_prompt = getModeSystemPromptFn(aiModeRef.current, isEnterprise);
+      requestBody.system_prompt = getModeSystemPromptFn(
+        aiModeRef.current,
+        isEnterprise,
+        modeOverridesRef.current,
+      );
     }
 
     // Override with special context prompts when active
