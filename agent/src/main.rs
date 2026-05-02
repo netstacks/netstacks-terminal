@@ -10,6 +10,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use crate::tracked_router::{set_global_routes, TrackedRouter};
 use base64::Engine as _;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use sqlx::sqlite::SqlitePool;
@@ -45,6 +46,7 @@ mod terminal;
 mod tls;
 mod tracked_router;
 mod tunnels;
+mod utf8_decoder;
 mod ws;
 
 use api::AppState;
@@ -416,7 +418,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .allow_headers(tower_http::cors::Any);
 
     // API routes with state
-    let api_routes = Router::new()
+    let api_routes = TrackedRouter::new()
         // Health & Info
         .route("/health", get(api::health))
         .route("/info", get(api::app_info))
@@ -814,7 +816,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
     });
 
     // Scripts routes
-    let scripts_routes = Router::new()
+    let scripts_routes = TrackedRouter::new()
         .route("/", get(scripts::list_scripts).post(scripts::create_script))
         .route(
             "/:id",
@@ -833,7 +835,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
     let docs_state = Arc::new(docs::DocsState { pool });
 
     // Docs routes
-    let docs_routes = Router::new()
+    let docs_routes = TrackedRouter::new()
         .route("/", get(docs::list_documents).post(docs::create_document))
         .route(
             "/:id",
@@ -850,7 +852,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .with_state(docs_state);
 
     // AI routes (with state for settings access)
-    let ai_routes = Router::new()
+    let ai_routes = TrackedRouter::new()
         .route("/chat", post(ai::chat::chat_completion))
         .route("/generate-script", post(ai::chat::generate_script))
         .route("/agent-chat", post(ai::chat::agent_chat))
@@ -879,7 +881,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
     });
 
     // SFTP routes
-    let sftp_routes = Router::new()
+    let sftp_routes = TrackedRouter::new()
         .route("/:id/connect", post(api::sftp_connect))
         .route("/:id/disconnect", post(api::sftp_disconnect))
         .route("/:id/ls", get(api::sftp_ls))
@@ -892,7 +894,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .with_state(sftp_state);
 
     // WebSocket routes for terminal, topology live SNMP polling, and task progress
-    let ws_routes = Router::new()
+    let ws_routes = TrackedRouter::new()
         .route("/terminal", get(ws::terminal_ws))
         .route("/topology-live", get(ws::topology_live_ws))
         .route("/tasks", get(ws::task_progress_ws))
@@ -902,21 +904,34 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
     let static_service = ServeDir::new("../frontend/dist")
         .not_found_service(ServeDir::new("../frontend/dist"));
 
-    // Wrap all API sub-routers in authenticated routes with auth middleware
-    let authenticated_routes = Router::new()
-        .nest("/api", api_routes)
-        .nest("/api/scripts", scripts_routes)
-        .nest("/api/docs", docs_routes)
-        .nest("/api/ai", ai_routes)
-        .nest("/api/sftp", sftp_routes)
-        .layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            api::auth_middleware,
-        ));
+    // Compose API sub-routers (these get auth middleware).
+    let api_composed = TrackedRouter::<()>::new()
+        .nest_tracked("/api", api_routes)
+        .nest_tracked("/api/scripts", scripts_routes)
+        .nest_tracked("/api/docs", docs_routes)
+        .nest_tracked("/api/ai", ai_routes)
+        .nest_tracked("/api/sftp", sftp_routes);
+
+    // Compose WS routes separately (no auth middleware).
+    let ws_composed = TrackedRouter::<()>::new()
+        .nest_tracked("/ws", ws_routes);
+
+    // Aggregate captured routes from BOTH and stash globally.
+    let mut all_routes = api_composed.captured_routes();
+    all_routes.extend(ws_composed.captured_routes());
+    set_global_routes(all_routes);
+
+    let (api_router, _) = api_composed.into_inner_with_routes();
+    let (ws_router, _) = ws_composed.into_inner_with_routes();
+
+    let authenticated = api_router.layer(axum::middleware::from_fn_with_state(
+        app_state.clone(),
+        api::auth_middleware,
+    ));
 
     Router::new()
-        .merge(authenticated_routes)
-        .nest("/ws", ws_routes)
+        .merge(authenticated)
+        .merge(ws_router)
         .fallback_service(static_service)
         .layer(cors)
 }
