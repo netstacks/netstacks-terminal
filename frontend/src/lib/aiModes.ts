@@ -52,7 +52,7 @@ export const AI_MODES: Record<AIMode, AIModeConfig> = {
     description: 'Live debugging — SSH commands, device context',
     enabledFlags: [
       'hasSessions', 'hasExecuteCommand', 'hasTerminalContext',
-      'hasDocuments', 'hasSessionContext',
+      'hasDocuments', 'hasSessionContext', 'hasMcpServers',
     ],
     allowsCommands: true,
     defaultAutonomy: 'safe-auto',
@@ -62,7 +62,7 @@ export const AI_MODES: Record<AIMode, AIModeConfig> = {
     label: 'Copilot',
     description: 'Script & config assistant — templates, code generation',
     enabledFlags: [
-      'hasDocuments', 'hasMopCreation', 'hasRemoteFiles',
+      'hasDocuments', 'hasMopCreation', 'hasRemoteFiles', 'hasMcpServers',
     ],
     allowsCommands: false,
     defaultAutonomy: 'manual',
@@ -114,9 +114,10 @@ You have FULL ACCESS to the NetStacks platform.
 - **investigate_config_change**: Cross-reference config backups with audit logs, MOPs, and sessions. Your most powerful investigation tool.
 
 ### Device & Network Tools
-- **ssh_command**: Execute read-only commands on devices via SSH
-- **search_knowledge**: Search the knowledge base for documentation, runbooks, past incidents
-- **query_mops**: Search Methods of Procedure for past or planned changes
+- **run_command**: Execute a read-only command on an OPEN terminal session (use list_sessions first to find the session_id)
+- **ai_ssh_execute**: Open a fresh SSH connection in the background and run a read-only command — use this when no terminal tab is open for the device
+- **search_documents**: Search saved documents (configs, outputs, notes, templates) by name or content
+- **list_mops** / **get_mop**: Find Methods of Procedure (changes) by metadata; fetch full details by id
 
 ### Dynamic Tools — Integrations and MCP Servers
 
@@ -145,9 +146,18 @@ Always be specific and show evidence.`,
 You are in live troubleshooting mode, focused on diagnosing and resolving network issues in real-time.
 
 ### Available Tools
-- **ssh_command**: Execute read-only show commands on devices. ALWAYS start with non-destructive commands.
+- **run_command**: Execute a read-only show command on an OPEN terminal session (call list_sessions first). ALWAYS start with non-destructive commands.
+- **ai_ssh_execute**: Open a background SSH connection and run a read-only command — use when no terminal tab is open for the target device.
 - **get_terminal_context**: Get recent terminal output from the user's active session.
-- **search_knowledge**: Search for relevant runbooks or past incident resolutions.
+- **search_documents**: Search saved documents (configs, outputs, notes, runbooks).
+
+### Dynamic Tools — Integrations and MCP Servers
+
+This installation may have MCP servers (e.g., NSO MCP for live device queries, monitoring MCPs, custom internal MCPs) connected. The exact set varies and changes at runtime.
+
+- **list_integration_sources**: Lists currently-configured integration sources AND connected MCP servers, including each MCP server's enabled tools.
+
+**When the user asks about a capability you don't see in your built-in toolset above** — e.g. "do you have NSO MCP?", "can you query monitoring?" — call \`list_integration_sources\` FIRST. Don't answer "no" from memory. MCP tools appear with names prefixed \`mcp_<server>_<tool>\`. If a server is connected but reports zero enabled tools, direct the user to **Settings → AI → MCP Servers** to enable the tools they want you to use (tools default to disabled until approved).
 
 ### Approach
 1. Understand the problem — ask clarifying questions if vague
@@ -166,8 +176,16 @@ You are in live troubleshooting mode, focused on diagnosing and resolving networ
 You are a config and script writing assistant for network engineers.
 
 ### Available Tools
-- **search_knowledge**: Find reference configs, templates, and documentation
-- **query_mops**: Find existing MOPs with config examples
+- **search_documents**: Find reference configs, templates, and documentation
+- **list_mops** / **get_mop**: Find existing MOPs by metadata; fetch full details with config examples
+
+### Dynamic Tools — Integrations and MCP Servers
+
+This installation may have MCP servers (e.g., NSO MCP for service catalog data, NetBox MCP for inventory, custom internal MCPs) connected. The exact set varies per installation.
+
+- **list_integration_sources**: Lists currently-configured integration sources AND connected MCP servers, including each MCP server's enabled tools.
+
+**When the user asks about a capability you don't see in your built-in toolset above** — e.g. "is there an NSO MCP?", "can you pull from NetBox?" — call \`list_integration_sources\` FIRST. Don't answer "no" from memory. MCP tools appear with names prefixed \`mcp_<server>_<tool>\`. If a server is connected but reports zero enabled tools, direct the user to **Settings → AI → MCP Servers** to enable the tools they want you to use.
 
 ### Expertise
 - Cisco IOS/IOS-XE/IOS-XR/NX-OS, Arista EOS, Juniper Junos, Palo Alto PAN-OS

@@ -2,9 +2,23 @@
  * MCP (Model Context Protocol) Server API
  *
  * Provides functions to manage MCP server connections and tool discovery.
+ *
+ * Whenever a state-changing call succeeds (add/delete server, connect/disconnect,
+ * enable/disable tool) we dispatch a `mcp-state-changed` window event so other
+ * parts of the app — notably useAIAgent's cached server snapshot — can refresh.
+ * Without this, toggling a tool in Settings does not propagate to the AI side
+ * panel until a full page reload.
  */
 
 import { getClient } from './client';
+
+const MCP_STATE_CHANGED = 'mcp-state-changed';
+
+function notifyMcpStateChanged(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(MCP_STATE_CHANGED));
+  }
+}
 
 export interface McpTool {
   id: string;
@@ -58,6 +72,7 @@ export async function listMcpServers(): Promise<McpServer[]> {
 export async function addMcpServer(req: AddMcpServerRequest): Promise<McpServer> {
   try {
     const { data } = await getClient().http.post('/mcp/servers', req);
+    notifyMcpStateChanged();
     return data;
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string; code?: string } } };
@@ -76,6 +91,7 @@ export async function addMcpServer(req: AddMcpServerRequest): Promise<McpServer>
 export async function deleteMcpServer(id: string): Promise<void> {
   try {
     await getClient().http.delete(`/mcp/servers/${id}`);
+    notifyMcpStateChanged();
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string } } };
     throw new Error(axiosErr.response?.data?.error || 'Failed to delete MCP server');
@@ -92,6 +108,7 @@ export async function deleteMcpServer(id: string): Promise<void> {
 export async function connectMcpServer(id: string): Promise<McpServer> {
   try {
     const { data } = await getClient().http.post(`/mcp/servers/${id}/connect`);
+    notifyMcpStateChanged();
     return data;
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string; code?: string } } };
@@ -110,6 +127,7 @@ export async function connectMcpServer(id: string): Promise<McpServer> {
 export async function disconnectMcpServer(id: string): Promise<void> {
   try {
     await getClient().http.post(`/mcp/servers/${id}/disconnect`);
+    notifyMcpStateChanged();
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string } } };
     throw new Error(axiosErr.response?.data?.error || 'Failed to disconnect from MCP server');
@@ -122,6 +140,7 @@ export async function disconnectMcpServer(id: string): Promise<void> {
 export async function setMcpToolEnabled(toolId: string, enabled: boolean): Promise<void> {
   try {
     await getClient().http.put(`/mcp/tools/${toolId}/enabled`, { enabled });
+    notifyMcpStateChanged();
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string } } };
     throw new Error(axiosErr.response?.data?.error || 'Failed to update tool enabled status');
