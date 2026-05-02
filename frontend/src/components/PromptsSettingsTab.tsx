@@ -331,13 +331,13 @@ export default function PromptsSettingsTab() {
           <span className="prompt-item-icon">{'\u{1F916}'}</span>
           <span className="prompt-item-name">{meta.label}</span>
           <div className="prompt-item-actions">
-            <button onClick={() => handleEditSystem(key)} title="Edit">{'✎'}</button>
+            <button onClick={() => handleEditSystem(key)} title="Edit">{'\u270E'}</button>
             <button
               onClick={() => handleResetSystem(key)}
               title="Reset to default"
               disabled={!value}
             >
-              {'↺'}
+              {'\u21BA'}
             </button>
           </div>
         </div>
@@ -364,9 +364,7 @@ export default function PromptsSettingsTab() {
           {MODE_KEYS.map(key => renderSystemPromptItem(key))}
         </div>
 
-        <div className="prompts-subsection-title prompts-subsection-title--spaced">
-          Specialized Tasks
-        </div>
+        <div className="prompts-subsection-title">Specialized Tasks</div>
         <div className="prompts-list">
           {TASK_KEYS.map(key => renderSystemPromptItem(key))}
         </div>
