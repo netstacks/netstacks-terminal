@@ -38,7 +38,7 @@ export function detectCliFlavor(
   const version = (deviceInfo.version || '').toLowerCase();
   const output = (versionOutput || '').toLowerCase();
 
-  // Check for Cisco NX-OS (Nexus switches)
+  // Check for Cisco NX-OS (Nexus switches), IOS-XR, or IOS/IOS-XE
   if (vendor.includes('cisco')) {
     if (
       version.includes('nx-os') ||
@@ -48,7 +48,23 @@ export function detectCliFlavor(
     ) {
       return 'cisco-nxos';
     }
-    // Default Cisco to IOS
+    // Cisco IOS-XR — service-provider OS, separate CLI semantics from IOS/IOS-XE.
+    // Identifiers commonly seen in `show version` output: "IOS XR", "IOS-XR",
+    // "iosxr", or platform names like ASR9K, NCS, CRS.
+    if (
+      version.includes('xr') ||
+      version.includes('ios-xr') ||
+      platform.includes('asr9') ||
+      platform.includes('ncs') ||
+      platform.includes('crs') ||
+      platform.includes('xrv') ||
+      output.includes('ios xr') ||
+      output.includes('ios-xr') ||
+      output.includes('iosxr')
+    ) {
+      return 'cisco-xr';
+    }
+    // Default Cisco to IOS/IOS-XE
     return 'cisco-ios';
   }
 
@@ -105,6 +121,7 @@ export function getFlavorDisplayName(flavor: CliFlavor): string {
   const names: Record<CliFlavor, string> = {
     auto: 'Auto-Detect',
     'cisco-ios': 'Cisco IOS',
+    'cisco-xr': 'Cisco IOS-XR',
     'cisco-nxos': 'Cisco NX-OS',
     'juniper': 'Juniper JunOS',
     'arista': 'Arista EOS',

@@ -705,11 +705,14 @@ Do NOT combine the paging command with a show command. Run them as two separate 
 
 Paging disable commands by platform:
 - Cisco IOS/IOS-XE/NX-OS: `terminal length 0`
+- Cisco IOS-XR: `terminal length 0` (same command; some images also accept `terminal exec prompt no-timestamp`)
 - Juniper Junos: `set cli screen-length 0` (recommended) — `| no-more` is also auto-appended to your commands as a safety net
 - Arista EOS: `terminal length 0`
 - Palo Alto PAN-OS: `set cli pager off`
 - Fortinet FortiOS: `config system console` then `set output standard`
 - Linux/Unix: Handled automatically — paging is disabled on every command you run. No action needed.
+
+If the session's CLI flavor is set to "auto" (unknown), DO NOT assume it's Linux. Your FIRST run_command should be a benign probe like `show version` (works on Cisco/Arista/Juniper) — read the output, identify the platform, then call `set_session_cli_flavor` with the detected flavor BEFORE issuing the paging-disable command. Sending Linux env-var prefixes (PAGER=cat, etc.) to a network device produces "% Invalid input detected" errors.
 
 IMPORTANT RULES:
 1. ALWAYS run the paging disable command as your FIRST command on any session, BEFORE any other commands.

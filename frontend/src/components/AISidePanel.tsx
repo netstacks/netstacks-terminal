@@ -285,9 +285,10 @@ const AISidePanel = ({
       try {
         switch (cliFlavor) {
           case 'cisco-ios':
+          case 'cisco-xr':
           case 'cisco-nxos':
           case 'arista':
-            // Cisco IOS, NX-OS, and Arista EOS all use this command
+            // Cisco IOS / IOS-XR / NX-OS and Arista EOS all use this command
             await onExecuteCommand(sessionId, 'terminal length 0')
             break
           case 'juniper':
@@ -310,11 +311,15 @@ const AISidePanel = ({
       }
     }
 
-    // Helper to append no-more pipe for commands
-    // For auto mode and Juniper, always use | no-more since it's the safest option
+    // Helper to append no-more pipe for commands.
+    // Junos uses `| no-more` to suppress paging. Cisco IOS / IOS-XR /
+    // NX-OS / Arista treat that as a syntax error ("% Invalid input
+    // detected at '^' marker"). So only append it when we *know* the
+    // flavor is Juniper. For 'auto', do nothing — let the AI probe and
+    // call set_session_cli_flavor first; sending Junos syntax to an
+    // unknown device is worse than no-pager-disable.
     const addNoPager = (cmd: string): string => {
-      if (cliFlavor === 'juniper' || cliFlavor === 'auto') {
-        // Juniper and auto mode - | no-more is widely supported
+      if (cliFlavor === 'juniper') {
         return `${cmd} | no-more`
       }
       if (cliFlavor === 'fortinet') {

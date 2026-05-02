@@ -192,6 +192,25 @@ export const AGENT_TOOLS: AgentTool[] = [
     }
   },
   {
+    name: 'set_session_cli_flavor',
+    description: `Record the detected CLI flavor for a session. Call this after probing a device (e.g. running 'show version' or 'uname -a') and identifying what platform it runs. Once set, subsequent run_command calls will use the right paging-disable strategy automatically — Linux env-var prefixes for Linux, '| no-more' for Juniper, nothing for Cisco/Arista/etc. (where the AI issues 'terminal length 0' itself). ONLY call this for sessions where cli_flavor is currently 'auto' or wrong; do not change it on every command.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'The session ID whose CLI flavor you have detected.'
+        },
+        flavor: {
+          type: 'string',
+          description: 'The detected CLI flavor. Choose the closest match.',
+          enum: ['linux', 'cisco-ios', 'cisco-xr', 'cisco-nxos', 'juniper', 'arista', 'paloalto', 'fortinet']
+        }
+      },
+      required: ['session_id', 'flavor']
+    }
+  },
+  {
     name: 'recommend_config',
     description: 'Generate a configuration recommendation. DOES NOT execute - only provides the recommendation for user review.',
     parameters: {
@@ -1280,6 +1299,7 @@ export const TOOL_REGISTRY: ToolRegistryEntry[] = [
   { name: 'open_session', category: 'core', description: 'Open and connect to a saved session', shortDescription: 'Open session' },
   { name: 'run_command', category: 'core', description: 'Execute read-only commands on open terminals', shortDescription: 'Run command' },
   { name: 'get_terminal_context', category: 'core', description: 'Get recent terminal output and device info', shortDescription: 'Get context' },
+  { name: 'set_session_cli_flavor', category: 'core', description: 'Record detected CLI platform (Cisco/Juniper/Linux/etc.) so subsequent commands use the right paging strategy', shortDescription: 'Set CLI flavor' },
   { name: 'recommend_config', category: 'core', description: 'Generate configuration recommendations', shortDescription: 'Recommend config' },
 
   // Document Tools
@@ -1412,7 +1432,7 @@ export function getAvailableTools(availability: ToolAvailability, disabledTools:
 
   // Always include session tools - AI should know about them
   // If callbacks aren't available, the hook will return appropriate errors
-  const sessionTools = ['list_sessions', 'open_session', 'run_command', 'get_terminal_context', 'update_topology_device', 'ai_ssh_execute'];
+  const sessionTools = ['list_sessions', 'open_session', 'run_command', 'get_terminal_context', 'update_topology_device', 'ai_ssh_execute', 'set_session_cli_flavor'];
   for (const name of sessionTools) {
     const tool = AGENT_TOOLS.find(t => t.name === name);
     if (tool) tools.push(tool);

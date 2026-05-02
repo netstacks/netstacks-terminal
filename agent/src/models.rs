@@ -173,6 +173,10 @@ pub enum CliFlavor {
     Auto,
     Linux,
     CiscoIos,
+    /// Cisco IOS-XR — separate flavor from IOS/IOS-XE because the CLI semantics
+    /// differ (commit-based config, different show commands, BGP / routing
+    /// hierarchy structured more like Junos than IOS).
+    CiscoIosXr,
     CiscoNxos,
     Juniper,
     Arista,
