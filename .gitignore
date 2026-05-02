@@ -47,6 +47,7 @@ terminal-dev.sh
 build-windows.sh
 builds/
 *.pem
+tests/
 
 # Internal build outputs
 output/
