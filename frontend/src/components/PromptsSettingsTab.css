@@ -247,6 +247,8 @@
   opacity: 0.85;
 }
 
-.prompts-subsection-title--spaced {
+/* Adjacent-sibling selector adds breathing room between groups
+   (any subsection title that follows a list gets extra top margin). */
+.prompts-list + .prompts-subsection-title {
   margin-top: 16px;
 }
