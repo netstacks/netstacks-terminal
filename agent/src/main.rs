@@ -43,6 +43,7 @@ mod tasks;
 mod telnet;
 mod terminal;
 mod tls;
+mod tracked_router;
 mod tunnels;
 mod ws;
 
