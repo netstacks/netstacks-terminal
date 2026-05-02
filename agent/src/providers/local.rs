@@ -343,6 +343,7 @@ struct CredentialProfileRow {
     reconnect_delay: i32,
     cli_flavor: String,
     auto_commands: Option<String>,
+    jump_host_id: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -382,6 +383,7 @@ impl CredentialProfileRow {
             reconnect_delay: self.reconnect_delay as u32,
             cli_flavor,
             auto_commands,
+            jump_host_id: self.jump_host_id,
             created_at: parse_datetime(&self.created_at)?,
             updated_at: parse_datetime(&self.updated_at)?,
         })
@@ -2632,8 +2634,8 @@ impl DataProvider for LocalDataProvider {
                 id, name, username, auth_type, key_path, port, keepalive_interval,
                 connection_timeout, terminal_theme, default_font_size, default_font_family,
                 scrollback_lines, local_echo, auto_reconnect, reconnect_delay,
-                cli_flavor, auto_commands, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cli_flavor, auto_commands, jump_host_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -2653,6 +2655,7 @@ impl DataProvider for LocalDataProvider {
         .bind(profile.reconnect_delay as i32)
         .bind(&cli_flavor_str)
         .bind(&auto_commands_json)
+        .bind(&profile.jump_host_id)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -2697,6 +2700,10 @@ impl DataProvider for LocalDataProvider {
         let auto_commands = update.auto_commands.unwrap_or(current.auto_commands);
         let auto_commands_json = serde_json::to_string(&auto_commands)
             .unwrap_or_else(|_| "[]".to_string());
+        let jump_host_id = match update.jump_host_id {
+            Some(v) => v,
+            None => current.jump_host_id.clone(),
+        };
 
         sqlx::query(
             r#"
@@ -2705,7 +2712,7 @@ impl DataProvider for LocalDataProvider {
                 keepalive_interval = ?, connection_timeout = ?,
                 terminal_theme = ?, default_font_size = ?, default_font_family = ?,
                 scrollback_lines = ?, local_echo = ?, auto_reconnect = ?, reconnect_delay = ?,
-                cli_flavor = ?, auto_commands = ?, updated_at = ?
+                cli_flavor = ?, auto_commands = ?, jump_host_id = ?, updated_at = ?
             WHERE id = ?
             "#,
         )
@@ -2725,6 +2732,7 @@ impl DataProvider for LocalDataProvider {
         .bind(reconnect_delay_val)
         .bind(&cli_flavor_str)
         .bind(&auto_commands_json)
+        .bind(&jump_host_id)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -6181,6 +6189,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::Auto,
             auto_commands: vec![],
+            jump_host_id: None,
         };
         let profile = provider.create_profile(new_profile).await.unwrap();
 
@@ -6273,6 +6282,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::Auto,
             auto_commands: vec![],
+            jump_host_id: None,
         };
         let profile = provider.create_profile(new_profile).await.unwrap();
 
@@ -6399,5 +6409,93 @@ mod tests {
         // Verify list is empty
         let final_list = provider.list_groups().await.expect("final list");
         assert_eq!(final_list.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_profile_persists_jump_host_id_none_by_default() {
+        let p = setup_provider().await;
+        let np = NewCredentialProfile {
+            name: "p1".into(),
+            username: "admin".into(),
+            auth_type: AuthType::Password,
+            key_path: None,
+            port: 22,
+            keepalive_interval: 30,
+            connection_timeout: 10,
+            terminal_theme: None,
+            default_font_size: None,
+            default_font_family: None,
+            scrollback_lines: 1000,
+            local_echo: false,
+            auto_reconnect: false,
+            reconnect_delay: 5,
+            cli_flavor: CliFlavor::default(),
+            auto_commands: vec![],
+            jump_host_id: None,
+        };
+        let created = p.create_profile(np).await.unwrap();
+        let got = p.get_profile(&created.id).await.unwrap();
+        assert!(got.jump_host_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_profile_sets_jump_host_id() {
+        let p = setup_provider().await;
+        let backing = p.create_profile(NewCredentialProfile {
+            name: "backing".into(),
+            username: "bastion".into(),
+            auth_type: AuthType::Password,
+            key_path: None,
+            port: 22,
+            keepalive_interval: 30,
+            connection_timeout: 10,
+            terminal_theme: None,
+            default_font_size: None,
+            default_font_family: None,
+            scrollback_lines: 1000,
+            local_echo: false,
+            auto_reconnect: false,
+            reconnect_delay: 5,
+            cli_flavor: CliFlavor::default(),
+            auto_commands: vec![],
+            jump_host_id: None,
+        }).await.unwrap();
+        let jh = p.create_jump_host(NewJumpHost {
+            name: "edge".into(),
+            host: "10.0.0.1".into(),
+            port: 22,
+            profile_id: backing.id.clone(),
+        }).await.unwrap();
+        let target = p.create_profile(NewCredentialProfile {
+            name: "target".into(),
+            username: "admin".into(),
+            auth_type: AuthType::Password,
+            key_path: None,
+            port: 22,
+            keepalive_interval: 30,
+            connection_timeout: 10,
+            terminal_theme: None,
+            default_font_size: None,
+            default_font_family: None,
+            scrollback_lines: 1000,
+            local_echo: false,
+            auto_reconnect: false,
+            reconnect_delay: 5,
+            cli_flavor: CliFlavor::default(),
+            auto_commands: vec![],
+            jump_host_id: None,
+        }).await.unwrap();
+
+        let updated = p.update_profile(&target.id, UpdateCredentialProfile {
+            jump_host_id: Some(Some(jh.id.clone())),
+            ..Default::default()
+        }).await.unwrap();
+        assert_eq!(updated.jump_host_id.as_deref(), Some(jh.id.as_str()));
+
+        let cleared = p.update_profile(&target.id, UpdateCredentialProfile {
+            jump_host_id: Some(None),
+            ..Default::default()
+        }).await.unwrap();
+        assert!(cleared.jump_host_id.is_none());
     }
 }
