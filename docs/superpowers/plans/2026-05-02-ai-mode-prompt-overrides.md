@@ -262,6 +262,8 @@ EOF
 
 `getAllModePrompts()` batches the four `getModePrompt` reads and runs the legacy migration: if `ai.mode_prompt.troubleshoot` is empty AND `ai.provider_config.systemPrompt` is non-empty, copy the value into the new key and clear `systemPrompt` from the provider config.
 
+> **Implementation pivot (post-hoc note):** The `vi.mock('../ai', ...)` test pattern shown in Step 1 below collides with Vitest's ESM constraint — mocked namespace exports do not intercept in-module bindings, so `getAllModePrompts` (spread from `actual` via `vi.importActual`) ends up calling the real `getAiConfig` etc. The shipped implementation extracted a pure helper `decideModePromptMigration` (returning a discriminated `{ migrate: false } | { migrate: true; value; clearedConfig }` union) and tested that directly with no mocks. The IO wrapper `getAllModePrompts` retains the contract described here. See commit `eaf2012`.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `frontend/src/api/__tests__/modePrompts.test.ts`:
