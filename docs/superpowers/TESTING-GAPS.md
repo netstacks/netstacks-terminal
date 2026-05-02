@@ -123,23 +123,32 @@ exercise the feature — flagged here so subsequent sub-projects close the gap.
   ...)`), or teach `TrackedRouter::nest_tracked` to drop the trailing slash
   when the inner path is `/`.
 
-### Phase 3 — mock LLM integration silently skips
+### Phase 3 — mock LLM integration silently skips ✅ FIXED (2026-05-02)
 
 - **Affected tests**: `ai_mock_llm_chat_response`, `ai_mock_llm_generate_script`,
   `ai_mock_llm_profile_injection`, `ai_mock_llm_system_prompt_forwarded`
-- **What's happening**: Each test attempts to write a provider config that
-  points the agent at the mock LLM (`http://localhost:8090`). The PUT succeeds
-  but the agent still returns `503 Service Unavailable` on the chat call. The
-  tests detect the 503 and silently skip ("Mock LLM config saved but agent
-  still returns 503 — provider config format may differ"). They pass without
-  having actually exercised the LLM round-trip.
-- **Root cause** (hypothesis): the `ai.provider_config` JSON shape the test
-  writes doesn't match what the current agent expects (likely needs a
-  different provider type than `"custom"` or a different field set for the
-  mock LLM URL).
-- **Re-cover where**: Sub-project 2 (AI sanitization comprehensive) and
-  Sub-project 3 (AI prompt wiring) — both depend on the mock LLM round-trip
-  actually working. Fix the provider-config shape there.
+- **Root cause** (confirmed): the test's `configure_mock_llm()` helper had
+  TWO shape bugs that compounded to produce the 503:
+  1. The JSON used field name `api_url`, but the agent's `AiSettingsConfig`
+     expects `base_url` (see `agent/src/ai/chat.rs:390`). `api_url` was
+     silently ignored by serde, so the agent fell back to its default
+     `https://api.anthropic.com` and never reached the mock.
+  2. The JSON included `api_key`, but the agent reads the API key from the
+     **vault** (`get_api_key("ai.<provider>")`, see `chat.rs:494-502`), not
+     from the settings JSON. The vault was never unlocked nor populated, so
+     the agent returned 503 with `"Vault is locked"` — which the test
+     misread as a generic "provider config wrong" 503 and silently skipped.
+- **Fix**: rewrote `configure_mock_llm()` in `tests/api/tests/phase3_ai.rs`
+  (gitignored) to (a) call `ensure_vault_unlocked()`, (b) PUT the mock key
+  to `/vault/api-keys/ai.anthropic`, (c) PUT the provider config with
+  `base_url` instead of `api_url`. Also removed the silent-skip 503 branch
+  and tightened each test to assert the mock-LLM signature ("Mock LLM
+  response to:", profile name "MockTestEngineer", `system_prompt_length`
+  delta vs baseline) so future regressions fail loud.
+- **Verified**: all 4 `ai_mock_llm_*` tests pass with real round-trips
+  (parallel + serial). Full phase3_ai suite: 41/41 green.
+- **Side effects**: none — the four tests previously passed by skipping;
+  now they pass by exercising. No other tests touched.
 
 ## Phase pass status (after Sub-project 0)
 
@@ -149,7 +158,7 @@ Cold-start re-run of `./run-tests.sh all`:
 |---|---|---|
 | 1  Foundation         | 9  | ✅ green |
 | 2  Sessions           | 12 | ✅ green |
-| 3  AI + Sanitization  | 41 | ✅ green (mock LLM tests skip, see gap above) |
+| 3  AI + Sanitization  | 41 | ✅ green (mock LLM round-trips now exercised, gap fixed 2026-05-02) |
 | 4  Terminal/WebSocket | 13 | ✅ green |
 | 5  Features           | 16 | ✅ green |
 | 6  SNMP/Discovery     | 13 | ✅ green |
