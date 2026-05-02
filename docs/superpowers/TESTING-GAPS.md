@@ -373,3 +373,97 @@ None. No agent code touched in Sub-project 2 — every test passes against the i
 | `coverage_drift` (regression check)        | 1   | green (no new routes — coverage is additive) |
 
 No commits in this sub-project — `tests/` is gitignored, mock-LLM changes are gitignored, no agent fixes were needed. TESTING-GAPS.md updated (this section, committed).
+
+---
+
+# Sub-project 4 — MCP integration tests with a mock MCP server
+
+Completed 2026-05-02. Closes the gap left by Sub-project 1 wave 5, which only exercised the `/api/mcp/*` error paths against a non-existent stdio command. This wave adds an end-to-end happy-path round-trip against a real MCP server (a self-contained Python stdio mock).
+
+**Artifacts (gitignored):**
+- `tests/mocks/mcp-server/server.py` — stdio JSON-RPC mock MCP server (echo / add / get_time tools, MCP protocol version 2025-03-26 to match `rmcp 0.14`'s `ProtocolVersion::LATEST`).
+- `tests/api/tests/coverage_mcp_integration.rs` — 3 new integration tests, all green from cold start.
+
+**Committed:**
+- `tests/api/tests/coverage_drift.rs` — `EXPECTED_COVERAGE` entries for `/api/mcp/servers`, `/api/mcp/servers/:id/connect`, `/api/mcp/servers/:id/disconnect`, `/api/mcp/tools/:id/enabled`, and `/api/mcp/tools/:id/execute` now point at the strengthened `coverage_mcp_integration.rs::mcp_full_lifecycle_with_mock_server`. The `DELETE /api/mcp/servers/:id` row stays on `coverage_mcp.rs::mcp_server_lifecycle_round_trip` because that test is the canonical create-then-delete probe (no MCP runtime needed).
+
+## Transports supported by the agent
+
+`agent/src/integrations/mcp/client.rs` supports two `transport_type` values:
+
+| `transport_type` | rmcp transport | Config keys used |
+|---|---|---|
+| `"stdio"` (default) | `TokioChildProcess` | `command`, `args` (the agent spawns `command args...` and speaks JSON-RPC over the child's stdin/stdout, newline-framed) |
+| `"sse"` | `StreamableHttpClientTransport` | `url`, `auth_type` (`none`/`bearer`/`api-key`), `auth_token` |
+
+Both are wrapped by the same `McpClientManager` and produce the same `McpServerConnection` after handshake — so testing one transport exercises everything downstream of `connect()` (tool discovery, `tools/list`, `tools/call`, disconnect cleanup).
+
+We chose **stdio** for the mock because:
+
+1. No port allocation, no docker container, no compose file changes — the agent spawns the script directly.
+2. The mock is a single Python script with zero dependencies (only stdlib `json` + `sys`).
+3. Stdio is the more commonly used transport in the wild (every npm-published MCP server like `@modelcontextprotocol/server-filesystem` ships as stdio).
+4. SSE coverage is intentionally deferred — see the deferrals section below.
+
+## Mock MCP server design
+
+`tests/mocks/mcp-server/server.py` is a minimal JSON-RPC over stdio implementation:
+
+| JSON-RPC method | Behaviour |
+|---|---|
+| `initialize` | Returns `protocolVersion: "2025-03-26"`, `capabilities: {tools: {listChanged: false}}`, `serverInfo: {name: "netstacks-mock-mcp", version: "0.0.1"}` |
+| `notifications/initialized` | Silent ack (no response — it's a notification) |
+| `ping` | Returns `{}` |
+| `tools/list` | Returns three canned tools: `echo` (deterministic prefix round-trip), `add` (numeric round-trip), `get_time` (fixed-value sentinel for time-flakiness avoidance) |
+| `tools/call` | Dispatches to one of three handlers; unknown tool name returns `{isError: true, content: [{text: "unknown tool: ..."}]}` (per MCP spec, tool-level failures aren't JSON-RPC errors) |
+| anything else with `id` | JSON-RPC error `-32601` "Method not found" |
+| anything else without `id` (notifications) | Silently ignored |
+
+All diagnostics go to stderr (captured by the agent's tracing layer). Stdout stays a pure JSON-RPC stream.
+
+## Coverage added (3 tests)
+
+| Test | What's now proven |
+|---|---|
+| `mcp_full_lifecycle_with_mock_server` | The canonical happy-path probe: create stdio server → connect → assert `connected=true` and 3 tools discovered → `GET /mcp/servers` shows the same 3 tools with stable IDs (`<server_id>:<tool_name>`) → `input_schema` flows through verbatim → tools default to disabled (execute returns 404) → enable echo + add → `tools/call echo {text}` returns `echo:<text>` → `tools/call add {a,b}` returns the sum as a string → bad-args call surfaces as `is_error=true` (HTTP 200, MCP-spec compliant) → disable echo, execute returns 404 → disconnect → `connected=false` in list → DELETE 204 |
+| `mcp_reconnect_idempotent` | Connect-disconnect-reconnect cycle proves: (a) tool count stays exactly 3 across reconnects (no duplicate inserts in the `mcp_tools` table — the `ON CONFLICT(server_id, name) DO UPDATE` upsert at `agent/src/api.rs:8073-8079` is doing its job); (b) tool IDs are deterministic and stable across reconnects, so per-tool enabled flags survive a disconnect (verified by ID-set equality across two connect calls). |
+| `mcp_connect_to_non_mcp_command_fails_cleanly` | Complements `coverage_mcp::mcp_server_lifecycle_round_trip`'s "non-existent path" case by pointing at `/usr/bin/true` (a real executable that exits immediately and doesn't speak MCP). Asserts the agent surfaces a structured `{error, code}` response (4xx/5xx) instead of panicking or hanging. |
+
+## Test gating + skip behaviour
+
+`mcp_mock_available()` checks for `python3` on PATH and the script's existence. If either is missing, the test logs `[skip] ...` and returns `Ok(())` without failing — same convention as `phase3_ai::mock_llm_available`. CI without Python won't go red.
+
+`mcp_connect_to_non_mcp_command_fails_cleanly` doesn't gate on python3 because it only needs `/usr/bin/true` (always present on Linux/macOS).
+
+## Cold-start re-run
+
+| Suite | Tests | Status |
+|---|---:|---|
+| `coverage_mcp_integration` (NEW) | 3 | green from cold start |
+| `coverage_mcp` (regression check) | 2 | green (still covers the create + DELETE + 404-error paths) |
+| `coverage_drift` (regression check) | 1 | green after pointing 5 of the 6 MCP rows at the new test |
+
+## Bugs surfaced
+
+None. The agent's MCP client (`McpClientManager`), connect/disconnect plumbing, tool upsert (`ON CONFLICT(server_id, name) DO UPDATE`), per-tool enabled flag, and `tools/call` round-trip all work correctly against a real MCP server. The error-translation path (`/usr/bin/true` connect failure) also returns a well-shaped `{error, code}` response.
+
+## Deferrals / not in this wave
+
+- **SSE/streamable-HTTP transport coverage** — both transports share the same downstream pipeline (`connect()` → tool discovery → `tools/list` / `tools/call` → disconnect cleanup), so the stdio happy-path proves the wires from the agent's perspective. SSE-specific behaviours (URL parsing, `auth_type=bearer/api-key` header injection, HTTP error → `ConnectionFailed`) are not covered. Adding an SSE mock would require a second container in `docker-compose.test.yml` (e.g. an aiohttp/FastAPI server with the rmcp streamable-HTTP wire format). Worth doing if MCP usage in production tilts toward HTTP-hosted servers, but lower-value than stdio because (a) authentic MCP server packaging is overwhelmingly stdio-first today, and (b) the agent's transport-selection branch (`agent/src/integrations/mcp/client.rs:79-129`) is short and easily code-reviewed.
+- **Real `rmcp` server library mock** — instead of hand-rolling JSON-RPC in Python, we could spin up an `rmcp` server in Rust and link it as a dev-dependency / standalone binary. Trade-off: more bytes of dependency code to compile, but exact protocol fidelity. Deferred — the Python mock is 200 lines, has zero deps, and round-trips successfully through `rmcp 0.14`'s client at protocol version `2025-03-26`. If `rmcp` updates `LATEST` past what the Python mock advertises and the client refuses the older version, swap to the Rust-server approach.
+- **Concurrent connect calls / race conditions** — the test sequence is fully serial. Hammering connect in a loop or from multiple `tokio::spawn`s could surface lock-ordering bugs in `McpClientManager`'s `RwLock<HashMap>`, but no production code path exercises that pattern (the agent connects servers one at a time at boot or from a single API call). Deferred unless a fleet-wide MCP-pool feature lands.
+- **Tool authorization edge cases** — we test enable=true → execute works, enable=false → execute 404. Not tested: what happens when a tool was enabled, the server got disconnected, and execute is attempted (the SQL `WHERE id=? AND enabled=1` clause matches, but `call_tool` will return `ServerNotConnected`). The current `execute_mcp_tool` handler at `agent/src/api.rs:8204-8251` would map that to `TOOL_EXECUTION_FAILED` 5xx — same code path as any other call_tool error. Could be added as a one-liner test (enable, then disconnect, then execute) — flagged for follow-up if MCP usage grows.
+
+## Final pass status
+
+| Suite | Tests | Status |
+|---|---:|---|
+| `coverage_mcp_integration` (NEW) | 3 | green from cold start |
+| `coverage_mcp` (regression check) | 2 | green |
+| `coverage_drift` | 1 | green (5 MCP rows now point at the integration suite) |
+
+Commits in this sub-project:
+- `tests/api/tests/coverage_drift.rs` — point 5 of the 6 MCP `EXPECTED_COVERAGE` rows at `coverage_mcp_integration.rs::mcp_full_lifecycle_with_mock_server`.
+- `docs/superpowers/TESTING-GAPS.md` — this section.
+
+No agent code touched. `tests/api/tests/coverage_mcp_integration.rs` and `tests/mocks/mcp-server/server.py` are gitignored along with the rest of `tests/`.
