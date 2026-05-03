@@ -104,6 +104,10 @@ export interface TopologyEnrichmentOptions {
       input_schema: Record<string, unknown>;
     }>;
   }>;
+  /** When true, after enrichment runs SNMP LLDP/CDP neighbor discovery on
+   *  every topology device with a profile, adding any new neighbors as
+   *  nodes (with alias dedup) and connections. Currently 1-hop only. */
+  discoverNeighbors?: boolean;
 }
 
 /** Backward-compat alias */

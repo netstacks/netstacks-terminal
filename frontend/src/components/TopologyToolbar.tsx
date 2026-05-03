@@ -167,6 +167,10 @@ function EnrichDropdown({
   // Toggle state for sources
   const [enableDns, setEnableDns] = useState(true);
   const [enableWhois, setEnableWhois] = useState(true);
+  // Off by default — neighbor discovery makes a fresh SNMP round-trip per
+  // device (slow on a large topology) and only adds value when CDP/LLDP
+  // is actually enabled on the network.
+  const [discoverNeighbors, setDiscoverNeighbors] = useState(false);
   const [selectedNetbox, setSelectedNetbox] = useState<Set<string>>(new Set());
   const [selectedNetdisco, setSelectedNetdisco] = useState<Set<string>>(new Set());
   const [selectedLibrenms, setSelectedLibrenms] = useState<Set<string>>(new Set());
@@ -206,6 +210,7 @@ function EnrichDropdown({
     onEnrichStart({
       enableDns,
       enableWhois,
+      discoverNeighbors,
       netboxConfigs: undefined, // Parent will resolve tokens from IDs
       netdiscoSourceIds: selectedNetdisco.size > 0 ? Array.from(selectedNetdisco) : undefined,
       librenmsSourceIds: selectedLibrenms.size > 0 ? Array.from(selectedLibrenms) : undefined,
@@ -255,6 +260,15 @@ function EnrichDropdown({
             <label className="enrich-check-item">
               <input type="checkbox" checked={enableWhois} onChange={() => setEnableWhois(!enableWhois)} />
               <span>WHOIS / ASN</span>
+            </label>
+          </div>
+
+          {/* Topology expansion section */}
+          <div className="enrich-section">
+            <div className="enrich-section-label">Topology</div>
+            <label className="enrich-check-item" title="Run SNMP LLDP/CDP discovery on each device with a profile and add any neighbors as new nodes (1 hop)">
+              <input type="checkbox" checked={discoverNeighbors} onChange={() => setDiscoverNeighbors(!discoverNeighbors)} />
+              <span>Discover neighbors (1 hop)</span>
             </label>
           </div>
 

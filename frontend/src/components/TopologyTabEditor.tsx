@@ -18,7 +18,8 @@ import { useTopologyLiveHttp, type TopologyLiveHttpTarget } from '../hooks/useTo
 import { useTopologyHistory, createActionDescription } from '../hooks/useTopologyHistory';
 import type { TopologyAction, ActionSource } from '../types/topologyHistory';
 import type { LinkEnrichment, InterfaceEnrichment } from '../types/enrichment';
-import { getTopology, updateDevicePosition, createConnection, deleteConnection, saveTemporaryTopology, createDevice, saveTopologyToDocs } from '../api/topology';
+import { getTopology, updateDevicePosition, createConnection, deleteConnection, saveTemporaryTopology, createDevice, saveTopologyToDocs, addNeighborDevice, updateDevice } from '../api/topology';
+import { runBatchDiscovery } from '../api/discovery';
 import { resolveTracerouteHops } from '../api/discovery';
 import type { TracerouteHop } from '../types/discovery';
 import { getCurrentMode } from '../api/client';
@@ -368,10 +369,150 @@ export default function TopologyTabEditor({
           setTopology(enriched);
         },
       });
+
+      // 1-hop neighbor discovery as part of enrichment. Runs SNMP LLDP/CDP
+      // on every topology device that has a profile + IP, then either links
+      // each discovered neighbor to an existing node (alias dedup) or adds
+      // it as a new node. Reuses runBatchDiscovery — the same path used by
+      // the Discovery modal — so jump-host routing & all SNMP plumbing
+      // are inherited automatically.
+      if (options.discoverNeighbors) {
+        await runNeighborDiscoveryPhase(topoSnapshot);
+        // Pull fresh topology with the new nodes/connections persisted.
+        const refreshed = await getTopology(topoSnapshot.id);
+        setTopology(refreshed);
+      }
     } catch (err) {
       console.error('[TopologyTabEditor] Enrichment failed:', err);
     }
   }, [topology, enrichmentSources, mcpServerObjects]);
+
+  /**
+   * Phase 2 of enrichment (opt-in): SNMP LLDP/CDP neighbor discovery on every
+   * device with a usable profile. Each discovered neighbor either matches an
+   * existing topology node (by name or IP, case-insensitive) and gets a
+   * connection, or it's added as a new node. Currently 1-hop only.
+   */
+  const runNeighborDiscoveryPhase = useCallback(async (topoSnapshot: Topology) => {
+    const targets = topoSnapshot.devices
+      .filter(d => (d.snmpProfileId || d.profileId) && d.primaryIp)
+      .map(d => ({
+        ip: d.primaryIp!,
+        sessionId: d.sessionId,
+        snmpProfileId: d.snmpProfileId || d.profileId,
+        credentialProfileId: d.profileId,
+      }));
+
+    if (targets.length === 0) {
+      console.log('[TopologyTabEditor] Neighbor discovery skipped — no devices with profile+IP');
+      return;
+    }
+
+    console.log(`[TopologyTabEditor] Neighbor discovery: ${targets.length} target(s)`);
+
+    let results;
+    try {
+      results = await runBatchDiscovery({ targets, methods: ['snmp', 'cli'] });
+    } catch (err) {
+      console.error('[TopologyTabEditor] Neighbor discovery batch failed:', err);
+      return;
+    }
+
+    // Build alias index from CURRENT topology so we can dedup discovered
+    // neighbors against existing nodes (by name OR primary IP).
+    const aliasToDeviceId = new Map<string, string>();
+    const registerAlias = (alias: string | undefined | null, deviceId: string) => {
+      if (!alias) return;
+      const key = alias.toLowerCase().trim();
+      if (key && !aliasToDeviceId.has(key)) aliasToDeviceId.set(key, deviceId);
+    };
+    for (const d of topoSnapshot.devices) {
+      registerAlias(d.name, d.id);
+      registerAlias(d.primaryIp, d.id);
+    }
+
+    // Map result.ip back to the topology device that originated this result —
+    // so we can draw connections from "this device → its neighbor".
+    const sourceIdByIp = new Map<string, string>();
+    for (const d of topoSnapshot.devices) {
+      if (d.primaryIp) sourceIdByIp.set(d.primaryIp, d.id);
+    }
+
+    // Existing connection set (deduped pairs) so we don't re-create links.
+    const existingConnections = new Set<string>();
+    for (const c of topoSnapshot.connections) {
+      existingConnections.add([c.sourceDeviceId, c.targetDeviceId].sort().join('-'));
+    }
+
+    let neighborIndex = 0;
+
+    for (const r of results) {
+      const sourceId = sourceIdByIp.get(r.ip);
+      if (!sourceId) continue;
+
+      const sourceDevice = topoSnapshot.devices.find(d => d.id === sourceId);
+      const sourceX = sourceDevice?.x ?? 300;
+      const sourceY = sourceDevice?.y ?? 200;
+
+      for (const neighbor of r.neighbors) {
+        const nameKey = neighbor.neighborName?.toLowerCase().trim() ?? '';
+        const ipKey = neighbor.neighborIp?.toLowerCase().trim() ?? '';
+        const existingId =
+          (nameKey && aliasToDeviceId.get(nameKey)) ||
+          (ipKey && aliasToDeviceId.get(ipKey));
+
+        const tryConnect = async (targetId: string) => {
+          if (targetId === sourceId) return;
+          const connKey = [sourceId, targetId].sort().join('-');
+          if (existingConnections.has(connKey)) return;
+          existingConnections.add(connKey);
+          try {
+            await createConnection(topoSnapshot.id, {
+              source_device_id: sourceId,
+              target_device_id: targetId,
+              source_interface: neighbor.localInterface,
+              target_interface: neighbor.neighborInterface || undefined,
+            });
+          } catch (err) {
+            console.error('[TopologyTabEditor] Neighbor link failed:', err);
+          }
+        };
+
+        if (existingId) {
+          await tryConnect(existingId);
+          continue;
+        }
+
+        // New neighbor — add as a node. Position in a fan around its source.
+        const angle = (neighborIndex * 45) * (Math.PI / 180);
+        const radius = 130;
+        try {
+          const added = await addNeighborDevice(topoSnapshot.id, {
+            name: neighbor.neighborName,
+            host: neighbor.neighborIp || '',
+            device_type: 'unknown',
+            x: sourceX + Math.cos(angle) * radius,
+            y: sourceY + Math.sin(angle) * radius,
+            profile_id: sourceDevice?.profileId,
+            snmp_profile_id: sourceDevice?.snmpProfileId,
+          });
+          neighborIndex++;
+          registerAlias(neighbor.neighborName, added.id);
+          registerAlias(neighbor.neighborIp, added.id);
+          await updateDevice(topoSnapshot.id, added.id, {
+            notes: 'discovery:neighbor',
+            ...(neighbor.neighborPlatform ? { platform: neighbor.neighborPlatform } : {}),
+            ...(neighbor.neighborIp ? { primary_ip: neighbor.neighborIp } : {}),
+          });
+          await tryConnect(added.id);
+        } catch (err) {
+          console.error('[TopologyTabEditor] Add neighbor failed:', err);
+        }
+      }
+    }
+
+    console.log(`[TopologyTabEditor] Neighbor discovery added ${neighborIndex} new node(s)`);
+  }, []);
 
   /**
    * Build live SNMP targets from topology data.
