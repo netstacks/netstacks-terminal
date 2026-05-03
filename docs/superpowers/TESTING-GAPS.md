@@ -467,3 +467,63 @@ Commits in this sub-project:
 - `docs/superpowers/TESTING-GAPS.md` — this section.
 
 No agent code touched. `tests/api/tests/coverage_mcp_integration.rs` and `tests/mocks/mcp-server/server.py` are gitignored along with the rest of `tests/`.
+
+## Sub-project 6 — Playwright E2E pass
+
+The standalone Playwright suite under `tests/e2e/tests/` had never been run since Sub-project 0's config fix (`../../terminal/frontend` → `../../frontend`). This sub-project ran it cold, verified all 19 spec files green, and added one new spec for the previously-shallow AI mock-LLM round-trip.
+
+### Final pass status
+
+| Suite | Tests | Status |
+|---|---:|---|
+| Existing 19 specs (`tests/e2e/tests/*.spec.ts`) | 179 | green |
+| `ai-mock-roundtrip.spec.ts` (NEW) | 2 | green |
+| **Total** | **181** | **green from cold start** |
+
+### Coverage that already existed
+
+The 19 pre-existing specs cover the user-facing golden paths in depth:
+- `app-loads`, `navigation`, `panels`, `responsive`, `tab-management`, `status-bar`
+- `sessions`, `session-workflows`, `dialogs`, `keyboard-shortcuts`, `command-palette`
+- `settings`, `settings-tabs`, `settings-deep`
+- `ai-panel`, `ai-chat` (input/send-button/clear/quick-actions, but no response assertion)
+- `scripts-docs`, `topology`, `terminal-features`
+
+### New coverage added (`tests/e2e/tests/ai-mock-roundtrip.spec.ts`)
+
+The existing `ai-chat.spec.ts` validates that user messages render and tolerates AI errors when no provider is configured — it never asserts on the *response*. The new spec wires the agent's `ai.provider_config` to the mock LLM container (`localhost:8090`) via the HTTP API in `beforeAll`, then drives the AI panel from the UI:
+
+1. **`send a message and receive a mock LLM response in the messages area`** — fills the input with `who are you`, submits via Enter (no stable testid on the idle send button — see "Frontend gap" below), and asserts the assistant response from the mock LLM lands in `[data-testid="ai-messages"]` within 20s.
+2. **`round-trip a second user message in the same session`** — second-message round-trip with a generic prompt, asserts non-trivial assistant content renders.
+
+This closes the "AI chat completes a round-trip end-to-end through the UI" gap that API-tier tests already cover (`coverage_ai_integration.rs`) but the E2E tier did not.
+
+### Frontend gap surfaced (not fixed in this sub-project)
+
+`AISidePanel.tsx:1481-1497` — the `<button type="submit" className="ai-send-btn">` for the idle (non-busy) state has **no `data-testid`**, while the `ai-stop-btn` variant (rendered only when `isAgentBusy`) does have `data-testid="ai-send"`. As a result, `page.locator('[data-testid="ai-send"]')` only matches when a request is in flight, which is the opposite of what tests want. The new spec works around this by submitting via `Enter` instead.
+
+- **Affected tests**: any future E2E that needs to click "Send" before a request is in flight.
+- **Re-cover when**: the team is comfortable adding `data-testid="ai-send"` to *both* button variants. Trivial frontend change, ~1 line.
+
+### Infrastructure friction encountered
+
+- **Playwright-managed `webServer` died mid-run on the first cold-start invocation.** With `webServer.command: 'cd ../../frontend && VITE_DEV_TIER=professional npm run dev'` and the default `reuseExistingServer: true`, the first cold run reported 16 failures (all `ERR_CONNECTION_REFUSED at http://localhost:5173`) clustered in the *last* spec files alphabetically (topology, terminal-features). Re-running just those files in isolation green'd them. Re-running the full suite with vite started **externally** (so `reuseExistingServer` reused it instead of managing its lifecycle) green'd all 179. Root cause is most likely Playwright reaping the `webServer` process or its stdout pipe stalling — unclear without deeper instrumentation.
+- **Workaround (recommended for CI)**: start vite externally before running Playwright, e.g. `cd frontend && VITE_DEV_TIER=professional npm run dev > /tmp/vite-e2e.log 2>&1 &` then `cd tests/e2e && npx playwright test`. This is what produced the 181/181 green run.
+- **Mock LLM auth handoff**: the agent's `?token=` query-param flow already works (frontend `main.tsx:82-86`), so no frontend changes were needed for E2E auth. Existing `fixtures/auth.ts` reads `tests/.agent-token` and appends it to the URL — golden.
+
+### Deferrals
+
+- **Theme toggle E2E** — listed in the Phase 2 wishlist, but `App.tsx` `terminalTheme` is a *per-session* terminal-color preference, not a global UI light/dark toggle. No global theme toggle exists in the standalone shell — this is intentional, not a gap.
+- **Real terminal/SSH session E2E** — covered shallowly by the existing `session-workflows.spec.ts` (right-click menu, double-click triggers connect) but a true mock-SSH end-to-end session would require terminal-specific assertions and the mock SSH container's command-dispatch quirks. The API tier already covers this in `coverage_sftp.rs` and `coverage_sessions_*`; deferred.
+- **WebGL 3D topology** — explicitly excluded by the sub-project brief.
+
+### Bugs surfaced
+
+- The send-button missing-testid issue above (frontend gap, not a bug per se).
+- No JS errors emerged across all 181 tests on the green run.
+
+### Commits in this sub-project
+
+- `docs/superpowers/TESTING-GAPS.md` — this section.
+
+No agent or frontend code was modified — the suite is green as-is, and the missing send-button testid was severable enough to work around in the test rather than touch the frontend. `tests/e2e/tests/ai-mock-roundtrip.spec.ts` is gitignored along with the rest of `tests/`.
