@@ -3828,6 +3828,34 @@ def main(command: str = "show version"):
         }
       }
 
+      // Sessions are authoritative for SNMP IPs. When CDP returns a neighbor
+      // by hostname (e.g. "P2-CHI") with a loopback IP (e.g. 10.255.0.11)
+      // that's NOT actually SNMP-reachable, we want to use the management IP
+      // of the matching session tab instead.
+      //
+      // Two sources of "I know this hostname's real management IP":
+      //  1. Primaries in this discovery run that returned sysName via SNMP.
+      //  2. Any session whose DeviceDetailTab previously cached a hostname
+      //     (EnrichmentContext) — even if that session wasn't part of *this*
+      //     discovery group, we still know what device it is.
+      const sessionIpBySysName = new Map<string, string>()
+      for (const r of results) {
+        if (r.sysName && r.ip) {
+          sessionIpBySysName.set(r.sysName.toLowerCase().trim(), r.ip)
+        }
+      }
+      // Fold in EnrichmentContext: hostname → tab.host for any tab whose
+      // session we've previously enriched. Doesn't overwrite primary
+      // results' entries since those are already the authoritative match.
+      deviceEnrichments.forEach((enr, sessionId) => {
+        if (!enr.hostname) return
+        const key = enr.hostname.toLowerCase().trim()
+        if (!key || sessionIpBySysName.has(key)) return
+        const matchingTab = tabs.find(t => t.id === sessionId || t.sessionId === sessionId)
+        const ip = matchingTab?.host
+        if (ip) sessionIpBySysName.set(key, ip)
+      })
+
       // Register aliases for every primary device we just created so neighbor
       // resolution below can find them under any of (tab name, sysName, IP).
       for (const result of results) {
@@ -3913,10 +3941,16 @@ def main(command: str = "show version"):
             }
           }
 
+          // Session-IP override: if CDP gave us a loopback IP for a neighbor
+          // whose name matches one of our session tabs, the session's IP is
+          // the real SNMP-reachable management IP — never store the loopback.
+          const sessionMatchedIp = nameKey ? sessionIpBySysName.get(nameKey) : undefined
+          const neighborSnmpIp = sessionMatchedIp || neighbor.neighborIp || ''
+
           try {
             const neighborResult = await addNeighborDevice(savedTopology.id, {
               name: neighbor.neighborName,
-              host: neighbor.neighborIp || '',
+              host: neighborSnmpIp,
               device_type: neighborDeviceType,
               x: nx,
               y: ny,
@@ -3926,11 +3960,14 @@ def main(command: str = "show version"):
             neighborIndex++
             registerAlias(neighbor.neighborName, neighborResult.id)
             registerAlias(neighbor.neighborIp, neighborResult.id)
+            // Also register the session-matched IP so further CDP refs by
+            // either alias resolve to the same node.
+            if (sessionMatchedIp) registerAlias(sessionMatchedIp, neighborResult.id)
 
             await updateDevice(savedTopology.id, neighborResult.id, {
               notes: 'discovery:neighbor',
               ...(neighbor.neighborPlatform ? { platform: neighbor.neighborPlatform } : {}),
-              ...(neighbor.neighborIp ? { primary_ip: neighbor.neighborIp } : {}),
+              ...(neighborSnmpIp ? { primary_ip: neighborSnmpIp } : {}),
             })
 
             await createTopologyConnection(savedTopology.id, {
