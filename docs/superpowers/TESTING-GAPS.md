@@ -31,36 +31,54 @@ Frontend Vitest count moved from 36 → 40 since the Sub-project 1/2 era — the
 for the AI side panel). All other counts match the per-sub-project final pass status
 sections recorded below.
 
-### Cold-start commands (for next operator)
+### How to run the tests
+
+The unified runner at `tests/run-tests.sh` handles everything — infrastructure
+setup, the per-suite quirks (`--test-threads=1` for AI integration, vite
+management for E2E), log routing, and a color-coded summary. You don't need
+to know Rust, Vitest, or Playwright internals to use it.
 
 ```bash
 cd /Users/cwdavis/scripts/netstacks-terminal/tests
-./scripts/teardown.sh 2>/dev/null || true
+
+# Cold-start full run: teardown → setup → all 6 suites → teardown → summary
+./run-tests.sh everything
+
+# Same but stream test output to stdout instead of just to log files
+./run-tests.sh -v everything
+
+# Already have infra up? Skip setup/teardown:
+./run-tests.sh quick
+
+# Per-suite (for iteration):
+./run-tests.sh setup            # bring up agent + mocks
+./run-tests.sh phase 4          # one Rust phase
+./run-tests.sh cov topologies   # one coverage area
+./run-tests.sh ai-int           # AI integration suite
+./run-tests.sh mcp-int          # MCP integration suite
+./run-tests.sh frontend         # Vitest
+./run-tests.sh e2e              # Playwright (auto-manages vite)
+./run-tests.sh status           # what's running right now
+./run-tests.sh logs e2e         # tail the log for a specific suite
+./run-tests.sh teardown         # stop everything
+./run-tests.sh help             # full command list
+
+# Logs land in /tmp/netstacks-tests/<suite>.log for post-mortem.
+```
+
+Power-user fallback (each suite invoked directly):
+
+```bash
 ./scripts/setup-mocks.sh
-
-# Backend phase + coverage
-./run-tests.sh all
-./run-tests.sh cov
-
-# Backend integration (Sub-projects 2 + 4) — note --test-threads=1 for AI
+./run-tests.sh all                              # 145 phase tests
+./run-tests.sh cov                              # 95 coverage + drift
 TEST_AGENT_TOKEN=$(cat .agent-token) cargo test --manifest-path api/Cargo.toml \
-    --test coverage_ai_integration -- --test-threads=1
+    --test coverage_ai_integration -- --test-threads=1   # 26 AI integration
 TEST_AGENT_TOKEN=$(cat .agent-token) cargo test --manifest-path api/Cargo.toml \
-    --test coverage_mcp_integration
-
-# Frontend Vitest
-cd /Users/cwdavis/scripts/netstacks-terminal/frontend && npm run test
-
-# Playwright E2E (start vite externally — see Sub-project 6 notes)
-cd /Users/cwdavis/scripts/netstacks-terminal/frontend
-VITE_DEV_TIER=professional npm run dev > /tmp/vite-dev.log 2>&1 &
-sleep 5
-cd /Users/cwdavis/scripts/netstacks-terminal/tests/e2e
-npx playwright test --reporter=list
-pkill -f vite
-
-# Teardown
-cd /Users/cwdavis/scripts/netstacks-terminal/tests && ./scripts/teardown.sh
+    --test coverage_mcp_integration              # 3 MCP integration
+(cd ../frontend && npm run test)                # 40 Vitest
+./run-tests.sh e2e                              # 181 Playwright (handles vite)
+./scripts/teardown.sh
 ```
 
 ---
@@ -270,11 +288,32 @@ flagged as `INTENTIONALLY_UNCOVERED` in `coverage_drift.rs`. Each entry has a
   reuses it instead of managing its lifecycle) greens all 181. Root cause
   most likely: Playwright reaping the `webServer` process or its stdout
   pipe stalling under load.
-- **Workaround (recommended for CI)**: Start vite externally before running
-  Playwright. The cold-start command block above does exactly this.
+- **Workaround (current)**: `tests/run-tests.sh e2e` and the `e2e` step
+  inside `everything` start vite externally and pass
+  `--workers=1 --max-failures=20 --retries=0` to Playwright. `--workers=1`
+  reduces the concurrent navigation load that triggered the flake; the
+  failure cap bails fast if vite genuinely dies (avoids ~5 minutes of
+  "did not run" cascade) instead of attempting all 181.
 - **Fix later**: Investigate Playwright `webServer` lifecycle management
   (timeout, stdout buffering, signal handling) in deep enough detail to
-  let the managed path go green reliably.
+  let the managed path go green reliably under the default workers count.
+
+### Test runner — vite v7 IPv6-only listener (fixed in `run-tests.sh`)
+
+- **Affected**: `tests/run-tests.sh start_vite()` health probe + `cmd_status`
+- **What was happening**: Vite v7 binds IPv6-only by default (`::1` listener,
+  no IPv4). The runner's health probe used `http://127.0.0.1:5173` which
+  returned `ECONNREFUSED` even though vite was up and serving on
+  `localhost`/`::1`. Symptom: `./run-tests.sh e2e` aborted with
+  "vite failed to start within 30s — see /tmp/netstacks-tests/vite.log",
+  but the log showed vite ready in 500ms.
+- **Fix (applied)**: Switched all 5173 health probes in `run-tests.sh` from
+  `http://127.0.0.1:5173` to `http://localhost:5173`. `localhost` resolves to
+  both families, so it works regardless of which vite version is in use.
+- **Fix later (upstream)**: Either pin a vite config that binds dual-stack
+  (`server.host: '0.0.0.0'` or similar) or accept localhost-only as the
+  permanent norm. The current fix is robust enough that no upstream change
+  is required.
 
 ### Sub-project 5 — Frontend Vitest expansion (entirely deferred)
 
