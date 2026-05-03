@@ -3859,16 +3859,17 @@ def main(command: str = "show version"):
           sessionIpBySysName.set(r.sysName.toLowerCase().trim(), r.ip)
         }
       }
-      // Fold in EnrichmentContext: hostname → tab.host for any tab whose
-      // session we've previously enriched. Doesn't overwrite primary
-      // results' entries since those are already the authoritative match.
-      deviceEnrichments.forEach((enr, sessionId) => {
+      // Fold in EnrichmentContext: hostname → session.host for any session
+      // whose DeviceDetailTab previously cached a hostname. Look the
+      // session up in chipSessionsById (Tab itself has no `host` field —
+      // the host lives on the linked Session record). Doesn't overwrite
+      // primary results' entries; those are already authoritative matches.
+      deviceEnrichments.forEach((enr) => {
         if (!enr.hostname) return
         const key = enr.hostname.toLowerCase().trim()
         if (!key || sessionIpBySysName.has(key)) return
-        const matchingTab = tabs.find(t => t.id === sessionId || t.sessionId === sessionId)
-        const ip = matchingTab?.host
-        if (ip) sessionIpBySysName.set(key, ip)
+        const session = chipSessionsById.get(enr.sessionId)
+        if (session?.host) sessionIpBySysName.set(key, session.host)
       })
 
       // Register aliases for every primary device we just created so neighbor
@@ -4022,7 +4023,7 @@ def main(command: str = "show version"):
       console.error('Failed to save topology:', err)
       alert(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
-  }, [discoveryGroupName, discoveryDevices, tabs, setDeviceEnrichment])
+  }, [discoveryGroupName, discoveryDevices, tabs, chipSessionsById, deviceEnrichments, setDeviceEnrichment])
 
   // Discovery toast handlers
   const handleToastRunDiscovery = useCallback(() => {
