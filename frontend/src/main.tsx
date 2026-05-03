@@ -112,14 +112,24 @@ async function bootstrap() {
   // store before making any API calls. Tauri emits 'sidecar-tls-ready' once done.
   // Enterprise mode skips this — no local agent, no cert to install.
   if (result.mode === 'standalone') {
-    try {
-      const { listen } = await import('@tauri-apps/api/event');
-      await Promise.race([
-        new Promise<void>(resolve => { listen('sidecar-tls-ready', () => resolve()); }),
-        new Promise<void>(resolve => setTimeout(resolve, 3000)),
-      ]);
-    } catch {
-      // Not in Tauri (dev/test) — proceed immediately
+    // Skip outside Tauri (dev/test): @tauri-apps/api throws synchronously
+    // if window.__TAURI_INTERNALS__ is undefined, and the rejection from
+    // listen() inside the Promise executor below is unhandled — it would
+    // surface as a pageerror. The cert wait is irrelevant in dev anyway.
+    const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (inTauri) {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        await Promise.race([
+          new Promise<void>(resolve => {
+            // Catch the listen() rejection so it doesn't escape as an unhandled rejection.
+            listen('sidecar-tls-ready', () => resolve()).catch(() => resolve());
+          }),
+          new Promise<void>(resolve => setTimeout(resolve, 3000)),
+        ]);
+      } catch {
+        // Not in Tauri (dev/test) — proceed immediately
+      }
     }
   }
 

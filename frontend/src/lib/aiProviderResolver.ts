@@ -25,18 +25,26 @@ const DEFAULT_MODELS: Record<AiProviderType, string> = {
   ollama: 'llama3.2',
   openrouter: 'anthropic/claude-3.5-sonnet',
   litellm: 'gpt-4o',
-  custom: 'custom',
+  // 'custom' is configured server-side via AiProviderConfig::Custom; there is
+  // no sensible client-side default. Returning a placeholder here would get
+  // baked into Vertex/Gemini URLs as ".../<placeholder>:generateContent" → 404.
+  custom: '',
 };
 
 /**
  * Get the first model from the user's configured model list for a provider,
  * falling back to a hardcoded default.
+ *
+ * For 'custom' providers, returns '' when no localStorage list is set so that
+ * callers omit the override and the backend falls back to the model stored in
+ * AiProviderConfig::Custom.
  */
 function getModelForProvider(provider: AiProviderType): string {
   const settings = getSettings();
   const key = `ai.models.${provider}` as keyof typeof settings;
   const models = settings[key] as string[] | undefined;
   if (models && models.length > 0) return models[0];
+  if (provider === 'custom') return '';
   return DEFAULT_MODELS[provider] || DEFAULT_MODELS.anthropic;
 }
 
