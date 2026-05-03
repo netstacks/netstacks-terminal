@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     terminal_theme TEXT,  -- null = use default theme
     -- Jump host reference (global jump hosts)
     jump_host_id TEXT REFERENCES jump_hosts(id) ON DELETE SET NULL,
+    -- Alternative jump: another Session used as the jump endpoint
+    -- (mutually exclusive with jump_host_id; enforced in provider).
+    jump_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     -- Port forwarding (Phase 06.3)
     port_forwards TEXT,  -- JSON array of port forward configurations
     -- Auto commands on connect
@@ -139,6 +142,9 @@ CREATE TABLE IF NOT EXISTS credential_profiles (
     cli_flavor TEXT NOT NULL DEFAULT 'auto',
     auto_commands TEXT,
     jump_host_id TEXT REFERENCES jump_hosts(id) ON DELETE SET NULL,
+    -- Alternative jump: a Session used as the jump endpoint
+    -- (mutually exclusive with jump_host_id; enforced in provider).
+    jump_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -691,6 +697,9 @@ CREATE TABLE IF NOT EXISTS tunnels (
     port INTEGER NOT NULL DEFAULT 22,
     profile_id TEXT NOT NULL REFERENCES credential_profiles(id) ON DELETE CASCADE,
     jump_host_id TEXT REFERENCES jump_hosts(id) ON DELETE SET NULL,
+    -- Alternative jump: a Session used as the jump endpoint
+    -- (mutually exclusive with jump_host_id; enforced in provider).
+    jump_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     forward_type TEXT NOT NULL DEFAULT 'local',
     local_port INTEGER NOT NULL,
     bind_address TEXT NOT NULL DEFAULT '127.0.0.1',

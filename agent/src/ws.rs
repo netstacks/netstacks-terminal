@@ -207,6 +207,7 @@ async fn handle_ssh_terminal(socket: WebSocket, query: WsQuery, manager: Arc<Ter
                     port: ssh_params.port,
                     profile_id: ssh_params.profile_id.clone(),
                     jump_host_id: ssh_params.jump_host_id_effective.clone(),
+                    jump_session_id: None, // T2 will resolve session-as-jump for session-attached tunnels
                     forward_type: fwd.forward_type.clone(),
                     local_port: fwd.local_port,
                     bind_address: fwd.bind_address.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
@@ -1540,6 +1541,7 @@ mod resolve_effective_jump_tests {
             cli_flavor: CliFlavor::default(),
             auto_commands: vec![],
             jump_host_id,
+            jump_session_id: None,
         }
     }
 

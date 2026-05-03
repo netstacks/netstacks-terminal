@@ -97,6 +97,10 @@ pub struct Session {
     /// Reference to a global jump host configuration
     #[serde(default)]
     pub jump_host_id: Option<String>,
+    /// Alternative: reference to another Session used as the jump endpoint.
+    /// Mutually exclusive with `jump_host_id` (provider rejects setting both).
+    #[serde(default)]
+    pub jump_session_id: Option<String>,
     // Port forwarding (Phase 06.3)
     /// SSH port forwards (local, remote, dynamic)
     #[serde(default)]
@@ -229,6 +233,10 @@ pub struct NewSession {
     /// Reference to a global jump host configuration
     #[serde(default)]
     pub jump_host_id: Option<String>,
+    /// Alternative: a Session used as the jump endpoint (mutually exclusive
+    /// with jump_host_id).
+    #[serde(default)]
+    pub jump_session_id: Option<String>,
     // Port forwarding (Phase 06.3)
     /// SSH port forwards (local, remote, dynamic)
     #[serde(default)]
@@ -285,6 +293,8 @@ pub struct UpdateSession {
     // Jump host / proxy support (refactored to global jump hosts)
     /// Reference to a global jump host configuration (Option<Option<>> to allow clearing)
     pub jump_host_id: Option<Option<String>>,
+    /// Reference to another Session used as the jump endpoint (Option<Option<>> to allow clearing)
+    pub jump_session_id: Option<Option<String>>,
     // Port forwarding (Phase 06.3)
     /// SSH port forwards (replaces entire list when provided)
     pub port_forwards: Option<Vec<PortForward>>,
@@ -759,6 +769,11 @@ pub struct CredentialProfile {
     #[serde(default)]
     pub jump_host_id: Option<String>,
 
+    /// Alternative default jump: a Session used as the jump endpoint
+    /// (mutually exclusive with jump_host_id).
+    #[serde(default)]
+    pub jump_session_id: Option<String>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -794,6 +809,8 @@ pub struct NewCredentialProfile {
     pub auto_commands: Vec<String>,
     #[serde(default)]
     pub jump_host_id: Option<String>,
+    #[serde(default)]
+    pub jump_session_id: Option<String>,
 }
 
 /// Request to update a credential profile (all fields optional for partial updates)
@@ -816,6 +833,7 @@ pub struct UpdateCredentialProfile {
     pub cli_flavor: Option<CliFlavor>,
     pub auto_commands: Option<Vec<String>>,
     pub jump_host_id: Option<Option<String>>,
+    pub jump_session_id: Option<Option<String>>,
 }
 
 /// Credential for a profile (stored encrypted in vault)
@@ -1162,6 +1180,10 @@ pub struct Tunnel {
     pub port: u16,
     pub profile_id: String,
     pub jump_host_id: Option<String>,
+    /// Alternative jump: a Session used as the jump endpoint (mutually
+    /// exclusive with jump_host_id).
+    #[serde(default)]
+    pub jump_session_id: Option<String>,
     // Forward config
     pub forward_type: PortForwardType,
     pub local_port: u16,
@@ -1188,6 +1210,8 @@ pub struct NewTunnel {
     pub profile_id: String,
     pub jump_host_id: Option<String>,
     #[serde(default)]
+    pub jump_session_id: Option<String>,
+    #[serde(default)]
     pub forward_type: PortForwardType,
     pub local_port: u16,
     #[serde(default = "default_bind_address")]
@@ -1210,6 +1234,7 @@ pub struct UpdateTunnel {
     pub port: Option<u16>,
     pub profile_id: Option<String>,
     pub jump_host_id: Option<Option<String>>,
+    pub jump_session_id: Option<Option<String>>,
     pub forward_type: Option<PortForwardType>,
     pub local_port: Option<u16>,
     pub bind_address: Option<String>,
