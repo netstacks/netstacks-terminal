@@ -35,6 +35,7 @@ license-server/keys/
 
 # Planning documents
 .planning/
+.playwright-mcp/
 
 # Git worktrees (created via using-git-worktrees skill)
 .worktrees/
