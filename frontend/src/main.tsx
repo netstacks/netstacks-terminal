@@ -1,4 +1,3 @@
-import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { loader } from '@monaco-editor/react';
@@ -94,10 +93,14 @@ async function bootstrapPopout(params: URLSearchParams) {
   await bootstrapSidecarToken();
   await initializeClient();
 
+  // NOTE: StrictMode intentionally double-invokes effects in dev to surface
+  // non-idempotent side effects, but every SSH connect / SNMP poll / WS
+  // subscribe in this app fires from useEffect — so dev runs were doubling
+  // every real network call (and Peter's sshd was getting hammered). Prod
+  // builds don't double-invoke regardless, so removing StrictMode here is
+  // a dev-mode-only behavior change.
   createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <PopoutTerminal params={params} />
-    </StrictMode>
+    <PopoutTerminal params={params} />
   );
 }
 
@@ -140,22 +143,22 @@ async function bootstrap() {
     await useCapabilitiesStore.getState().fetchCapabilities();
   }
 
+  // See note in bootstrapPopout: StrictMode removed to stop dev double-fire
+  // of network-bearing effects (SSH/SNMP/WebSockets).
   createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <TokenUsageProvider>
-          <VaultUnlockGate>
-            <App />
-            {/* AUDIT FIX (REMOTE-001): always-mounted modal that surfaces
-                pending SSH host-key fingerprint prompts. */}
-            <HostKeyPromptModal />
-            {/* AUDIT FIX (EXEC-017): per-tool-call approval modal for
-                background ReAct tasks. */}
-            <TaskApprovalModal />
-          </VaultUnlockGate>
-        </TokenUsageProvider>
-      </QueryClientProvider>
-    </StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <TokenUsageProvider>
+        <VaultUnlockGate>
+          <App />
+          {/* AUDIT FIX (REMOTE-001): always-mounted modal that surfaces
+              pending SSH host-key fingerprint prompts. */}
+          <HostKeyPromptModal />
+          {/* AUDIT FIX (EXEC-017): per-tool-call approval modal for
+              background ReAct tasks. */}
+          <TaskApprovalModal />
+        </VaultUnlockGate>
+      </TokenUsageProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -165,10 +168,9 @@ function bootstrapShared(shareToken: string) {
   // The share URL format is: {controller_url}/#share={token} or {controller_url}/terminal#share={token}
   const controllerUrl = window.location.origin;
 
+  // See note in bootstrapPopout: StrictMode removed to stop dev double-fire.
   createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <SharedTerminal token={shareToken} controllerUrl={controllerUrl} />
-    </StrictMode>
+    <SharedTerminal token={shareToken} controllerUrl={controllerUrl} />
   );
 }
 
