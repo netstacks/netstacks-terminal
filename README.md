@@ -97,11 +97,12 @@ cp ~/Library/Application\ Support/netstacks/netstacks.db ~/netstacks.db.backup
 ```
 
 While the app is **running**, use SQLite's atomic backup so you don't
-capture mid-transaction state:
+capture mid-transaction state. Note: use `$HOME` (or a full path) inside
+the quoted `.backup` argument — `~` doesn't expand there:
 
 ```bash
 sqlite3 ~/Library/Application\ Support/netstacks/netstacks.db \
-  ".backup ~/netstacks.db.backup"
+  ".backup $HOME/netstacks.db.backup"
 ```
 
 The database uses `journal_mode=delete` (no `-wal` / `-shm` siblings to
