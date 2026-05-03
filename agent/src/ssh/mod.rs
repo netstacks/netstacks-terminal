@@ -2,6 +2,7 @@
 
 pub mod host_keys;
 pub mod approvals;
+pub mod jump;
 
 use futures::future::join_all;
 use russh::client::{self, KeyboardInteractiveAuthResponse};
@@ -784,6 +785,155 @@ pub async fn connect_and_authenticate_with_approvals(
             username = %config.username,
             host = %config.host,
             "ssh authentication rejected by server"
+        );
+        return Err(SshError::AuthFailed(
+            "authentication failed - check credentials in profile".to_string()
+        ));
+    }
+
+    Ok(handle)
+}
+
+/// Connect to an SSH server over a pre-established stream and authenticate.
+///
+/// Used by ProxyJump where the stream is a russh channel from the jump host.
+/// This variant skips TCP connection and runs the SSH handshake directly over
+/// the provided stream.
+pub async fn connect_and_authenticate_over_stream<S>(
+    config: &SshConfig,
+    stream: S,
+    approvals: Option<Arc<approvals::HostKeyApprovalService>>,
+) -> Result<client::Handle<ClientHandler>, SshError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let russh_config = Arc::new(build_ssh_config(config.legacy_ssh));
+
+    // Load host key store for verification
+    let host_key_store = host_keys::load_default_store();
+
+    let handler = ClientHandler {
+        host: config.host.clone(),
+        port: config.port,
+        host_key_store,
+        auto_accept_changed_keys: false,
+        approvals: approvals.clone(),
+    };
+
+    // Connect over the stream (no TCP dial, no timeout needed for the connect itself)
+    let mut handle = client::connect_stream(russh_config, stream, handler)
+        .await
+        .map_err(|e| SshError::ConnectionFailed(format!(
+            "{}:{} - stream handshake failed: {}",
+            config.host, config.port, e
+        )))?;
+
+    // Authenticate (reuse the exact same auth logic from connect_and_authenticate_with_approvals)
+    let auth_method_desc = match &config.auth {
+        SshAuth::Password(_) => "password".to_string(),
+        SshAuth::KeyFile { path, .. } => format!("key ({})", path),
+        SshAuth::_Certificate { .. } => "certificate".to_string(),
+    };
+
+    let authenticated = match &config.auth {
+        SshAuth::Password(password) => {
+            // Try keyboard-interactive FIRST (many network devices like Arista require this)
+            // If that fails, fall back to password auth
+            tracing::info!("Trying keyboard-interactive auth first for {}@{}", config.username, config.host);
+            let ki_result = try_keyboard_interactive(&mut handle, &config.username, password).await;
+
+            match ki_result {
+                Ok(true) => {
+                    tracing::info!("Keyboard-interactive auth succeeded for {}@{}", config.username, config.host);
+                    true
+                }
+                Ok(false) | Err(_) => {
+                    // Keyboard-interactive failed or rejected, try password auth
+                    tracing::info!("Keyboard-interactive failed, trying password auth for {}@{}", config.username, config.host);
+                    let result = handle
+                        .authenticate_password(&config.username, password)
+                        .await
+                        .map_err(|_e| SshError::AuthFailed(
+                            "authentication failed".to_string()
+                        ))?;
+                    matches!(result, russh::client::AuthResult::Success)
+                }
+            }
+        }
+        SshAuth::KeyFile { path, passphrase } => {
+            let key_path = Path::new(path);
+            tracing::info!("Loading SSH key from: {}", path);
+            let key_pair = load_secret_key(key_path, passphrase.as_deref())
+                .map_err(|e| SshError::KeyError(format!(
+                    "failed to load key '{}': {}",
+                    path, e
+                )))?;
+            tracing::info!("Key loaded successfully, algorithm: {:?}", key_pair.algorithm());
+
+            // For RSA keys, try multiple signature algorithms
+            // Modern servers disable ssh-rsa (SHA-1) and require rsa-sha2-256 or rsa-sha2-512
+            if matches!(key_pair.algorithm(), Algorithm::Rsa { .. }) {
+                // First try with SHA-512 (rsa-sha2-512)
+                tracing::info!("Attempting RSA publickey auth (SHA-512) for {}@{}", config.username, config.host);
+                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair.clone()), Some(HashAlg::Sha512));
+                let auth_result = handle
+                    .authenticate_publickey(&config.username, key_with_hash)
+                    .await;
+                tracing::info!("RSA publickey auth (SHA-512) result: {:?}", auth_result);
+
+                match auth_result {
+                    Ok(russh::client::AuthResult::Success) => true,
+                    _ => {
+                        // Try SHA-256 (rsa-sha2-256) as fallback
+                        tracing::info!("RSA-SHA512 failed, trying RSA-SHA256 for {}@{}", config.username, config.host);
+                        let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), Some(HashAlg::Sha256));
+                        let auth_result = handle
+                            .authenticate_publickey(&config.username, key_with_hash)
+                            .await;
+                        tracing::info!("RSA-SHA256 auth result: {:?}", auth_result);
+                        matches!(auth_result, Ok(russh::client::AuthResult::Success))
+                    }
+                }
+            } else {
+                // For non-RSA keys, use None for hash_alg
+                tracing::info!("Attempting publickey auth for {}@{}", config.username, config.host);
+                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
+                let auth_result = handle
+                    .authenticate_publickey(&config.username, key_with_hash)
+                    .await;
+                tracing::info!("Publickey auth result: {:?}", auth_result);
+                matches!(auth_result, Ok(russh::client::AuthResult::Success))
+            }
+        }
+        SshAuth::_Certificate { private_key_pem, .. } => {
+            tracing::info!("Attempting certificate auth for {}@{}", config.username, config.host);
+
+            // Use russh's internal ssh_key types for compatibility with PrivateKeyWithHashAlg
+            let private_key = russh::keys::ssh_key::PrivateKey::from_openssh(private_key_pem)
+                .map_err(|e| SshError::KeyError(format!("Failed to load cert private key: {}", e)))?;
+
+            let key_with_hash = PrivateKeyWithHashAlg::new(
+                Arc::new(private_key),
+                None, // Ed25519 doesn't need hash algorithm
+            );
+
+            let auth_result = handle
+                .authenticate_publickey(&config.username, key_with_hash)
+                .await
+                .map_err(|e| SshError::AuthFailed(format!("cert auth failed: {}", e)))?;
+
+            tracing::info!("Certificate auth result: {:?}", auth_result);
+            matches!(auth_result, russh::client::AuthResult::Success)
+        }
+    };
+
+    if !authenticated {
+        tracing::info!(
+            target: "audit",
+            method = %auth_method_desc,
+            username = %config.username,
+            host = %config.host,
+            "ssh authentication rejected by server (via jump host)"
         );
         return Err(SshError::AuthFailed(
             "authentication failed - check credentials in profile".to_string()
