@@ -12,6 +12,9 @@ export interface Tunnel {
   port: number;
   profile_id: string;
   jump_host_id: string | null;
+  /** Alternative jump: a Session used as the jump endpoint
+   *  (mutually exclusive with jump_host_id). */
+  jump_session_id: string | null;
   forward_type: PortForwardType;
   local_port: number;
   bind_address: string;
@@ -43,6 +46,7 @@ export interface NewTunnel {
   port?: number;
   profile_id: string;
   jump_host_id?: string | null;
+  jump_session_id?: string | null;
   forward_type: PortForwardType;
   local_port: number;
   bind_address?: string;
@@ -59,6 +63,7 @@ export interface UpdateTunnel {
   port?: number;
   profile_id?: string;
   jump_host_id?: string | null;
+  jump_session_id?: string | null;
   forward_type?: PortForwardType;
   local_port?: number;
   bind_address?: string;

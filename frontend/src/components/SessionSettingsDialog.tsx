@@ -5,6 +5,8 @@ import {
   updateSession,
   listFolders,
   listJumpHosts,
+  listSessions,
+  getSessionJumpDependents,
   CLI_FLAVOR_OPTIONS,
   PORT_FORWARD_TYPE_OPTIONS,
   type Session,
@@ -14,6 +16,7 @@ import {
   type PortForward,
   type PortForwardType,
   type JumpHost,
+  type JumpDependents,
   type Protocol,
   PROTOCOL_OPTIONS,
 } from '../api/sessions';
@@ -92,6 +95,8 @@ function SessionSettingsDialog({
   const [folders, setFolders] = useState<Folder[]>([]);
   const [profiles, setProfiles] = useState<CredentialProfile[]>([]);
   const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([]);
+  const [jumpSessions, setJumpSessions] = useState<Session[]>([]);
+  const [jumpDependents, setJumpDependents] = useState<JumpDependents | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string>('');
   const nameInputRef = useRef<HTMLInputElement>(null);
   const hasAITools = useCapabilitiesStore((s) => s.hasFeature('local_ai_tools'));
@@ -113,8 +118,12 @@ function SessionSettingsDialog({
 
   const [protocol, setProtocol] = useState<Protocol>('ssh');
 
-  // SSH tab state
-  const [jumpHostId, setJumpHostId] = useState<string | null>(null);
+  // SSH tab state — jump is encoded as a single string so a single <select>
+  // can offer both kinds in optgroups (mutually exclusive at the data layer):
+  //   ''             — inherit from profile
+  //   'host:<id>'    — use a JumpHost record
+  //   'session:<id>' — use another Session as the jump endpoint
+  const [jumpSelection, setJumpSelection] = useState<string>('');
   const [legacySsh, setLegacySsh] = useState(false);
   const [portForwards, setPortForwards] = useState<PortForward[]>([]);
   const [newForwardType, setNewForwardType] = useState<PortForwardType>('local');
@@ -165,7 +174,14 @@ function SessionSettingsDialog({
         setOriginalFontFamily(session.font_family || null);
         setSelectedProfileId(session.profile_id);
         setProtocol(session.protocol || 'ssh');
-        setJumpHostId(session.jump_host_id || null);
+        // Encode existing jump ref into the unified selection.
+        if (session.jump_host_id) {
+          setJumpSelection(`host:${session.jump_host_id}`);
+        } else if (session.jump_session_id) {
+          setJumpSelection(`session:${session.jump_session_id}`);
+        } else {
+          setJumpSelection('');
+        }
         setLegacySsh(session.legacy_ssh || false);
         setPortForwards(session.port_forwards || []);
         setNewForwardType('local');
@@ -193,7 +209,7 @@ function SessionSettingsDialog({
         setOriginalFontFamily(null);
         setSelectedProfileId('');
         setProtocol('ssh');
-        setJumpHostId(null);
+        setJumpSelection('');
         setLegacySsh(false);
         setPortForwards([]);
         setNewForwardType('local');
@@ -219,6 +235,18 @@ function SessionSettingsDialog({
       listJumpHosts()
         .then(setJumpHosts)
         .catch(() => setJumpHosts([]));
+      // Sessions list (filtered to leaves) feeds the "Sessions" optgroup.
+      listSessions()
+        .then(setJumpSessions)
+        .catch(() => setJumpSessions([]));
+      // In edit mode, fetch dependents so the UI can show "used as jump by N".
+      if (session) {
+        getSessionJumpDependents(session.id)
+          .then(setJumpDependents)
+          .catch(() => setJumpDependents(null));
+      } else {
+        setJumpDependents(null);
+      }
 
       // Focus name input after a short delay
       setTimeout(() => nameInputRef.current?.focus(), 50);
@@ -275,7 +303,9 @@ function SessionSettingsDialog({
         cli_flavor: cliFlavor,
         terminal_theme: terminalTheme,
         font_family: fontFamily,
-        jump_host_id: jumpHostId,
+        // Decode the unified jump selection into mutually-exclusive fields.
+        jump_host_id: jumpSelection.startsWith('host:') ? jumpSelection.slice(5) : null,
+        jump_session_id: jumpSelection.startsWith('session:') ? jumpSelection.slice(8) : null,
         legacy_ssh: legacySsh,
         port_forwards: portForwards,
         auto_commands: autoCommands,
@@ -592,46 +622,84 @@ function SessionSettingsDialog({
                 </div>
               </div>
 
-              {/* Jump Host / Proxy Section (Phase 06.2) - SSH only */}
+              {/* Jump (Bastion) Section — SSH only. Either a JumpHost record
+                  or another Session can be selected as the jump endpoint. */}
               {protocol === 'ssh' && <div className="form-section">
-                <h3>Jump Host (Bastion)</h3>
+                <h3>Jump (Bastion)</h3>
                 <p className="form-hint">
-                  Connect through an intermediary SSH server. The connection will first hop to the jump host, then connect to the target.
+                  Connect through an intermediary SSH server. You can pick another Session
+                  as the jump (one source of truth per machine) or a dedicated Jump Host record.
                 </p>
 
                 <div className="form-group">
-                  <label htmlFor="jump-host">Jump Host</label>
+                  <label htmlFor="jump-host">Jump</label>
                   <select
                     id="jump-host"
-                    value={jumpHostId || ''}
-                    onChange={(e) => setJumpHostId(e.target.value || null)}
+                    value={jumpSelection}
+                    onChange={(e) => setJumpSelection(e.target.value)}
                   >
                     {(() => {
-                      const inheritedId = selectedProfile?.jump_host_id ?? null;
-                      const inheritedName = inheritedId
-                        ? jumpHosts.find((j) => j.id === inheritedId)?.name ?? '(deleted)'
-                        : 'direct';
+                      // The "inherit" option label reflects what the profile would
+                      // give us — could be a JumpHost OR a Session OR direct.
+                      const profile = selectedProfile;
+                      let inheritedName = 'direct';
+                      if (profile?.jump_host_id) {
+                        inheritedName = jumpHosts.find(j => j.id === profile.jump_host_id)?.name ?? '(deleted jump host)';
+                      } else if (profile?.jump_session_id) {
+                        const sess = jumpSessions.find(s => s.id === profile.jump_session_id);
+                        inheritedName = sess ? `session: ${sess.name}` : '(deleted session)';
+                      }
                       return (
-                        <option value="">
-                          {`Inherit from profile (${inheritedName})`}
-                        </option>
+                        <option value="">{`Inherit from profile (${inheritedName})`}</option>
                       );
                     })()}
-                    {jumpHosts.map((jh) => {
-                      const jumpProfile = profiles.find(p => p.id === jh.profile_id);
-                      return (
-                        <option key={jh.id} value={jh.id}>
-                          {jh.name} ({jumpProfile?.username || '?'}@{jh.host}:{jh.port})
-                        </option>
-                      );
-                    })}
+                    {jumpSessions.length > 0 && (
+                      <optgroup label="Sessions">
+                        {jumpSessions
+                          // Don't let the user pick THIS session as its own jump.
+                          .filter((s) => !session || s.id !== session.id)
+                          .map((s) => (
+                            <option key={`session:${s.id}`} value={`session:${s.id}`}>
+                              {s.name} ({s.host})
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {jumpHosts.length > 0 && (
+                      <optgroup label="Jump Hosts">
+                        {jumpHosts.map((jh) => {
+                          const jumpProfile = profiles.find(p => p.id === jh.profile_id);
+                          return (
+                            <option key={`host:${jh.id}`} value={`host:${jh.id}`}>
+                              {jh.name} ({jumpProfile?.username || '?'}@{jh.host}:{jh.port})
+                            </option>
+                          );
+                        })}
+                      </optgroup>
+                    )}
                   </select>
                   <span className="form-hint">
-                    By default the session inherits the jump host configured on its profile.
-                    Pick a different one here to override. Configure jump hosts in
+                    By default the session inherits the jump configured on its profile.
+                    Pick a different one here to override. Manage Jump Host records in
                     Settings &gt; Jump Hosts.
                   </span>
                 </div>
+
+                {/* "Used as jump by N" hint — visible when editing an existing
+                    session that other artifacts depend on. */}
+                {jumpDependents && (jumpDependents.sessions.length > 0
+                    || jumpDependents.tunnels.length > 0
+                    || jumpDependents.profiles.length > 0) && (
+                  <div className="form-hint" style={{ marginTop: '0.5rem' }}>
+                    <strong>Used as jump by:</strong>{' '}
+                    {[
+                      jumpDependents.sessions.length > 0 && `${jumpDependents.sessions.length} session(s)`,
+                      jumpDependents.tunnels.length > 0 && `${jumpDependents.tunnels.length} tunnel(s)`,
+                      jumpDependents.profiles.length > 0 && `${jumpDependents.profiles.length} profile(s)`,
+                    ].filter(Boolean).join(', ')}.
+                    {' '}This session must remain a leaf — adding a jump here will be rejected by the agent.
+                  </div>
+                )}
               </div>}
 
               {/* Port Forwarding Section (Phase 06.3) - SSH only */}

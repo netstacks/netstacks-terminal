@@ -74,6 +74,9 @@ export interface Session {
   terminal_theme: string | null;
   // Jump host reference (global jump hosts)
   jump_host_id: string | null;
+  // Alternative jump: another Session used as the jump endpoint
+  // (mutually exclusive with jump_host_id; backend rejects setting both).
+  jump_session_id: string | null;
   // Legacy SSH support for older devices
   legacy_ssh: boolean;
   // Connection protocol
@@ -165,6 +168,9 @@ export interface NewSession {
   terminal_theme?: string | null;
   // Jump host reference (global jump hosts)
   jump_host_id?: string | null;
+  // Alternative jump: another Session used as the jump endpoint
+  // (mutually exclusive with jump_host_id; backend rejects setting both).
+  jump_session_id?: string | null;
   // Legacy SSH support for older devices
   legacy_ssh?: boolean;
   // Connection protocol
@@ -200,6 +206,9 @@ export interface UpdateSessionData {
   terminal_theme?: string | null;
   // Jump host reference (global jump hosts)
   jump_host_id?: string | null;
+  // Alternative jump: another Session used as the jump endpoint
+  // (mutually exclusive with jump_host_id; backend rejects setting both).
+  jump_session_id?: string | null;
   // Legacy SSH support for older devices
   legacy_ssh?: boolean;
   // Connection protocol
@@ -233,6 +242,29 @@ export async function getSession(id: string): Promise<Session> {
 
 export async function createSession(session: NewSession): Promise<Session> {
   const { data } = await getClient().http.post('/sessions', session);
+  return data;
+}
+
+/** A single artifact (session/tunnel/profile) using some session as its jump. */
+export interface JumpDependentRef {
+  id: string;
+  name: string;
+}
+
+/** Aggregate of every artifact depending on a given session as its jump endpoint. */
+export interface JumpDependents {
+  sessions: JumpDependentRef[];
+  tunnels: JumpDependentRef[];
+  profiles: JumpDependentRef[];
+}
+
+/**
+ * Fetch the list of sessions/tunnels/profiles that use the given session
+ * as their `jump_session_id`. Used by SessionSettingsDialog to render a
+ * "Used as jump by N" hint and (future) gate session deletion.
+ */
+export async function getSessionJumpDependents(sessionId: string): Promise<JumpDependents> {
+  const { data } = await getClient().http.get(`/sessions/${sessionId}/jump-dependents`);
   return data;
 }
 
