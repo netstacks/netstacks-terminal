@@ -23,26 +23,38 @@ use crate::models::{AuthType, PortForwardType, Tunnel, TunnelRuntimeState, Tunne
 use crate::providers::DataProvider;
 use crate::ssh::{connect_and_authenticate, ClientHandler, SshAuth, SshConfig};
 
-/// Key for connection pooling: (host, port, profile_id, jump_host_id).
+/// Source of an effective jump for pool keying. Two tunnels routing through
+/// the same effective jump (regardless of source kind) share a connection.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum JumpKey {
+    JumpHost(String),
+    Session(String),
+}
+
+/// Key for connection pooling: (host, port, profile_id, effective_jump).
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ConnectionKey {
     pub host: String,
     pub port: u16,
     pub profile_id: String,
-    pub jump_host_id: Option<String>,
+    pub jump: Option<JumpKey>,
 }
 
 impl ConnectionKey {
     /// Compute the connection key for a tunnel, resolving the effective
-    /// jump host (tunnel override > profile default). Pool sharing keys on
-    /// the resolved jump id so two tunnels that resolve to the same target
+    /// jump (tunnel override > profile default). Pool sharing keys on the
+    /// resolved jump id so two tunnels that resolve to the same target
     /// share a single SSH connection.
     pub async fn from_tunnel_resolved(
         tunnel: &Tunnel,
         provider: &Arc<dyn DataProvider>,
     ) -> Result<Self, String> {
-        let effective_jump_id = if let Some(id) = &tunnel.jump_host_id {
-            Some(id.clone()) // explicit override wins
+        // Tunnel-level explicit override wins (mutual exclusion is enforced
+        // at write time in T1).
+        let jump = if let Some(id) = &tunnel.jump_host_id {
+            Some(JumpKey::JumpHost(id.clone()))
+        } else if let Some(id) = &tunnel.jump_session_id {
+            Some(JumpKey::Session(id.clone()))
         } else {
             // Inherit from profile.
             let profile = provider
@@ -54,13 +66,19 @@ impl ConnectionKey {
                         tunnel.profile_id, tunnel.name, e
                     )
                 })?;
-            profile.jump_host_id
+            if let Some(id) = profile.jump_host_id {
+                Some(JumpKey::JumpHost(id))
+            } else if let Some(id) = profile.jump_session_id {
+                Some(JumpKey::Session(id))
+            } else {
+                None
+            }
         };
         Ok(Self {
             host: tunnel.host.clone(),
             port: tunnel.port,
             profile_id: tunnel.profile_id.clone(),
-            jump_host_id: effective_jump_id,
+            jump,
         })
     }
 }
@@ -174,81 +192,67 @@ impl TunnelManager {
             legacy_ssh: false,
         };
 
-        // If a jump host is configured, route via russh ProxyJump using the
-        // jump host's own credentials. Otherwise connect direct.
-        let handle = if let Some(jump_id) = &key.jump_host_id {
-            let jump_host = self
-                .provider
-                .get_jump_host(jump_id)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Jump host '{}' for tunnel '{}' no longer exists: {}",
-                        jump_id, tunnel_id, e
-                    )
-                })?;
-            let jump_profile = self
-                .provider
-                .get_profile(&jump_host.profile_id)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to load profile for jump host '{}': {}",
-                        jump_host.name, e
-                    )
-                })?;
-            let jump_credential = self
-                .provider
-                .get_profile_credential(&jump_host.profile_id)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to read credential for jump host '{}': {}",
-                        jump_host.name, e
-                    )
-                })?;
+        // Route via russh ProxyJump if a jump is configured (host or session
+        // kind), using the jump's own credentials. Otherwise connect direct.
+        let handle = if let Some(jump_key) = &key.jump {
+            let jump_ref = match jump_key {
+                JumpKey::JumpHost(id) => crate::ws::JumpRef::JumpHost(id.clone()),
+                JumpKey::Session(id) => crate::ws::JumpRef::Session(id.clone()),
+            };
+            let resolution = crate::ws::resolve_effective_jump(
+                jump_ref,
+                crate::ws::JumpRef::None,
+                &self.provider,
+            )
+            .await
+            .map_err(|e| format!("Tunnel '{}' jump resolve failed: {}", tunnel_id, e))?
+            .ok_or_else(|| format!(
+                "Tunnel '{}' jump resolved to None — internal inconsistency", tunnel_id
+            ))?;
 
-            let jump_auth = match jump_profile.auth_type {
+            let jump_auth = match resolution.profile.auth_type {
                 AuthType::Password => {
-                    let pw = jump_credential
+                    let pw = resolution.credential
                         .as_ref()
                         .and_then(|c| c.password.clone())
                         .ok_or_else(|| {
                             format!(
-                                "No password configured for jump host '{}' (profile '{}'). \
+                                "No password configured for jump '{}' (profile '{}'). \
                                  Configure credentials in profile settings.",
-                                jump_host.name, jump_profile.name
+                                resolution.source.display_name(), resolution.profile.name
                             )
                         })?;
                     SshAuth::Password(pw)
                 }
                 AuthType::Key => {
-                    let path = jump_profile.key_path.clone().ok_or_else(|| {
+                    let path = resolution.profile.key_path.clone().ok_or_else(|| {
                         format!(
-                            "No SSH key path configured for jump host '{}' (profile '{}').",
-                            jump_host.name, jump_profile.name
+                            "No SSH key path configured for jump '{}' (profile '{}').",
+                            resolution.source.display_name(), resolution.profile.name
                         )
                     })?;
-                    let passphrase =
-                        jump_credential.as_ref().and_then(|c| c.key_passphrase.clone());
+                    let passphrase = resolution.credential
+                        .as_ref()
+                        .and_then(|c| c.key_passphrase.clone());
                     SshAuth::KeyFile { path, passphrase }
                 }
             };
 
             let jump_cfg = SshConfig {
-                host: jump_host.host.clone(),
-                port: jump_host.port,
-                username: jump_profile.username.clone(),
+                host: resolution.host.clone(),
+                port: resolution.port,
+                username: resolution.profile.username.clone(),
                 auth: jump_auth,
                 legacy_ssh: false,
             };
 
+            let jump_name = resolution.source.display_name().to_string();
             crate::ssh::jump::connect_via_jump(&target_cfg, &jump_cfg, None)
                 .await
                 .map_err(|e| {
                     format!(
                         "SSH connection to {}:{} via jump '{}' failed: {}",
-                        key.host, key.port, jump_host.name, e
+                        key.host, key.port, jump_name, e
                     )
                 })?
         } else {
