@@ -266,6 +266,18 @@ pub async fn update_session(
     Ok(Json(session))
 }
 
+/// List every session/tunnel/profile that uses this session as its jump.
+/// Used by the SessionSettingsDialog to render a "Used as jump by N" hint.
+pub async fn get_session_jump_dependents(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::JumpDependents>, ApiError> {
+    // Confirm session exists so a typo'd id surfaces a 404, not an empty list.
+    let _ = state.provider.get_session(&id).await?;
+    let deps = state.provider.find_session_jump_dependents(&id).await?;
+    Ok(Json(deps))
+}
+
 /// Delete a session
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
