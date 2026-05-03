@@ -89,6 +89,7 @@ import { createTopology, addNeighborDevice, createConnection as createTopologyCo
 import type { Topology, Device } from './types/topology'
 import { TracerouteParser } from './lib/tracerouteParser'
 import { parseSysDescr } from './lib/sysDescrParser'
+import { resolveSnmpHost } from './lib/sessionHostResolver'
 import { saveDeviceEnrichmentToDoc, saveLinkEnrichmentToDoc } from './lib/enrichmentExport'
 import DeviceDetailsOverlay from './components/DeviceDetailsOverlay'
 import ConnectionDetailsOverlay from './components/ConnectionDetailsOverlay'
@@ -5275,12 +5276,16 @@ def main(command: str = "show version"):
       // Pull jump info from the device's session so SNMP queries route
       // through the configured bastion when the device sits behind one.
       const deviceSession = tab.deviceSessionId ? chipSessionsById.get(tab.deviceSessionId) : undefined;
+      // Sessions are authoritative for SNMP IPs: if this device's name
+      // matches a session whose hostname we've seen, use that session's
+      // host even if the topology stored a stale CDP loopback IP.
+      const resolvedHost = resolveSnmpHost(tab.deviceName, tab.deviceHost, deviceEnrichments, chipSessionsById);
       return (
         <DeviceDetailTab
           deviceName={tab.deviceName}
           device={tab.deviceData}
           sessionId={tab.deviceSessionId}
-          host={tab.deviceHost}
+          host={resolvedHost}
           profileId={tab.deviceProfileId || profiles[0]?.id}
           jumpHostId={deviceSession?.jump_host_id ?? null}
           jumpSessionId={deviceSession?.jump_session_id ?? null}
@@ -5327,15 +5332,20 @@ def main(command: str = "show version"):
         />
       )
     } else if (tab.type === 'link-detail' && tab.connectionId) {
-      // Link detail tab - shows side-by-side interface comparison
+      // Link detail tab - shows side-by-side interface comparison.
+      // Same session-IP-authoritative override as DeviceDetailTab: if the
+      // source or target name matches a session whose hostname we've seen,
+      // that session's host wins over CDP's potentially-loopback IP.
+      const resolvedSourceHost = resolveSnmpHost(tab.sourceDeviceName, tab.sourceHost, deviceEnrichments, chipSessionsById);
+      const resolvedTargetHost = resolveSnmpHost(tab.targetDeviceName, tab.targetHost, deviceEnrichments, chipSessionsById);
       return (
         <LinkDetailTab
           connectionId={tab.connectionId}
           sourceDeviceName={tab.sourceDeviceName || 'Unknown'}
           targetDeviceName={tab.targetDeviceName || 'Unknown'}
           linkEnrichment={getLinkEnrichment(tab.connectionId)}
-          sourceHost={tab.sourceHost}
-          targetHost={tab.targetHost}
+          sourceHost={resolvedSourceHost}
+          targetHost={resolvedTargetHost}
           profileId={tab.deviceProfileId || profiles[0]?.id}
           sourceInterfaceName={tab.sourceInterfaceName}
           targetInterfaceName={tab.targetInterfaceName}
