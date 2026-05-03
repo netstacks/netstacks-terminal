@@ -244,15 +244,18 @@ pub async fn discover_lldp_neighbors(
     };
     tracing::debug!("Starting LLDP SNMP discovery on {}:{}", host, port);
 
-    // Walk all LLDP tables concurrently
-    let (sys_name_result, port_id_result, port_desc_result, sys_desc_result, man_addr_result, loc_port_result, loc_port_id_result) = tokio::join!(
+    // Walk only the REMOTE tables — these are bounded by neighbor count
+    // (typically <20) rather than interface count. The LOCAL port tables
+    // (lldpLocPortDesc/lldpLocPortId) used to be walked too, but on devices
+    // with hundreds of LLDP-enabled ports those walks dominated the
+    // discovery time and tripped the 30s timeout. We now do targeted GETs
+    // for only the local ports that actually have a neighbor (see below).
+    let (sys_name_result, port_id_result, port_desc_result, sys_desc_result, man_addr_result) = tokio::join!(
         snmp::snmp_walk(dest, community, LLDP_REM_SYS_NAME),
         snmp::snmp_walk(dest, community, LLDP_REM_PORT_ID),
         snmp::snmp_walk(dest, community, LLDP_REM_PORT_DESC),
         snmp::snmp_walk(dest, community, LLDP_REM_SYS_DESC),
         snmp::snmp_walk(dest, community, LLDP_REM_MAN_ADDR),
-        snmp::snmp_walk(dest, community, LLDP_LOC_PORT_DESC),
-        snmp::snmp_walk(dest, community, LLDP_LOC_PORT_ID),
     );
 
     let sys_names = sys_name_result.map_err(|e| format!("LLDP SysName walk failed: {}", e))?;
@@ -266,16 +269,47 @@ pub async fn discover_lldp_neighbors(
     let port_descs = port_desc_result.unwrap_or_default();
     let sys_descs = sys_desc_result.unwrap_or_default();
     let man_addrs = man_addr_result.unwrap_or_default();
-    let loc_ports = loc_port_result.unwrap_or_default();
-    let loc_port_ids = loc_port_id_result.unwrap_or_default();
 
-    // Build lookup maps
+    // Build remote-table lookup maps
     let sys_name_map = build_walk_map(&sys_names, LLDP_REM_SYS_NAME);
     let port_id_map = build_walk_map(&port_ids, LLDP_REM_PORT_ID);
     let port_desc_map = build_walk_map(&port_descs, LLDP_REM_PORT_DESC);
     let sys_desc_map = build_walk_map(&sys_descs, LLDP_REM_SYS_DESC);
-    let loc_port_map = build_walk_map(&loc_ports, LLDP_LOC_PORT_DESC);
-    let loc_port_id_map = build_walk_map(&loc_port_ids, LLDP_LOC_PORT_ID);
+
+    // Targeted GET for local-port info, ONLY for ports that have a neighbor.
+    // Each REM_SYS_NAME suffix is `timeMark.lldpRemLocalPortNum.remIndex`;
+    // the middle component is the local port number we need to look up.
+    let mut local_ports: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for suffix in sys_name_map.keys() {
+        if let Some(p) = lldp_local_port_num(suffix) {
+            local_ports.insert(p);
+        }
+    }
+    let mut loc_oids: Vec<String> = Vec::with_capacity(local_ports.len() * 2);
+    for p in &local_ports {
+        loc_oids.push(format!("{}.{}", LLDP_LOC_PORT_ID, p));
+        loc_oids.push(format!("{}.{}", LLDP_LOC_PORT_DESC, p));
+    }
+    let loc_port_id_map: HashMap<String, SnmpValue>;
+    let loc_port_map: HashMap<String, SnmpValue>;
+    if loc_oids.is_empty() {
+        loc_port_id_map = HashMap::new();
+        loc_port_map = HashMap::new();
+    } else {
+        let oid_refs: Vec<&str> = loc_oids.iter().map(|s| s.as_str()).collect();
+        match snmp::snmp_get(dest, community, &oid_refs).await {
+            Ok(entries) => {
+                let pairs: Vec<(String, SnmpValue)> = entries.into_iter().map(|e| (e.oid, e.value)).collect();
+                loc_port_id_map = build_walk_map(&pairs, LLDP_LOC_PORT_ID);
+                loc_port_map = build_walk_map(&pairs, LLDP_LOC_PORT_DESC);
+            }
+            Err(e) => {
+                tracing::debug!("LLDP local-port batch GET failed on {}: {} — proceeding with port number only", host, e);
+                loc_port_id_map = HashMap::new();
+                loc_port_map = HashMap::new();
+            }
+        }
+    }
 
     // Collect unique neighbor keys from sys_name entries
     let mut neighbors = Vec::new();
