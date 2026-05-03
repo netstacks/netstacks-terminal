@@ -11,6 +11,11 @@ interface InterfaceSnmpQuickLookProps {
   interfaceName: string
   deviceHost: string
   profileId: string
+  /** Jump configured for the parent session, if any. When set, SNMP queries
+   *  route through the bastion (net-snmp CLI on the jump host) instead of
+   *  going direct over UDP. Mutually exclusive — at most one. */
+  jumpHostId?: string | null
+  jumpSessionId?: string | null
   deviceId?: string
   position: { x: number; y: number }
   onClose: () => void
@@ -87,6 +92,8 @@ export default function InterfaceSnmpQuickLook({
   interfaceName,
   deviceHost,
   profileId,
+  jumpHostId,
+  jumpSessionId,
   deviceId,
   position,
   onClose,
@@ -121,10 +128,16 @@ export default function InterfaceSnmpQuickLook({
     const stats = await snmpTryInterfaceStats(
       isEnterprise
         ? { deviceId, interfaceName }
-        : { host: deviceHost, profileId, interfaceName }
+        : {
+            host: deviceHost,
+            profileId,
+            interfaceName,
+            jump_host_id: jumpHostId,
+            jump_session_id: jumpSessionId,
+          }
     )
     return { stats, timestamp: Date.now() }
-  }, [deviceHost, profileId, interfaceName, isEnterprise, deviceId])
+  }, [deviceHost, profileId, interfaceName, isEnterprise, deviceId, jumpHostId, jumpSessionId])
 
   // Start the two-sample cycle
   const startPolling = useCallback(async () => {

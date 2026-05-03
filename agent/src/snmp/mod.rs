@@ -40,10 +40,6 @@ pub enum SnmpDest {
         host: String,
         port: u16,
     },
-    // Constructed by tests in this commit and by api.rs handlers in the
-    // next commit (T3 — API + frontend wiring). Without that wiring there
-    // is no production caller in release builds, hence the allow.
-    #[allow(dead_code)]
     ViaJump {
         /// SSH connection target — the jump host. Includes its auth.
         jump: crate::ssh::SshConfig,

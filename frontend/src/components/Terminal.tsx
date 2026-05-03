@@ -244,6 +244,10 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
   } | null>(null)
   const sessionHostRef = useRef<string>('')
   const sessionProfileIdRef = useRef<string>('')
+  // Jump configured for THIS session — propagated to SNMP requests so
+  // they go through the bastion when the device isn't directly reachable.
+  const sessionJumpHostIdRef = useRef<string | null>(null)
+  const sessionJumpSessionIdRef = useRef<string | null>(null)
 
   // Terminal instance state for useDetection hook
   const [terminalInstance, setTerminalInstance] = useState<XTerm | null>(null)
@@ -361,6 +365,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
         // Store session host and profile_id for SNMP Quick-Look
         sessionHostRef.current = session.host
         sessionProfileIdRef.current = session.profile_id || ''
+        sessionJumpHostIdRef.current = session.jump_host_id ?? null
+        sessionJumpSessionIdRef.current = session.jump_session_id ?? null
       } catch (err) {
         console.debug('Could not fetch session metadata:', err)
       }
@@ -3320,6 +3326,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
           interfaceName={snmpQuickLook.interfaceName}
           deviceHost={sessionHostRef.current}
           profileId={sessionProfileIdRef.current}
+          jumpHostId={sessionJumpHostIdRef.current}
+          jumpSessionId={sessionJumpSessionIdRef.current}
           position={snmpQuickLook.position}
           onClose={() => setSnmpQuickLook(null)}
         />

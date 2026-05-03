@@ -6967,6 +6967,19 @@ pub async fn analyze_mop_execution(
 
 // === SNMP Endpoints ===
 
+/// Optional jump-host fields shared by every SNMP request type. Setting
+/// either field routes the SNMP query through that jump (running net-snmp
+/// CLI tools on the bastion) instead of going direct over UDP. Mutually
+/// exclusive — set at most one. See `build_snmp_dest`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SnmpJumpRef {
+    #[serde(default)]
+    pub jump_host_id: Option<String>,
+    #[serde(default)]
+    pub jump_session_id: Option<String>,
+}
+
 /// SNMP GET request body
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -6975,6 +6988,8 @@ pub struct SnmpGetRequest {
     pub port: Option<u16>,
     pub community: String,
     pub oids: Vec<String>,
+    #[serde(default, flatten)]
+    pub jump: SnmpJumpRef,
 }
 
 /// SNMP WALK request body
@@ -6985,6 +7000,8 @@ pub struct SnmpWalkRequest {
     pub port: Option<u16>,
     pub community: String,
     pub root_oid: String,
+    #[serde(default, flatten)]
+    pub jump: SnmpJumpRef,
 }
 
 /// SNMP try-communities request body
@@ -6994,6 +7011,8 @@ pub struct SnmpTryCommunityRequest {
     pub host: String,
     pub port: Option<u16>,
     pub profile_id: String,
+    #[serde(default, flatten)]
+    pub jump: SnmpJumpRef,
 }
 
 /// SNMP GET response (wraps SnmpValueEntry list)
@@ -7058,6 +7077,104 @@ fn snmp_error_to_api_error(err: crate::snmp::SnmpError) -> ApiError {
     }
 }
 
+/// Build a `SnmpDest` from a request's optional jump fields.
+///
+/// - Both jump_host_id and jump_session_id unset → `Direct`.
+/// - One set → resolves the jump (loads its profile + vault credential)
+///   and returns `ViaJump` with the SshConfig the cli_exec layer needs.
+/// - Both set → 400 Bad Request (mutual exclusion).
+async fn build_snmp_dest(
+    state: &Arc<AppState>,
+    host: &str,
+    port: u16,
+    jump: &SnmpJumpRef,
+) -> Result<crate::snmp::SnmpDest, Response> {
+    if jump.jump_host_id.is_some() && jump.jump_session_id.is_some() {
+        let api_err = ApiError {
+            error: "jump_host_id and jump_session_id are mutually exclusive — set at most one".into(),
+            code: "VALIDATION".into(),
+        };
+        return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
+    }
+
+    let jump_ref = crate::ws::JumpRef::from_pair(
+        jump.jump_host_id.as_deref(),
+        jump.jump_session_id.as_deref(),
+    );
+
+    let resolution = crate::ws::resolve_effective_jump(
+        jump_ref,
+        crate::ws::JumpRef::None,
+        &state.provider,
+    )
+    .await
+    .map_err(|e| {
+        let api_err = ApiError {
+            error: format!("Failed to resolve jump: {}", e),
+            code: "VALIDATION".into(),
+        };
+        (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
+    })?;
+
+    let Some(r) = resolution else {
+        return Ok(crate::snmp::SnmpDest::direct(host, port));
+    };
+
+    // Translate the JumpResolution's profile + credential into the SshAuth
+    // shape russh wants. Errors here are user-actionable (missing creds in
+    // the vault) so they surface with descriptive 400 messages.
+    let auth = match r.profile.auth_type {
+        crate::models::AuthType::Password => {
+            let password = r
+                .credential
+                .as_ref()
+                .and_then(|c| c.password.clone())
+                .ok_or_else(|| {
+                    let api_err = ApiError {
+                        error: format!(
+                            "Jump '{}' has no stored password (profile '{}'). \
+                             Configure credentials in profile settings.",
+                            r.source.display_name(),
+                            r.profile.name
+                        ),
+                        code: "VALIDATION".into(),
+                    };
+                    (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
+                })?;
+            crate::ssh::SshAuth::Password(password)
+        }
+        crate::models::AuthType::Key => {
+            let path = r.profile.key_path.clone().ok_or_else(|| {
+                let api_err = ApiError {
+                    error: format!(
+                        "Jump '{}' (profile '{}') has no SSH key path configured.",
+                        r.source.display_name(),
+                        r.profile.name
+                    ),
+                    code: "VALIDATION".into(),
+                };
+                (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
+            })?;
+            let passphrase = r.credential.as_ref().and_then(|c| c.key_passphrase.clone());
+            crate::ssh::SshAuth::KeyFile { path, passphrase }
+        }
+    };
+
+    let jump_cfg = crate::ssh::SshConfig {
+        host: r.host.clone(),
+        port: r.port,
+        username: r.profile.username.clone(),
+        auth,
+        legacy_ssh: false,
+    };
+
+    Ok(crate::snmp::SnmpDest::ViaJump {
+        jump: jump_cfg,
+        target_host: host.to_string(),
+        target_port: port,
+    })
+}
+
 /// Custom IntoResponse for SNMP ApiError that maps codes to HTTP status
 impl ApiError {
     fn snmp_status(&self) -> StatusCode {
@@ -7079,7 +7196,7 @@ impl ApiError {
 ///
 /// POST /api/snmp/get
 pub async fn snmp_get(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<SnmpGetRequest>,
 ) -> Result<Json<SnmpGetApiResponse>, Response> {
     let port = req.port.unwrap_or(161);
@@ -7087,7 +7204,7 @@ pub async fn snmp_get(
     tracing::info!("SNMP GET {}:{} OIDs: {:?}", req.host, port, req.oids);
 
     let oid_refs: Vec<&str> = req.oids.iter().map(|s| s.as_str()).collect();
-    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
     let values = crate::snmp::snmp_get(&dest, &req.community, &oid_refs)
         .await
         .map_err(|e| {
@@ -7103,14 +7220,14 @@ pub async fn snmp_get(
 ///
 /// POST /api/snmp/walk
 pub async fn snmp_walk(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<SnmpWalkRequest>,
 ) -> Result<Json<SnmpWalkApiResponse>, Response> {
     let port = req.port.unwrap_or(161);
 
     tracing::info!("SNMP WALK {}:{} root: {}", req.host, port, req.root_oid);
 
-    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
     let walk_results = crate::snmp::snmp_walk(&dest, &req.community, &req.root_oid)
         .await
         .map_err(|e| {
@@ -7208,7 +7325,7 @@ pub async fn snmp_try_communities(
         return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
     }
 
-    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
     let result = crate::snmp::try_communities(&dest, &communities)
         .await
         .map_err(|e| {
@@ -7233,6 +7350,8 @@ pub struct SnmpInterfaceStatsRequest {
     pub port: Option<u16>,
     pub community: String,
     pub interface_name: String,
+    #[serde(default, flatten)]
+    pub jump: SnmpJumpRef,
 }
 
 /// SNMP interface stats request body (using profile vault for community)
@@ -7243,6 +7362,8 @@ pub struct SnmpTryInterfaceStatsRequest {
     pub port: Option<u16>,
     pub profile_id: String,
     pub interface_name: String,
+    #[serde(default, flatten)]
+    pub jump: SnmpJumpRef,
 }
 
 /// SNMP interface stats response
@@ -7341,7 +7462,7 @@ fn interface_stats_to_response(stats: crate::snmp::InterfaceStats) -> SnmpInterf
 ///
 /// POST /api/snmp/interface-stats
 pub async fn snmp_interface_stats(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<SnmpInterfaceStatsRequest>,
 ) -> Result<Json<SnmpInterfaceStatsResponse>, Response> {
     let port = req.port.unwrap_or(161);
@@ -7351,7 +7472,7 @@ pub async fn snmp_interface_stats(
         req.host, port, req.interface_name
     );
 
-    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
     let stats = crate::snmp::snmp_interface_stats(&dest, &req.community, &req.interface_name)
         .await
         .map_err(|e| {
@@ -7427,7 +7548,7 @@ pub async fn snmp_try_interface_stats(
         communities.len(), req.host, port, req.interface_name
     );
     let mut last_error: Option<crate::snmp::SnmpError> = None;
-    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
     for community in &communities {
         match crate::snmp::snmp_interface_stats(&dest, community, &req.interface_name).await {
             Ok(stats) => {

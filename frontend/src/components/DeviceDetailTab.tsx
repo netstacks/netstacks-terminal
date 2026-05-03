@@ -57,6 +57,11 @@ interface DeviceDetailTabProps {
   host?: string;
   /** Profile ID for SNMP community resolution */
   profileId?: string;
+  /** Optional jump for SNMP queries — set when the device sits behind a
+   *  bastion. Mutually exclusive (one or neither). The agent runs net-snmp
+   *  CLI tools on the jump instead of going direct over UDP. */
+  jumpHostId?: string | null;
+  jumpSessionId?: string | null;
   /** Enterprise mode device UUID */
   deviceId?: string;
   /** Open terminal handler */
@@ -340,6 +345,8 @@ export default function DeviceDetailTab({
   sessionId,
   host,
   profileId,
+  jumpHostId,
+  jumpSessionId,
   deviceId,
   onOpenTerminal,
 }: DeviceDetailTabProps) {
@@ -511,7 +518,7 @@ export default function DeviceDetailTab({
       setPollState('sample1');
       let community = cachedCommunity;
       if (!community) {
-        const tryResult = await snmpTryCommunities(isEnterprise ? { deviceId } : { host, profileId });
+        const tryResult = await snmpTryCommunities(isEnterprise ? { deviceId } : { host, profileId, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         if (cancelledRef.current) return;
         community = tryResult.community;
         setCachedCommunity(community);
@@ -526,7 +533,7 @@ export default function DeviceDetailTab({
         '1.3.6.1.2.1.1.6.0',  // sysLocation
       ];
       try {
-        const sysResult = await snmpGet(isEnterprise ? { deviceId, oids: systemOids } : { host, community, oids: systemOids });
+        const sysResult = await snmpGet(isEnterprise ? { deviceId, oids: systemOids } : { host, community, oids: systemOids, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         if (cancelledRef.current) return;
         const sysInfo: Record<string, string> = {};
         const oidLabels: Record<string, string> = {
@@ -569,7 +576,7 @@ export default function DeviceDetailTab({
       try {
         const resources: SnmpResources = {};
         const snmpReq = (rootOid: string) =>
-          snmpWalk(isEnterprise ? { deviceId, rootOid } : { host, community, rootOid });
+          snmpWalk(isEnterprise ? { deviceId, rootOid } : { host, community, rootOid, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         const extractNum = (v: unknown): number => {
           if (typeof v === 'object' && v !== null && 'value' in v) return Number((v as { value: unknown }).value);
           return Number(v);
@@ -767,7 +774,7 @@ export default function DeviceDetailTab({
       } else {
         // Discover interfaces via SNMP walk
         if (cancelledRef.current) return;
-        const walkResult = await snmpWalk(isEnterprise ? { deviceId, rootOid: '1.3.6.1.2.1.2.2.1.2' } : { host, community, rootOid: '1.3.6.1.2.1.2.2.1.2' });
+        const walkResult = await snmpWalk(isEnterprise ? { deviceId, rootOid: '1.3.6.1.2.1.2.2.1.2' } : { host, community, rootOid: '1.3.6.1.2.1.2.2.1.2', jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         if (cancelledRef.current) return;
         ifaceNames = walkResult.entries
           .map(e => {
@@ -788,7 +795,7 @@ export default function DeviceDetailTab({
       setPollState('sample1');
       const sample1Results = await Promise.allSettled(
         ifaceNames.map(name =>
-          snmpTryInterfaceStats(isEnterprise ? { deviceId, interfaceName: name } : { host, profileId, interfaceName: name })
+          snmpTryInterfaceStats(isEnterprise ? { deviceId, interfaceName: name } : { host, profileId, interfaceName: name, jump_host_id: jumpHostId, jump_session_id: jumpSessionId })
         )
       );
       if (cancelledRef.current) return;
@@ -830,7 +837,7 @@ export default function DeviceDetailTab({
       const namesToPoll = ifaceNames.filter(name => sample1Map.has(name));
       const sample2Results = await Promise.allSettled(
         namesToPoll.map(name =>
-          snmpTryInterfaceStats(isEnterprise ? { deviceId, interfaceName: name } : { host, profileId, interfaceName: name })
+          snmpTryInterfaceStats(isEnterprise ? { deviceId, interfaceName: name } : { host, profileId, interfaceName: name, jump_host_id: jumpHostId, jump_session_id: jumpSessionId })
         )
       );
       if (cancelledRef.current) return;

@@ -4,8 +4,19 @@ import { getClient, getCurrentMode } from './client';
 
 // === Request Types ===
 
+/**
+ * Optional jump-host fields. Set at most one — backend rejects both.
+ * When set, the agent runs net-snmp CLI tools on the jump (over SSH)
+ * instead of going direct over UDP. Required for devices reachable only
+ * via a bastion (since SSH only forwards TCP and SNMP is UDP).
+ */
+export interface SnmpJumpRef {
+  jump_host_id?: string | null;
+  jump_session_id?: string | null;
+}
+
 /** SNMP GET request */
-export interface SnmpGetRequest {
+export interface SnmpGetRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   community?: string;
@@ -17,7 +28,7 @@ export interface SnmpGetRequest {
 }
 
 /** SNMP WALK request */
-export interface SnmpWalkRequest {
+export interface SnmpWalkRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   community?: string;
@@ -29,7 +40,7 @@ export interface SnmpWalkRequest {
 }
 
 /** SNMP try-communities request */
-export interface SnmpTryCommunityRequest {
+export interface SnmpTryCommunityRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   profileId?: string;
@@ -96,7 +107,7 @@ export interface SnmpInterfaceStatsResponse {
 }
 
 /** SNMP interface stats request (explicit community) */
-export interface SnmpInterfaceStatsRequest {
+export interface SnmpInterfaceStatsRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   community?: string;
@@ -108,7 +119,7 @@ export interface SnmpInterfaceStatsRequest {
 }
 
 /** SNMP try-interface-stats request (vault community resolution) */
-export interface SnmpTryInterfaceStatsRequest {
+export interface SnmpTryInterfaceStatsRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   profileId?: string;
@@ -140,6 +151,8 @@ export async function snmpGet(req: SnmpGetRequest): Promise<SnmpGetResponse> {
       community: req.community,
       oids: req.oids,
       port: req.port,
+      jump_host_id: req.jump_host_id,
+      jump_session_id: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -166,6 +179,8 @@ export async function snmpWalk(req: SnmpWalkRequest): Promise<SnmpWalkResponse> 
       community: req.community,
       rootOid: req.rootOid,
       port: req.port,
+      jump_host_id: req.jump_host_id,
+      jump_session_id: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -191,6 +206,8 @@ export async function snmpTryCommunities(req: SnmpTryCommunityRequest): Promise<
       host: req.host,
       profileId: req.profileId,
       port: req.port,
+      jump_host_id: req.jump_host_id,
+      jump_session_id: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -218,6 +235,8 @@ export async function snmpInterfaceStats(req: SnmpInterfaceStatsRequest): Promis
       community: req.community,
       interfaceName: req.interfaceName,
       port: req.port,
+      jump_host_id: req.jump_host_id,
+      jump_session_id: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -245,6 +264,8 @@ export async function snmpTryInterfaceStats(req: SnmpTryInterfaceStatsRequest): 
       profileId: req.profileId,
       interfaceName: req.interfaceName,
       port: req.port,
+      jump_host_id: req.jump_host_id,
+      jump_session_id: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {

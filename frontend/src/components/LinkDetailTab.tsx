@@ -46,6 +46,12 @@ interface LinkDetailTabProps {
   sourceDeviceId?: string;
   /** Target device ID for enterprise mode SNMP polling */
   targetDeviceId?: string;
+  /** Optional jump for the source device's SNMP queries (one of these or
+   *  neither — backend rejects both set). Same for target. */
+  sourceJumpHostId?: string | null;
+  sourceJumpSessionId?: string | null;
+  targetJumpHostId?: string | null;
+  targetJumpSessionId?: string | null;
 }
 
 // SNMP polling state machine
@@ -725,6 +731,10 @@ export default function LinkDetailTab({
   sourceHost,
   targetHost,
   profileId,
+  sourceJumpHostId,
+  sourceJumpSessionId,
+  targetJumpHostId,
+  targetJumpSessionId,
   sourceInterfaceName,
   targetInterfaceName,
   sourceDeviceId,
@@ -814,7 +824,7 @@ export default function LinkDetailTab({
         sample1Promises.push(snmpTryInterfaceStats(
           isEnterprise
             ? { deviceId: sourceDeviceId, interfaceName: srcIfName! }
-            : { host: sourceHost!, profileId, interfaceName: srcIfName! }
+            : { host: sourceHost!, profileId, interfaceName: srcIfName!, jump_host_id: sourceJumpHostId, jump_session_id: sourceJumpSessionId }
         ));
         endpointKeys.push('source');
       }
@@ -822,7 +832,7 @@ export default function LinkDetailTab({
         sample1Promises.push(snmpTryInterfaceStats(
           isEnterprise
             ? { deviceId: targetDeviceId, interfaceName: dstIfName! }
-            : { host: targetHost!, profileId, interfaceName: dstIfName! }
+            : { host: targetHost!, profileId, interfaceName: dstIfName!, jump_host_id: targetJumpHostId, jump_session_id: targetJumpSessionId }
         ));
         endpointKeys.push('target');
       }
@@ -871,7 +881,7 @@ export default function LinkDetailTab({
         sample2Promises.push(snmpTryInterfaceStats(
           isEnterprise
             ? { deviceId: sourceDeviceId, interfaceName: srcIfName! }
-            : { host: sourceHost!, profileId, interfaceName: srcIfName! }
+            : { host: sourceHost!, profileId, interfaceName: srcIfName!, jump_host_id: sourceJumpHostId, jump_session_id: sourceJumpSessionId }
         ));
         sample2Keys.push('source');
       }
@@ -879,7 +889,7 @@ export default function LinkDetailTab({
         sample2Promises.push(snmpTryInterfaceStats(
           isEnterprise
             ? { deviceId: targetDeviceId, interfaceName: dstIfName! }
-            : { host: targetHost!, profileId, interfaceName: dstIfName! }
+            : { host: targetHost!, profileId, interfaceName: dstIfName!, jump_host_id: targetJumpHostId, jump_session_id: targetJumpSessionId }
         ));
         sample2Keys.push('target');
       }
