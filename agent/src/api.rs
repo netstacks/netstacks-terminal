@@ -7089,6 +7089,14 @@ async fn build_snmp_dest(
     port: u16,
     jump: &SnmpJumpRef,
 ) -> Result<crate::snmp::SnmpDest, Response> {
+    // DIAG (snmp-via-jump): show what request fields the handler received
+    // so we can tell whether the jump is missing because the frontend
+    // didn't send it, vs. because resolution returned None.
+    tracing::info!(
+        "build_snmp_dest: target={}:{} jump_host_id={:?} jump_session_id={:?}",
+        host, port, jump.jump_host_id, jump.jump_session_id
+    );
+
     if jump.jump_host_id.is_some() && jump.jump_session_id.is_some() {
         let api_err = ApiError {
             error: "jump_host_id and jump_session_id are mutually exclusive — set at most one".into(),
@@ -7117,8 +7125,16 @@ async fn build_snmp_dest(
     })?;
 
     let Some(r) = resolution else {
+        tracing::info!(
+            "build_snmp_dest: no jump resolved → SnmpDest::Direct({}:{})",
+            host, port
+        );
         return Ok(crate::snmp::SnmpDest::direct(host, port));
     };
+    tracing::info!(
+        "build_snmp_dest: resolved jump → SnmpDest::ViaJump (jump='{}' at {}:{}, target={}:{})",
+        r.source.display_name(), r.host, r.port, host, port
+    );
 
     // Translate the JumpResolution's profile + credential into the SshAuth
     // shape russh wants. Errors here are user-actionable (missing creds in
