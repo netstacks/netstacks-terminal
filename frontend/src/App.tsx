@@ -5192,7 +5192,10 @@ def main(command: str = "show version"):
         />
       )
     } else if (tab.type === 'device-detail' && tab.deviceName) {
-      // Device detail tab - shows full device enrichment
+      // Device detail tab - shows full device enrichment.
+      // Pull jump info from the device's session so SNMP queries route
+      // through the configured bastion when the device sits behind one.
+      const deviceSession = tab.deviceSessionId ? chipSessionsById.get(tab.deviceSessionId) : undefined;
       return (
         <DeviceDetailTab
           deviceName={tab.deviceName}
@@ -5200,6 +5203,8 @@ def main(command: str = "show version"):
           sessionId={tab.deviceSessionId}
           host={tab.deviceHost}
           profileId={tab.deviceProfileId || profiles[0]?.id}
+          jumpHostId={deviceSession?.jump_host_id ?? null}
+          jumpSessionId={deviceSession?.jump_session_id ?? null}
           deviceId={tab.deviceId}
           enrichment={tab.deviceSessionId ? (() => {
             // Look up enrichment by matching sessionId field to tab's deviceSessionId
