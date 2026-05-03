@@ -606,7 +606,17 @@ function SessionSettingsDialog({
                     value={jumpHostId || ''}
                     onChange={(e) => setJumpHostId(e.target.value || null)}
                   >
-                    <option value="">No jump host (direct connection)</option>
+                    {(() => {
+                      const inheritedId = selectedProfile?.jump_host_id ?? null;
+                      const inheritedName = inheritedId
+                        ? jumpHosts.find((j) => j.id === inheritedId)?.name ?? '(deleted)'
+                        : 'direct';
+                      return (
+                        <option value="">
+                          {`Inherit from profile (${inheritedName})`}
+                        </option>
+                      );
+                    })()}
                     {jumpHosts.map((jh) => {
                       const jumpProfile = profiles.find(p => p.id === jh.profile_id);
                       return (
@@ -617,7 +627,9 @@ function SessionSettingsDialog({
                     })}
                   </select>
                   <span className="form-hint">
-                    Configure jump hosts in Settings &gt; Jump Hosts.
+                    By default the session inherits the jump host configured on its profile.
+                    Pick a different one here to override. Configure jump hosts in
+                    Settings &gt; Jump Hosts.
                   </span>
                 </div>
               </div>}
