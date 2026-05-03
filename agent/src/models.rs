@@ -849,6 +849,23 @@ pub struct ProfileCredential {
     pub snmp_communities: Option<Vec<String>>,
 }
 
+/// Reference to a single artifact (session/tunnel/profile) that uses
+/// some other session as its jump endpoint. Used by the dependents endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpDependentRef {
+    pub id: String,
+    pub name: String,
+}
+
+/// All artifacts that depend on a given session as their jump endpoint.
+/// Returned by `GET /api/sessions/:id/jump-dependents`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpDependents {
+    pub sessions: Vec<JumpDependentRef>,
+    pub tunnels: Vec<JumpDependentRef>,
+    pub profiles: Vec<JumpDependentRef>,
+}
+
 // === Jump Hosts (Global Proxy Configuration) ===
 
 /// Jump host configuration for SSH proxy connections

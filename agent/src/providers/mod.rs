@@ -59,6 +59,14 @@ pub trait DataProvider: Send + Sync {
     /// Update last connected timestamp
     async fn _touch_session(&self, id: &str) -> Result<(), ProviderError>;
 
+    /// Find every session/tunnel/profile that uses the given session as
+    /// its `jump_session_id`. Used by the SessionSettingsDialog to render
+    /// a "Used as jump by N" hint and (future) gate session deletion.
+    async fn find_session_jump_dependents(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::models::JumpDependents, ProviderError>;
+
     // === Folders ===
 
     /// List all folders

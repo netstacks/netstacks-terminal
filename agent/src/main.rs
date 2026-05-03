@@ -429,6 +429,10 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/sessions/bulk-delete", post(api::bulk_delete_sessions))
         .route("/sessions/:id/move", put(api::move_session))
         .route(
+            "/sessions/:id/jump-dependents",
+            get(api::get_session_jump_dependents),
+        )
+        .route(
             "/sessions/:id",
             get(api::get_session)
                 .put(api::update_session)

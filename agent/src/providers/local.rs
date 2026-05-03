@@ -1728,6 +1728,48 @@ impl DataProvider for LocalDataProvider {
         Ok(())
     }
 
+    async fn find_session_jump_dependents(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::models::JumpDependents, ProviderError> {
+        let sessions: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name FROM sessions WHERE jump_session_id = ? AND id <> ? ORDER BY name"
+        )
+        .bind(session_id)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let tunnels: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name FROM tunnels WHERE jump_session_id = ? ORDER BY name"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let profiles: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name FROM credential_profiles WHERE jump_session_id = ? ORDER BY name"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let to_refs = |rows: Vec<(String, String)>| -> Vec<crate::models::JumpDependentRef> {
+            rows.into_iter()
+                .map(|(id, name)| crate::models::JumpDependentRef { id, name })
+                .collect()
+        };
+
+        Ok(crate::models::JumpDependents {
+            sessions: to_refs(sessions),
+            tunnels: to_refs(tunnels),
+            profiles: to_refs(profiles),
+        })
+    }
+
     // === Folders ===
 
     async fn list_folders(&self) -> Result<Vec<Folder>, ProviderError> {
@@ -7019,6 +7061,64 @@ mod tests {
         assert!(msg.contains("used as a jump"),
             "msg should explain symmetric block: {msg}");
         assert!(msg.contains("'B'"), "msg should name dependent session B: {msg}");
+    }
+
+    #[tokio::test]
+    async fn find_session_jump_dependents_lists_sessions_tunnels_profiles() {
+        let p = setup_provider().await;
+        let p_root = p.create_profile(ncp("root")).await.unwrap();
+        let root_session = p.create_session(nsess("root", &p_root.id)).await.unwrap();
+
+        // Two sessions use root as jump.
+        let p_a = p.create_profile(ncp("p_a")).await.unwrap();
+        let mut a = nsess("dep-A", &p_a.id);
+        a.jump_session_id = Some(root_session.id.clone());
+        let a = p.create_session(a).await.unwrap();
+
+        let p_b = p.create_profile(ncp("p_b")).await.unwrap();
+        let mut b = nsess("dep-B", &p_b.id);
+        b.jump_session_id = Some(root_session.id.clone());
+        let b = p.create_session(b).await.unwrap();
+
+        // A profile uses root as jump too.
+        let mut chain_prof = ncp("chain-prof");
+        chain_prof.jump_session_id = Some(root_session.id.clone());
+        let chain_prof = p.create_profile(chain_prof).await.unwrap();
+
+        // A tunnel uses root as jump.
+        let p_t = p.create_profile(ncp("p_t")).await.unwrap();
+        let new_tunnel = crate::models::NewTunnel {
+            name: "dep-T".into(),
+            host: "10.0.0.99".into(),
+            port: 22,
+            profile_id: p_t.id.clone(),
+            jump_host_id: None,
+            jump_session_id: Some(root_session.id.clone()),
+            forward_type: crate::models::PortForwardType::Local,
+            local_port: 8080,
+            bind_address: "127.0.0.1".into(),
+            remote_host: Some("10.10.10.10".into()),
+            remote_port: Some(80),
+            auto_start: false,
+            auto_reconnect: false,
+            max_retries: 0,
+        };
+        let t = crate::db::create_tunnel(p.get_pool(), new_tunnel).await.unwrap();
+
+        let deps = p.find_session_jump_dependents(&root_session.id).await.unwrap();
+
+        let session_ids: Vec<_> = deps.sessions.iter().map(|d| d.id.as_str()).collect();
+        assert!(session_ids.contains(&a.id.as_str()) && session_ids.contains(&b.id.as_str()),
+            "expected both A and B in session deps, got {session_ids:?}");
+        assert_eq!(deps.tunnels.len(), 1);
+        assert_eq!(deps.tunnels[0].id, t.id);
+        assert_eq!(deps.profiles.len(), 1);
+        assert_eq!(deps.profiles[0].id, chain_prof.id);
+
+        // No dependents on a fresh leaf.
+        let leaf = p.create_session(nsess("leaf", &p_root.id)).await.unwrap();
+        let deps = p.find_session_jump_dependents(&leaf.id).await.unwrap();
+        assert!(deps.sessions.is_empty() && deps.tunnels.is_empty() && deps.profiles.is_empty());
     }
 
     #[tokio::test]
