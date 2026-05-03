@@ -897,14 +897,20 @@ export default function LinkDetailTab({
       const sample2Results = await Promise.allSettled(sample2Promises);
       if (cancelledRef.current) return;
 
-      // Calculate rates for each endpoint
+      // Calculate rates for each endpoint. If sample 2 fails for an
+      // endpoint we still had a successful sample 1 for, surface the
+      // sample 1 stats so the user sees partial data instead of an
+      // empty "No Interface Data" view. The rate just won't render
+      // (it requires two samples). Common cause: one endpoint is a
+      // CDP-advertised loopback IP that isn't actually SNMP-reachable.
       const timestamp2 = Date.now();
       sample2Keys.forEach((key, i) => {
         const result = sample2Results[i];
         const s1 = sample1Map.get(key);
-        if (result.status === 'fulfilled' && s1) {
+        if (!s1) return; // defensive: sample2Keys is derived from sample1Map
+
+        if (result.status === 'fulfilled') {
           const s2 = result.value;
-          // Store raw SNMP stats for display
           if (key === 'source') setSourceSnmpStats(s2);
           else setDestSnmpStats(s2);
           const durationSec = (timestamp2 - s1.timestamp) / 1000;
@@ -915,12 +921,13 @@ export default function LinkDetailTab({
               inBps: (inOctetsDelta / durationSec) * 8,
               outBps: (outOctetsDelta / durationSec) * 8,
             };
-            if (key === 'source') {
-              setSourceLiveRate(rate);
-            } else {
-              setDestLiveRate(rate);
-            }
+            if (key === 'source') setSourceLiveRate(rate);
+            else setDestLiveRate(rate);
           }
+        } else {
+          // Sample 2 failed — degrade gracefully to the sample 1 snapshot.
+          if (key === 'source') setSourceSnmpStats(s1.stats);
+          else setDestSnmpStats(s1.stats);
         }
       });
 

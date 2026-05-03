@@ -223,6 +223,13 @@ export async function snmpTryCommunities(req: SnmpTryCommunityRequest): Promise<
   }
 }
 
+// Per-call timeout for interface-stats SNMP. Tighter than the client
+// default (30s) because LinkDetailTab fans these out to two endpoints
+// in parallel and one unreachable side blocks the whole tab. 15s
+// covers a slow via-jump pooled walk; anything beyond that almost
+// always means the endpoint isn't actually SNMP-reachable.
+const INTERFACE_STATS_TIMEOUT_MS = 15000;
+
 /**
  * Get SNMP interface stats using an explicit community string.
  */
@@ -233,7 +240,7 @@ export async function snmpInterfaceStats(req: SnmpInterfaceStatsRequest): Promis
       interfaceName: req.interfaceName,
       community: req.community,
       port: req.port,
-    });
+    }, { timeout: INTERFACE_STATS_TIMEOUT_MS });
     return data;
   }
   try {
@@ -245,7 +252,7 @@ export async function snmpInterfaceStats(req: SnmpInterfaceStatsRequest): Promis
       profileId: req.profileId,
       jump_host_id: req.jump_host_id,
       jump_session_id: req.jump_session_id,
-    });
+    }, { timeout: INTERFACE_STATS_TIMEOUT_MS });
     return data;
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string }; status?: number } };
@@ -263,7 +270,7 @@ export async function snmpTryInterfaceStats(req: SnmpTryInterfaceStatsRequest): 
       deviceId: req.deviceId,
       interfaceName: req.interfaceName,
       port: req.port,
-    });
+    }, { timeout: INTERFACE_STATS_TIMEOUT_MS });
     return data;
   }
   try {
@@ -274,7 +281,7 @@ export async function snmpTryInterfaceStats(req: SnmpTryInterfaceStatsRequest): 
       port: req.port,
       jump_host_id: req.jump_host_id,
       jump_session_id: req.jump_session_id,
-    });
+    }, { timeout: INTERFACE_STATS_TIMEOUT_MS });
     return data;
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string }; status?: number } };
