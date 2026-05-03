@@ -1595,4 +1595,81 @@ mod resolve_effective_jump_tests {
         assert!(err.contains("does-not-exist"), "msg should name the missing id: {err}");
         assert!(err.contains("no longer exists"), "msg should explain: {err}");
     }
+
+    /// End-to-end smoke test for the full jump-host bug fix:
+    /// - Profile-default jump host (no session-level override)
+    /// - Real DB + real vault with stored credentials
+    /// - resolve_effective_jump returns the right jump host AND its credential
+    ///
+    /// Pre-fix, the chain dropped the device password entirely AND never
+    /// loaded the jump host's credential. This test exercises both halves.
+    #[tokio::test]
+    async fn end_to_end_profile_default_jump_with_vault_credentials() {
+        let provider = fresh_provider().await;
+        provider.set_master_password("test-password").await.unwrap();
+
+        // Set up the jump-host side: profile + JumpHost + stored vault credential.
+        let jump_profile = provider
+            .create_profile(np("bastion-creds", None))
+            .await
+            .unwrap();
+        provider
+            .store_profile_credential(
+                &jump_profile.id,
+                crate::models::ProfileCredential {
+                    password: Some("jump-secret".into()),
+                    key_passphrase: None,
+                    snmp_communities: None,
+                },
+            )
+            .await
+            .unwrap();
+        let jh = provider
+            .create_jump_host(crate::models::NewJumpHost {
+                name: "edge-bastion".into(),
+                host: "10.0.0.1".into(),
+                port: 22,
+                profile_id: jump_profile.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Set up the target side: profile with profile-level jump_host_id set.
+        let target_profile = provider
+            .create_profile(np("corp-routers", Some(jh.id.clone())))
+            .await
+            .unwrap();
+        provider
+            .store_profile_credential(
+                &target_profile.id,
+                crate::models::ProfileCredential {
+                    password: Some("device-secret".into()),
+                    key_passphrase: None,
+                    snmp_communities: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Resolve the effective jump for a session that has NO override
+        // (so it should inherit from the target profile).
+        let resolution = resolve_effective_jump(None, target_profile.jump_host_id.as_deref(), &provider)
+            .await
+            .unwrap()
+            .expect("profile-default jump should resolve");
+
+        // The resolved jump host matches what was configured on the profile.
+        assert_eq!(resolution.jump_host.id, jh.id);
+        assert_eq!(resolution.jump_host.name, "edge-bastion");
+        assert_eq!(resolution.jump_profile.username, "u");
+
+        // The bug fix: the jump credential is loaded from the vault and
+        // matches what was stored on the jump's profile.
+        let cred = resolution.jump_credential.expect("jump credential must be loaded");
+        assert_eq!(
+            cred.password.as_deref(),
+            Some("jump-secret"),
+            "jump host's own password must be loaded — pre-fix, this was never read"
+        );
+    }
 }
