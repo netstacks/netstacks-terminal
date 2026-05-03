@@ -3105,7 +3105,13 @@ def main(command: str = "show version"):
       // Fetch sessions to get host IPs and profile IDs for discovery
       const allSessions = await listSessions();
 
-      // Set up and open the discovery modal
+      // Set up and open the discovery modal.
+      // snmpProfileId MUST come from the session's own profile, not the
+      // first profile in the user's list. The previous `profiles[0]?.id`
+      // was a copy-paste bug that pinned every discovery target to the
+      // alphabetically-first profile, silently inheriting THAT profile's
+      // jump_host_id even though the session itself used a different
+      // profile with no jump.
       setDiscoveryGroupName(group.name);
       setDiscoveryDevices(groupTabs.map(t => {
         const session = allSessions.find(s => s.id === t.sessionId);
@@ -3114,7 +3120,7 @@ def main(command: str = "show version"):
           tabId: t.id,
           ip: session?.host,
           profileId: session?.profile_id,
-          snmpProfileId: profiles[0]?.id,
+          snmpProfileId: session?.profile_id,
           cliFlavor: session?.cli_flavor,
         };
       }));
@@ -3678,7 +3684,8 @@ def main(command: str = "show version"):
     // Fetch sessions to get host IPs and profile IDs for discovery
     const allSessions = await listSessions()
 
-    // Set up and open the discovery modal
+    // Set up and open the discovery modal — see note in handleStartDiscovery
+    // above re: using session.profile_id, not profiles[0].
     setDiscoveryGroupName(group.name)
     setDiscoveryDevices(groupTabs.map(t => {
       const session = allSessions.find(s => s.id === t.sessionId)
@@ -3687,7 +3694,7 @@ def main(command: str = "show version"):
         tabId: t.id,
         ip: session?.host,
         profileId: session?.profile_id,
-        snmpProfileId: profiles[0]?.id,
+        snmpProfileId: session?.profile_id,
         cliFlavor: session?.cli_flavor,
       }
     }))
