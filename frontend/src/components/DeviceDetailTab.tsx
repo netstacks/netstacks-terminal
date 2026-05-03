@@ -24,6 +24,7 @@ import {
 } from '../lib/enrichmentHelpers';
 import { snmpTryInterfaceStats, snmpTryCommunities, snmpGet, snmpWalk, type SnmpInterfaceStatsResponse } from '../api/snmp';
 import { parseSysDescr } from '../lib/sysDescrParser';
+import { useEnrichment } from '../hooks/useEnrichment';
 import { getCurrentMode } from '../api/client';
 import { formatRate } from '../utils/formatRate';
 import { saveEnrichmentToDoc } from '../lib/enrichmentExport';
@@ -459,6 +460,11 @@ export default function DeviceDetailTab({
   const [discoveredInterfaces, setDiscoveredInterfaces] = useState<string[]>([]);
   const [cachedCommunity, setCachedCommunity] = useState<string | null>(null);
   const [snmpSystemInfo, setSnmpSystemInfo] = useState<Record<string, string>>({});
+  // Pull setDeviceEnrichment so a successful SNMP poll can hot-fill the
+  // EnrichmentContext cache. The runtime SNMP-host resolver in App.tsx
+  // depends on this to override stale CDP loopback IPs without requiring
+  // the user to re-run discovery.
+  const { setDeviceEnrichment } = useEnrichment();
   const [snmpInterfaceData, setSnmpInterfaceData] = useState<Map<string, SnmpInterfaceStatsResponse>>(new Map());
   const [lastPollTime, setLastPollTime] = useState<Date | null>(null);
   const [snmpSortField, setSnmpSortField] = useState<'name' | 'status' | 'speed' | 'inRate' | 'outRate' | 'errors' | 'discards'>('name');
@@ -531,6 +537,7 @@ export default function DeviceDetailTab({
         '1.3.6.1.2.1.1.2.0',  // sysObjectID
         '1.3.6.1.2.1.1.3.0',  // sysUpTime
         '1.3.6.1.2.1.1.4.0',  // sysContact
+        '1.3.6.1.2.1.1.5.0',  // sysName — needed to seed EnrichmentContext
         '1.3.6.1.2.1.1.6.0',  // sysLocation
       ];
       try {
@@ -542,6 +549,7 @@ export default function DeviceDetailTab({
           '1.3.6.1.2.1.1.2.0': 'System OID',
           '1.3.6.1.2.1.1.3.0': 'SNMP Uptime',
           '1.3.6.1.2.1.1.4.0': 'Contact',
+          '1.3.6.1.2.1.1.5.0': 'Hostname',
           '1.3.6.1.2.1.1.6.0': 'Location',
         };
         for (const entry of sysResult.values) {
@@ -566,6 +574,22 @@ export default function DeviceDetailTab({
           }
         }
         setSnmpSystemInfo(sysInfo);
+
+        // Seed EnrichmentContext so the session-IP-authoritative resolver
+        // in App.tsx can match this device's hostname against neighbor
+        // CDP refs from any other tab. Keyed by the database session UUID
+        // (sessionId prop) so chipSessionsById.get() in the resolver works.
+        if (sessionId) {
+          const parsed = parseSysDescr(sysInfo['Description']);
+          setDeviceEnrichment(sessionId, {
+            sessionId,
+            collectedAt: new Date().toISOString(),
+            hostname: sysInfo['Hostname'] || undefined,
+            vendor: parsed.vendor,
+            model: parsed.model,
+            osVersion: parsed.osVersion,
+          });
+        }
       } catch {
         // System MIB fetch is best-effort; don't block interface polling
       }

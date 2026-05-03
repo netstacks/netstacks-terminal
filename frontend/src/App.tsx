@@ -3708,12 +3708,19 @@ def main(command: str = "show version"):
     // user clicks a device — without waiting for the topology DB round-trip.
     // The persisted topology write below is the durable copy; this is the
     // in-memory cache the UI actually reads on render.
+    //
+    // IMPORTANT: key enrichments by the database session UUID (Tab.sessionId),
+    // not the Tab.id (`r.tabId`). chipSessionsById is keyed by session UUID,
+    // and the runtime SNMP-host resolver in App.tsx looks sessions up there
+    // — using Tab.id would silently make every override miss.
     for (const r of results) {
-      const sessionId = r.tabId;
-      if (!sessionId) continue;
+      if (!r.tabId) continue;
+      const tab = tabs.find(t => t.id === r.tabId);
+      const sessionUuid = tab?.sessionId;
+      if (!sessionUuid) continue;
       const parsed = parseSysDescr(r.sysDescr);
-      setDeviceEnrichment(sessionId, {
-        sessionId,
+      setDeviceEnrichment(sessionUuid, {
+        sessionId: sessionUuid,
         collectedAt: new Date().toISOString(),
         hostname: r.sysName || undefined,
         vendor: parsed.vendor,
