@@ -6990,6 +6990,10 @@ pub struct SnmpGetRequest {
     pub oids: Vec<String>,
     #[serde(default, flatten)]
     pub jump: SnmpJumpRef,
+    // Optional. When the request omits jump fields, the named profile's
+    // jump configuration is the fallback (mirrors `try-communities`).
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 /// SNMP WALK request body
@@ -7002,6 +7006,8 @@ pub struct SnmpWalkRequest {
     pub root_oid: String,
     #[serde(default, flatten)]
     pub jump: SnmpJumpRef,
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 /// SNMP try-communities request body
@@ -7088,15 +7094,10 @@ async fn build_snmp_dest(
     host: &str,
     port: u16,
     jump: &SnmpJumpRef,
+    // When set, profile's jump_host_id/jump_session_id is the fallback if the
+    // request didn't supply jump fields — same inheritance as the SSH path.
+    profile_id: Option<&str>,
 ) -> Result<crate::snmp::SnmpDest, Response> {
-    // DIAG (snmp-via-jump): show what request fields the handler received
-    // so we can tell whether the jump is missing because the frontend
-    // didn't send it, vs. because resolution returned None.
-    tracing::info!(
-        "build_snmp_dest: target={}:{} jump_host_id={:?} jump_session_id={:?}",
-        host, port, jump.jump_host_id, jump.jump_session_id
-    );
-
     if jump.jump_host_id.is_some() && jump.jump_session_id.is_some() {
         let api_err = ApiError {
             error: "jump_host_id and jump_session_id are mutually exclusive — set at most one".into(),
@@ -7105,14 +7106,39 @@ async fn build_snmp_dest(
         return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
     }
 
-    let jump_ref = crate::ws::JumpRef::from_pair(
+    let session_level = crate::ws::JumpRef::from_pair(
         jump.jump_host_id.as_deref(),
         jump.jump_session_id.as_deref(),
     );
 
+    // Profile-level fallback: if the caller named a profile and the
+    // session-level fields are unset, inherit from that profile's jump
+    // configuration. resolve_effective_jump prefers session_level when set.
+    let profile_level = if matches!(session_level, crate::ws::JumpRef::None) {
+        if let Some(pid) = profile_id {
+            match state.provider.get_profile(pid).await {
+                Ok(p) => crate::ws::JumpRef::from_pair(
+                    p.jump_host_id.as_deref(),
+                    p.jump_session_id.as_deref(),
+                ),
+                // Profile load failure isn't fatal — drop to Direct.
+                Err(_) => crate::ws::JumpRef::None,
+            }
+        } else {
+            crate::ws::JumpRef::None
+        }
+    } else {
+        crate::ws::JumpRef::None
+    };
+
+    tracing::info!(
+        "build_snmp_dest: target={}:{} req_jump_host={:?} req_jump_session={:?} profile={:?}",
+        host, port, jump.jump_host_id, jump.jump_session_id, profile_id
+    );
+
     let resolution = crate::ws::resolve_effective_jump(
-        jump_ref,
-        crate::ws::JumpRef::None,
+        session_level,
+        profile_level,
         &state.provider,
     )
     .await
@@ -7220,7 +7246,7 @@ pub async fn snmp_get(
     tracing::info!("SNMP GET {}:{} OIDs: {:?}", req.host, port, req.oids);
 
     let oid_refs: Vec<&str> = req.oids.iter().map(|s| s.as_str()).collect();
-    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump, req.profile_id.as_deref()).await?;
     let values = crate::snmp::snmp_get(&dest, &req.community, &oid_refs)
         .await
         .map_err(|e| {
@@ -7243,7 +7269,7 @@ pub async fn snmp_walk(
 
     tracing::info!("SNMP WALK {}:{} root: {}", req.host, port, req.root_oid);
 
-    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump, req.profile_id.as_deref()).await?;
     let walk_results = crate::snmp::snmp_walk(&dest, &req.community, &req.root_oid)
         .await
         .map_err(|e| {
@@ -7341,7 +7367,7 @@ pub async fn snmp_try_communities(
         return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
     }
 
-    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump, Some(&req.profile_id)).await?;
     let result = crate::snmp::try_communities(&dest, &communities)
         .await
         .map_err(|e| {
@@ -7368,6 +7394,8 @@ pub struct SnmpInterfaceStatsRequest {
     pub interface_name: String,
     #[serde(default, flatten)]
     pub jump: SnmpJumpRef,
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 /// SNMP interface stats request body (using profile vault for community)
@@ -7488,7 +7516,7 @@ pub async fn snmp_interface_stats(
         req.host, port, req.interface_name
     );
 
-    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump, req.profile_id.as_deref()).await?;
     let stats = crate::snmp::snmp_interface_stats(&dest, &req.community, &req.interface_name)
         .await
         .map_err(|e| {
@@ -7564,7 +7592,7 @@ pub async fn snmp_try_interface_stats(
         communities.len(), req.host, port, req.interface_name
     );
     let mut last_error: Option<crate::snmp::SnmpError> = None;
-    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump).await?;
+    let dest = build_snmp_dest(&state, req.host.as_str(), port, &req.jump, Some(&req.profile_id)).await?;
     for community in &communities {
         match crate::snmp::snmp_interface_stats(&dest, community, &req.interface_name).await {
             Ok(stats) => {

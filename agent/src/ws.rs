@@ -2024,6 +2024,7 @@ mod resolve_effective_jump_tests {
                     exit_status: 0,
                 })
             })),
+            eof_before_exit_status: false,
             host_key: ephemeral_ed25519(),
         })
         .await;

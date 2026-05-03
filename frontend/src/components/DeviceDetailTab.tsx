@@ -533,7 +533,7 @@ export default function DeviceDetailTab({
         '1.3.6.1.2.1.1.6.0',  // sysLocation
       ];
       try {
-        const sysResult = await snmpGet(isEnterprise ? { deviceId, oids: systemOids } : { host, community, oids: systemOids, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
+        const sysResult = await snmpGet(isEnterprise ? { deviceId, oids: systemOids } : { host, community, oids: systemOids, profileId, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         if (cancelledRef.current) return;
         const sysInfo: Record<string, string> = {};
         const oidLabels: Record<string, string> = {
@@ -576,7 +576,7 @@ export default function DeviceDetailTab({
       try {
         const resources: SnmpResources = {};
         const snmpReq = (rootOid: string) =>
-          snmpWalk(isEnterprise ? { deviceId, rootOid } : { host, community, rootOid, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
+          snmpWalk(isEnterprise ? { deviceId, rootOid } : { host, community, rootOid, profileId, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         const extractNum = (v: unknown): number => {
           if (typeof v === 'object' && v !== null && 'value' in v) return Number((v as { value: unknown }).value);
           return Number(v);
@@ -774,7 +774,7 @@ export default function DeviceDetailTab({
       } else {
         // Discover interfaces via SNMP walk
         if (cancelledRef.current) return;
-        const walkResult = await snmpWalk(isEnterprise ? { deviceId, rootOid: '1.3.6.1.2.1.2.2.1.2' } : { host, community, rootOid: '1.3.6.1.2.1.2.2.1.2', jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
+        const walkResult = await snmpWalk(isEnterprise ? { deviceId, rootOid: '1.3.6.1.2.1.2.2.1.2' } : { host, community, rootOid: '1.3.6.1.2.1.2.2.1.2', profileId, jump_host_id: jumpHostId, jump_session_id: jumpSessionId });
         if (cancelledRef.current) return;
         ifaceNames = walkResult.entries
           .map(e => {

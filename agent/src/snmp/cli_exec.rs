@@ -15,7 +15,8 @@
 
 use super::cli_parse::parse_snmp_output;
 use super::{SnmpError, SnmpValue, SnmpValueEntry, SnmpTryCommunityResponse};
-use crate::ssh::{exec_on_remote, SshConfig};
+use crate::ssh::exec_pool::exec_on_remote_pooled;
+use crate::ssh::SshConfig;
 use std::time::Duration;
 
 /// Total timeout for a single via-jump SNMP call. Covers SSH handshake +
@@ -42,7 +43,7 @@ pub async fn snmp_get_via_jump(
     }
 
     let cmd = build_command("snmpget", community, target_host, target_port, oids);
-    let result = exec_on_remote(jump, &cmd, VIA_JUMP_TIMEOUT)
+    let result = exec_on_remote_pooled(jump, &cmd, VIA_JUMP_TIMEOUT)
         .await
         .map_err(map_ssh_error)?;
     interpret_exit(&result, jump, "snmpget")?;
@@ -60,7 +61,7 @@ pub async fn snmp_walk_via_jump(
     root_oid: &str,
 ) -> Result<Vec<(String, SnmpValue)>, SnmpError> {
     let cmd = build_command("snmpwalk", community, target_host, target_port, &[root_oid]);
-    let result = exec_on_remote(jump, &cmd, VIA_JUMP_TIMEOUT)
+    let result = exec_on_remote_pooled(jump, &cmd, VIA_JUMP_TIMEOUT)
         .await
         .map_err(map_ssh_error)?;
     interpret_exit(&result, jump, "snmpwalk")?;
@@ -165,6 +166,8 @@ fn interpret_exit(
     jump: &SshConfig,
     tool: &str,
 ) -> Result<(), SnmpError> {
+    use crate::ssh::ExecTermination;
+
     match result.exit_status {
         Some(0) => Ok(()),
         Some(127) => Err(SnmpError::Other(format!(
@@ -187,10 +190,35 @@ fn interpret_exit(
                 )))
             }
         }
-        None => Err(SnmpError::Other(format!(
-            "{tool} on jump '{}' closed without an exit status",
-            jump.host
-        ))),
+        None => {
+            // Augment with whatever stderr made it through and the actual
+            // termination reason — the bare "closed without exit status"
+            // tells you nothing about what to fix.
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            let stderr = stderr.trim();
+            let stderr_suffix = if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" (stderr: {})", stderr)
+            };
+            let msg = match &result.termination {
+                ExecTermination::ExecRequestRejected => format!(
+                    "{tool} exec rejected by sshd on jump '{}' — likely ForceCommand, \
+                     restricted shell, or no-shell user. Verify the jump user can run \
+                     `ssh {} {tool} -V` from a workstation.{}",
+                    jump.host, jump.host, stderr_suffix
+                ),
+                ExecTermination::KilledBySignal(detail) => format!(
+                    "{tool} on jump '{}' killed by signal {}{}",
+                    jump.host, detail, stderr_suffix
+                ),
+                ExecTermination::ClosedSilently | ExecTermination::Normal => format!(
+                    "{tool} on jump '{}' closed without an exit status{}",
+                    jump.host, stderr_suffix
+                ),
+            };
+            Err(SnmpError::Other(msg))
+        }
     }
 }
 
@@ -275,6 +303,7 @@ mod tests {
                     exit_status: 0,
                 })
             })),
+            eof_before_exit_status: false,
             host_key: ephemeral_ed25519(),
         })
         .await;
@@ -318,6 +347,7 @@ mod tests {
                 stderr: b"bash: snmpget: command not found\n".to_vec(),
                 exit_status: 127,
             }))),
+            eof_before_exit_status: false,
             host_key: ephemeral_ed25519(),
         })
         .await;

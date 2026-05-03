@@ -3,6 +3,7 @@
 pub mod host_keys;
 pub mod approvals;
 pub mod jump;
+pub mod exec_pool;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
@@ -992,68 +993,95 @@ where
 pub struct ExecResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// Exit status reported by the remote shell. `None` means the server
-    /// closed the channel without sending one (some servers do this for
-    /// signal-terminated processes); treat as failure.
+    /// Exit status reported by the remote shell. `None` means no
+    /// `ExitStatus` arrived; check `termination` for why.
     pub exit_status: Option<u32>,
+    /// Why the channel ended. Lets callers distinguish "rejected by sshd"
+    /// from "killed by signal" from "closed silently" — all of which look
+    /// the same in `exit_status` (None) but mean very different things.
+    pub termination: ExecTermination,
 }
 
-/// Open an SSH connection, exec a single command, drain stdout/stderr,
-/// capture exit status, disconnect. Programmatic primitive for callers
-/// that need the raw output + exit code (e.g. running net-snmp CLI tools
-/// on a jump host for SNMP-via-jump). For interactive UI command-running
-/// see `execute_command_on_session_with_approvals` instead.
-pub async fn exec_on_remote(
-    config: &SshConfig,
+/// How a remote exec ended, for cases where there's no clean exit status.
+#[derive(Debug, Clone)]
+pub enum ExecTermination {
+    /// Remote sent SSH_MSG_CHANNEL_REQUEST_SUCCESS for the exec and then a
+    /// normal `ExitStatus` (which the caller reads from `exit_status`).
+    Normal,
+    /// Remote sent `Failure` for the exec request — the command was never
+    /// run. Common causes: ForceCommand, restricted shell, no-shell user.
+    ExecRequestRejected,
+    /// Remote sent `ExitSignal` instead of `ExitStatus` — the process was
+    /// killed by a signal. The string is `"<signal>: <error_message>"`.
+    KilledBySignal(String),
+    /// Channel closed without `ExitStatus`, `ExitSignal`, or `Failure`.
+    /// Sometimes seen with abruptly-disconnected sessions or sshd bugs.
+    ClosedSilently,
+}
+
+/// Open one fresh exec channel on an already-authenticated handle, run
+/// `command`, drain stdout/stderr, and report exit status + termination
+/// reason. Used by the pooled `exec_pool::exec_on_remote_pooled` (the
+/// only production caller) so the channel-handling loop has exactly one
+/// source of truth. For interactive UI command-running see
+/// `execute_command_on_session_with_approvals` instead.
+pub(crate) async fn exec_on_handle(
+    handle: &client::Handle<ClientHandler>,
     command: &str,
-    timeout_total: Duration,
 ) -> Result<ExecResult, SshError> {
-    let result = tokio::time::timeout(timeout_total, async {
-        let handle = connect_and_authenticate(config, false).await?;
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| SshError::ChannelError(e.to_string()))?;
 
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .map_err(|e| SshError::ChannelError(e.to_string()))?;
 
-        channel
-            .exec(true, command.as_bytes())
-            .await
-            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_status: Option<u32> = None;
+    let mut termination = ExecTermination::ClosedSilently;
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_status: Option<u32> = None;
-
-        loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
-                Some(ChannelMsg::ExtendedData { data, ext }) => {
-                    if ext == 1 {
-                        stderr.extend_from_slice(&data);
-                    } else {
-                        stdout.extend_from_slice(&data);
-                    }
+    // Per RFC 4254 §6.10, `exit-status` is independent of `eof`/`close` and
+    // can arrive in any order. OpenSSH server commonly sends `eof` BEFORE
+    // `exit-status`, so we MUST NOT break on `eof` — we'd miss the status
+    // and surface a spurious "closed without an exit status" error. Break
+    // only on `close` or when the channel is fully drained (`None`). The
+    // outer caller's timeout protects against a server that never closes.
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+            Some(ChannelMsg::ExtendedData { data, ext }) => {
+                if ext == 1 {
+                    stderr.extend_from_slice(&data);
+                } else {
+                    stdout.extend_from_slice(&data);
                 }
-                Some(ChannelMsg::ExitStatus { exit_status: s }) => exit_status = Some(s),
-                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-                _ => {}
             }
+            Some(ChannelMsg::ExitStatus { exit_status: s }) => {
+                exit_status = Some(s);
+                termination = ExecTermination::Normal;
+            }
+            Some(ChannelMsg::ExitSignal { signal_name, error_message, .. }) => {
+                let detail = if error_message.is_empty() {
+                    format!("{:?}", signal_name)
+                } else {
+                    format!("{:?}: {}", signal_name, error_message)
+                };
+                termination = ExecTermination::KilledBySignal(detail);
+            }
+            Some(ChannelMsg::Failure) => {
+                termination = ExecTermination::ExecRequestRejected;
+            }
+            Some(ChannelMsg::Eof) => { /* no more data, but exit-status / close may still arrive */ }
+            Some(ChannelMsg::Close) | None => break,
+            _ => {}
         }
-
-        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
-        Ok::<ExecResult, SshError>(ExecResult { stdout, stderr, exit_status })
-    })
-    .await;
-
-    match result {
-        Ok(Ok(r)) => Ok(r),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(SshError::ConnectionFailed(format!(
-            "exec on {}:{} timed out after {}s",
-            config.host, config.port, timeout_total.as_secs()
-        ))),
     }
+
+    Ok(ExecResult { stdout, stderr, exit_status, termination })
 }
 
 /// Execute a command on a single session with timeout.
@@ -1748,8 +1776,14 @@ pub async fn execute_bulk_command(
 }
 
 #[cfg(test)]
-mod exec_on_remote_tests {
+mod exec_tests {
+    //! Behavior contracts for the exec channel-handling loop, exercised
+    //! through the production caller (`exec_on_remote_pooled`). Each test
+    //! uses a unique ephemeral test-server port, so the pool's per-key
+    //! mutex doesn't interleave them.
+
     use super::*;
+    use super::exec_pool::exec_on_remote_pooled;
     use super::test_utils::{
         ephemeral_ed25519, start_test_server, ExecResponse, TestServerConfig,
     };
@@ -1765,8 +1799,6 @@ mod exec_on_remote_tests {
         }
     }
 
-    /// Server that accepts password u/p and answers exec commands via the
-    /// supplied responder. Used by all 4 tests below.
     async fn server_with_responder(
         responder: impl Fn(&str) -> Option<ExecResponse> + Send + Sync + 'static,
     ) -> std::net::SocketAddr {
@@ -1775,13 +1807,14 @@ mod exec_on_remote_tests {
             accept_key_user: None,
             allow_direct_tcpip: false,
             exec_responder: Some(Arc::new(responder)),
+            eof_before_exit_status: false,
             host_key: ephemeral_ed25519(),
         })
         .await
     }
 
     #[tokio::test]
-    async fn exec_on_remote_captures_stdout_and_zero_exit() {
+    async fn captures_stdout_and_zero_exit() {
         let addr = server_with_responder(|cmd| {
             assert_eq!(cmd, "echo hello");
             Some(ExecResponse {
@@ -1792,7 +1825,7 @@ mod exec_on_remote_tests {
         })
         .await;
 
-        let r = exec_on_remote(&cfg(addr), "echo hello", Duration::from_secs(5))
+        let r = exec_on_remote_pooled(&cfg(addr), "echo hello", Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(r.stdout, b"hello\n");
@@ -1801,7 +1834,7 @@ mod exec_on_remote_tests {
     }
 
     #[tokio::test]
-    async fn exec_on_remote_propagates_nonzero_exit() {
+    async fn propagates_nonzero_exit() {
         let addr = server_with_responder(|_| Some(ExecResponse {
             stdout: vec![],
             stderr: vec![],
@@ -1809,14 +1842,14 @@ mod exec_on_remote_tests {
         }))
         .await;
 
-        let r = exec_on_remote(&cfg(addr), "false", Duration::from_secs(5))
+        let r = exec_on_remote_pooled(&cfg(addr), "false", Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(r.exit_status, Some(2));
     }
 
     #[tokio::test]
-    async fn exec_on_remote_captures_stderr_separately_from_stdout() {
+    async fn captures_stderr_separately_from_stdout() {
         let addr = server_with_responder(|_| Some(ExecResponse {
             stdout: b"out\n".to_vec(),
             stderr: b"err\n".to_vec(),
@@ -1824,7 +1857,7 @@ mod exec_on_remote_tests {
         }))
         .await;
 
-        let r = exec_on_remote(&cfg(addr), "noisy-cmd", Duration::from_secs(5))
+        let r = exec_on_remote_pooled(&cfg(addr), "noisy-cmd", Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(r.stdout, b"out\n");
@@ -1833,7 +1866,7 @@ mod exec_on_remote_tests {
     }
 
     #[tokio::test]
-    async fn exec_on_remote_reports_command_not_found_via_exit_127() {
+    async fn reports_command_not_found_via_exit_127() {
         // Mirror real shell behavior: missing command → stderr message + exit 127.
         // The SNMP-via-jump path uses this exit code to surface a clear
         // "snmpget not found on jump host" error.
@@ -1844,10 +1877,44 @@ mod exec_on_remote_tests {
         }))
         .await;
 
-        let r = exec_on_remote(&cfg(addr), "snmpget -v2c -c x 1.2.3.4 .1", Duration::from_secs(5))
+        let r = exec_on_remote_pooled(&cfg(addr), "snmpget -v2c -c x 1.2.3.4 .1", Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(r.exit_status, Some(127));
         assert!(String::from_utf8_lossy(&r.stderr).contains("not found"));
+    }
+
+    /// Regression test for the bug that produced "snmpget on jump 'X' closed
+    /// without an exit status" against real OpenSSH bastions.
+    ///
+    /// RFC 4254 doesn't constrain the order of `eof` vs `exit-status`, and
+    /// OpenSSH's server commonly sends `eof` first. An earlier version of
+    /// the channel-handling loop broke on `eof`, which meant `exit-status`
+    /// — sent ~µs later — was discarded and the call surfaced as a silent
+    /// close. This test pins the fix: with the test server emitting
+    /// `eof` BEFORE `exit-status`, we still capture the exit status.
+    #[tokio::test]
+    async fn captures_exit_status_when_eof_arrives_first() {
+        let addr = start_test_server(TestServerConfig {
+            accept_password: Some(("u".into(), "p".into())),
+            accept_key_user: None,
+            allow_direct_tcpip: false,
+            exec_responder: Some(Arc::new(|_| Some(ExecResponse {
+                stdout: b"iso.3.6.1.2.1.1.5.0 = STRING: \"RR1-NYC\"\n".to_vec(),
+                stderr: vec![],
+                exit_status: 0,
+            }))),
+            eof_before_exit_status: true,
+            host_key: ephemeral_ed25519(),
+        })
+        .await;
+
+        let r = exec_on_remote_pooled(&cfg(addr), "snmpget ...", Duration::from_secs(5))
+            .await
+            .expect("exec should succeed even with eof-first ordering");
+        assert_eq!(r.exit_status, Some(0),
+            "exit_status must survive eof-arrives-first ordering");
+        assert!(String::from_utf8_lossy(&r.stdout).contains("RR1-NYC"),
+            "stdout should still be captured");
     }
 }

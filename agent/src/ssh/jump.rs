@@ -84,6 +84,7 @@ mod tests {
             accept_key_user: Some("jumpuser".into()),
             allow_direct_tcpip: true,
             exec_responder: None,
+            eof_before_exit_status: false,
             host_key: jump_host_key,
         })
         .await;
@@ -94,6 +95,7 @@ mod tests {
             accept_key_user: None,
             allow_direct_tcpip: false,
             exec_responder: None,
+            eof_before_exit_status: false,
             host_key: target_host_key,
         })
         .await;
@@ -154,6 +156,7 @@ mod tests {
             accept_key_user: None,
             allow_direct_tcpip: true,
             exec_responder: None,
+            eof_before_exit_status: false,
             host_key: jump_host_key,
         })
         .await;
@@ -196,6 +199,7 @@ mod tests {
             accept_key_user: None,
             allow_direct_tcpip: true,
             exec_responder: None,
+            eof_before_exit_status: false,
             host_key: jump_host_key,
         })
         .await;
@@ -204,6 +208,7 @@ mod tests {
             accept_key_user: None,
             allow_direct_tcpip: false,
             exec_responder: None,
+            eof_before_exit_status: false,
             host_key: target_host_key,
         })
         .await;
@@ -243,6 +248,7 @@ mod tests {
             accept_key_user: None,
             allow_direct_tcpip: false, // KEY: refuse forwarding
             exec_responder: None,
+            eof_before_exit_status: false,
             host_key: jump_host_key,
         })
         .await;

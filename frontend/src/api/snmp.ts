@@ -20,6 +20,9 @@ export interface SnmpGetRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   community?: string;
+  // When the request omits jump fields, the named profile's jump
+  // configuration is the fallback (mirrors snmpTryCommunities).
+  profileId?: string;
   // Enterprise mode
   deviceId?: string;
   // Shared
@@ -32,6 +35,7 @@ export interface SnmpWalkRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   community?: string;
+  profileId?: string;
   // Enterprise mode
   deviceId?: string;
   // Shared
@@ -111,6 +115,7 @@ export interface SnmpInterfaceStatsRequest extends SnmpJumpRef {
   // Personal mode
   host?: string;
   community?: string;
+  profileId?: string;
   // Enterprise mode
   deviceId?: string;
   // Shared
@@ -151,6 +156,7 @@ export async function snmpGet(req: SnmpGetRequest): Promise<SnmpGetResponse> {
       community: req.community,
       oids: req.oids,
       port: req.port,
+      profileId: req.profileId,
       jump_host_id: req.jump_host_id,
       jump_session_id: req.jump_session_id,
     });
@@ -179,6 +185,7 @@ export async function snmpWalk(req: SnmpWalkRequest): Promise<SnmpWalkResponse> 
       community: req.community,
       rootOid: req.rootOid,
       port: req.port,
+      profileId: req.profileId,
       jump_host_id: req.jump_host_id,
       jump_session_id: req.jump_session_id,
     });
@@ -235,6 +242,7 @@ export async function snmpInterfaceStats(req: SnmpInterfaceStatsRequest): Promis
       community: req.community,
       interfaceName: req.interfaceName,
       port: req.port,
+      profileId: req.profileId,
       jump_host_id: req.jump_host_id,
       jump_session_id: req.jump_session_id,
     });

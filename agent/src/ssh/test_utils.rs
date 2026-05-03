@@ -39,6 +39,10 @@ pub(crate) struct TestServerConfig {
     /// makes the server emit that stdout/stderr + exit status. Returning
     /// None makes the server reject the exec (channel close, no exit).
     pub exec_responder: Option<ExecResponder>,
+    /// If true, send `eof` BEFORE `exit-status` (mimicking OpenSSH server
+    /// behavior). If false, default order: data → exit-status → eof → close.
+    /// Used to regression-test the channel-handling loop against both orders.
+    pub eof_before_exit_status: bool,
     /// Host key for the server.
     pub host_key: PrivateKey,
 }
@@ -144,6 +148,7 @@ impl russh::server::Handler for TestServer {
     ) -> Result<(), Self::Error> {
         let cmd = String::from_utf8_lossy(data).to_string();
         let responder = self.cfg.exec_responder.clone();
+        let eof_first = self.cfg.eof_before_exit_status;
         let handle = session.handle();
         tokio::spawn(async move {
             let response = responder.as_ref().and_then(|r| r(&cmd)).unwrap_or_default();
@@ -154,8 +159,13 @@ impl russh::server::Handler for TestServer {
                 // ext = 1 = stderr per RFC 4254
                 let _ = handle.extended_data(channel, 1, response.stderr.into()).await;
             }
-            let _ = handle.exit_status_request(channel, response.exit_status).await;
-            let _ = handle.eof(channel).await;
+            if eof_first {
+                let _ = handle.eof(channel).await;
+                let _ = handle.exit_status_request(channel, response.exit_status).await;
+            } else {
+                let _ = handle.exit_status_request(channel, response.exit_status).await;
+                let _ = handle.eof(channel).await;
+            }
             let _ = handle.close(channel).await;
         });
         Ok(())
@@ -264,7 +274,8 @@ pub(crate) async fn start_jump_and_target(
         accept_key_user: None,
         allow_direct_tcpip: true,
         exec_responder: None,
-        host_key: ephemeral_ed25519(),
+        eof_before_exit_status: false,
+            host_key: ephemeral_ed25519(),
     })
     .await;
 
@@ -273,7 +284,8 @@ pub(crate) async fn start_jump_and_target(
         accept_key_user: None,
         allow_direct_tcpip: false,
         exec_responder: None,
-        host_key: ephemeral_ed25519(),
+        eof_before_exit_status: false,
+            host_key: ephemeral_ed25519(),
     })
     .await;
 
