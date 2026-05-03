@@ -82,11 +82,9 @@ where
         (self.inner, routes)
     }
 
-    /// Borrow-style access for callers that need to keep building (e.g. `.layer()`).
-    pub fn into_inner(self) -> Router<S> {
-        self.inner
-    }
-
+    /// Snapshot of every route captured so far. Only useful for the
+    /// /api/dev/routes endpoint, so it shares that endpoint's cfg gate.
+    #[cfg(any(debug_assertions, feature = "dev-routes"))]
     pub fn captured_routes(&self) -> Vec<RouteInfo> {
         self.routes.lock().unwrap().clone()
     }
@@ -126,16 +124,27 @@ fn infer_methods<S>(router: &MethodRouter<S>) -> Vec<String> {
     methods
 }
 
-use std::sync::OnceLock;
+// Global route registry — only compiled when the dev-routes endpoint
+// is also compiled (debug builds, or when the `dev-routes` feature is
+// enabled). Outside of that, no one reads the registry, so writing to
+// it would be a pure side-effect with no purpose.
+#[cfg(any(debug_assertions, feature = "dev-routes"))]
+mod registry {
+    use super::RouteInfo;
+    use std::sync::OnceLock;
 
-/// Global registry populated once at startup by main.rs after all routes are composed.
-/// Read by the /api/dev/routes handler.
-pub static REGISTERED_ROUTES: OnceLock<Vec<RouteInfo>> = OnceLock::new();
+    /// Populated once at startup by main.rs after all routes are composed.
+    /// Read by the /api/dev/routes handler in `dev.rs`.
+    pub static REGISTERED_ROUTES: OnceLock<Vec<RouteInfo>> = OnceLock::new();
 
-pub fn set_global_routes(routes: Vec<RouteInfo>) {
-    let _ = REGISTERED_ROUTES.set(routes);
+    pub fn set_global_routes(routes: Vec<RouteInfo>) {
+        let _ = REGISTERED_ROUTES.set(routes);
+    }
+
+    pub fn get_global_routes() -> Vec<RouteInfo> {
+        REGISTERED_ROUTES.get().cloned().unwrap_or_default()
+    }
 }
 
-pub fn get_global_routes() -> Vec<RouteInfo> {
-    REGISTERED_ROUTES.get().cloned().unwrap_or_default()
-}
+#[cfg(any(debug_assertions, feature = "dev-routes"))]
+pub use registry::{get_global_routes, set_global_routes};

@@ -10,7 +10,13 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use crate::tracked_router::{set_global_routes, TrackedRouter};
+use crate::tracked_router::TrackedRouter;
+// Registry write only matters when the dev-routes endpoint is compiled in
+// (debug builds, or when the `dev-routes` feature is enabled). In release
+// builds without the feature, dev::routes_handler is excluded — there is
+// no reader, so we don't populate the registry either.
+#[cfg(any(debug_assertions, feature = "dev-routes"))]
+use crate::tracked_router::set_global_routes;
 use base64::Engine as _;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use sqlx::sqlite::SqlitePool;
@@ -926,10 +932,14 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
     let ws_composed = TrackedRouter::<()>::new()
         .nest_tracked("/ws", ws_routes);
 
-    // Aggregate captured routes from BOTH and stash globally.
-    let mut all_routes = api_composed.captured_routes();
-    all_routes.extend(ws_composed.captured_routes());
-    set_global_routes(all_routes);
+    // Aggregate captured routes from BOTH and stash globally — only when
+    // the dev-routes endpoint will read them back.
+    #[cfg(any(debug_assertions, feature = "dev-routes"))]
+    {
+        let mut all_routes = api_composed.captured_routes();
+        all_routes.extend(ws_composed.captured_routes());
+        set_global_routes(all_routes);
+    }
 
     let (api_router, _) = api_composed.into_inner_with_routes();
     let (ws_router, _) = ws_composed.into_inner_with_routes();
