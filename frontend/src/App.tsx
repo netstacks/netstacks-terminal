@@ -3721,6 +3721,16 @@ def main(command: str = "show version"):
       });
     }
 
+    // When a tab's name is just an IPv4 (placeholder until we know better),
+    // prefer the SNMP-discovered sysName for the topology display. User-set
+    // names like "Core-Router" still win.
+    const looksLikeIp = (name: string | undefined | null): boolean =>
+      !!name && /^\d{1,3}(\.\d{1,3}){3}$/.test(name.trim())
+    const displayNameFor = (r: DiscoveryResult): string => {
+      if (looksLikeIp(r.device) && r.sysName) return r.sysName
+      return r.device
+    }
+
     try {
       // Step 1: Create topology in database
       const topologyName = `${discoveryGroupName} Topology`
@@ -3762,7 +3772,7 @@ def main(command: str = "show version"):
         }
 
         const deviceResult = await addNeighborDevice(savedTopology.id, {
-          name: result.device,
+          name: displayNameFor(result),
           host: result.ip,
           device_type: deviceType,
           x: 300 + (deviceIdMap.size % 3) * 200,
