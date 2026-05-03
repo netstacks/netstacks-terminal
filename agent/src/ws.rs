@@ -1993,4 +1993,130 @@ mod resolve_effective_jump_tests {
              diagnosed and this PR makes structurally impossible"
         );
     }
+
+    /// End-to-end smoke for SNMP-via-jump. Walks the full chain:
+    ///   Session-as-jump record → resolve_effective_jump → vault credential
+    ///   → SshConfig → SnmpDest::ViaJump → snmp::snmp_get → russh exec
+    ///   channel → shimmed snmpget → parsed SnmpValueEntry.
+    ///
+    /// The "jump host" is a russh test server with an exec_responder that
+    /// returns canned net-snmp output when invoked with the right argv.
+    /// Proves that a UI-triggered SNMP query for a device behind a jump
+    /// successfully returns parsed values without ever opening a UDP
+    /// socket from this process.
+    #[tokio::test]
+    async fn end_to_end_snmp_via_session_as_jump_with_vault_credentials() {
+        use crate::ssh::test_utils::{ephemeral_ed25519, start_test_server, ExecResponse, TestServerConfig};
+        use std::sync::Arc;
+
+        // 1. Stand up the test SSH server with an snmpget shim.
+        let saw_cmd = Arc::new(std::sync::Mutex::new(String::new()));
+        let saw_cmd_w = saw_cmd.clone();
+        let jump_addr = start_test_server(TestServerConfig {
+            accept_password: Some(("bastion-user".into(), "bastion-secret".into())),
+            accept_key_user: None,
+            allow_direct_tcpip: false,
+            exec_responder: Some(Arc::new(move |cmd: &str| {
+                *saw_cmd_w.lock().unwrap() = cmd.to_string();
+                Some(ExecResponse {
+                    stdout: b".1.3.6.1.2.1.1.5.0 = STRING: \"core-router-7\"\n".to_vec(),
+                    stderr: vec![],
+                    exit_status: 0,
+                })
+            })),
+            host_key: ephemeral_ed25519(),
+        })
+        .await;
+
+        // 2. Provider + vault + the jump-side data.
+        let provider = fresh_provider().await;
+        provider.set_master_password("test-password").await.unwrap();
+
+        let bastion_profile = provider.create_profile(crate::models::NewCredentialProfile {
+            name: "bastion-creds".into(),
+            username: "bastion-user".into(),
+            auth_type: AuthType::Password, key_path: None,
+            port: 22, keepalive_interval: 30, connection_timeout: 10,
+            terminal_theme: None, default_font_size: None, default_font_family: None,
+            scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
+            reconnect_delay: 5, cli_flavor: crate::models::CliFlavor::default(),
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
+        }).await.unwrap();
+        provider.store_profile_credential(&bastion_profile.id, crate::models::ProfileCredential {
+            password: Some("bastion-secret".into()),
+            key_passphrase: None, snmp_communities: None,
+        }).await.unwrap();
+
+        // The "jump session" — a Session record whose host:port points at
+        // our test SSH server. Other sessions reference this one as their
+        // SNMP jump (mirroring the user's homelab-bastion setup).
+        let bastion_session = provider.create_session(crate::models::NewSession {
+            name: "homelab-bastion".into(), folder_id: None,
+            host: jump_addr.ip().to_string(),
+            port: jump_addr.port(),
+            color: None, profile_id: bastion_profile.id.clone(),
+            netbox_device_id: None, netbox_source_id: None,
+            cli_flavor: crate::models::CliFlavor::Auto, terminal_theme: None,
+            font_family: None, font_size_override: None,
+            jump_host_id: None, jump_session_id: None,
+            port_forwards: vec![], auto_commands: vec![],
+            legacy_ssh: false, protocol: crate::models::Protocol::Ssh,
+            sftp_start_path: None,
+        }).await.unwrap();
+
+        // 3. Resolve the jump exactly as api.rs does.
+        let resolution = resolve_effective_jump(
+            JumpRef::Session(bastion_session.id.clone()),
+            JumpRef::None,
+            &provider,
+        )
+        .await
+        .unwrap()
+        .expect("session-as-jump must resolve");
+
+        // 4. Build the SnmpDest::ViaJump (mirroring api.rs::build_snmp_dest).
+        let auth = match resolution.profile.auth_type {
+            AuthType::Password => crate::ssh::SshAuth::Password(
+                resolution.credential.as_ref().and_then(|c| c.password.clone()).unwrap()
+            ),
+            AuthType::Key => unreachable!("test uses password auth"),
+        };
+        let jump_cfg = crate::ssh::SshConfig {
+            host: resolution.host.clone(),
+            port: resolution.port,
+            username: resolution.profile.username.clone(),
+            auth,
+            legacy_ssh: false,
+        };
+        let target_host = "10.99.0.5".to_string();
+        let target_port: u16 = 161;
+        let dest = crate::snmp::SnmpDest::ViaJump {
+            jump: jump_cfg,
+            target_host: target_host.clone(),
+            target_port,
+        };
+
+        // 5. Run an SNMP GET through the full stack.
+        let entries = crate::snmp::snmp_get(&dest, "public", &["1.3.6.1.2.1.1.5.0"])
+            .await
+            .expect("snmp_get via session-as-jump must succeed");
+
+        // 6. Verify the parsed value matches the shim's canned output.
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].oid, "1.3.6.1.2.1.1.5.0");
+        match &entries[0].value {
+            crate::snmp::SnmpValue::String(s) => assert_eq!(s, "core-router-7"),
+            other => panic!("expected String, got {other:?}"),
+        }
+
+        // 7. The shim received the right argv: net-snmp called with the
+        // upstream session's password authenticating the SSH hop, and the
+        // target device's host:port + community visible on the command line.
+        let cmd = saw_cmd.lock().unwrap().clone();
+        assert!(cmd.starts_with("snmpget"), "wrong tool: {cmd}");
+        assert!(cmd.contains("-c 'public'"), "community quoted: {cmd}");
+        assert!(cmd.contains(&format!("'{}:{}'", target_host, target_port)),
+            "target host:port quoted: {cmd}");
+        assert!(cmd.contains("'1.3.6.1.2.1.1.5.0'"), "oid quoted: {cmd}");
+    }
 }
