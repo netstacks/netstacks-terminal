@@ -58,7 +58,7 @@ pub struct LocalDataProvider {
 const SESSION_COLUMNS: &str = "id, name, folder_id, host, port, color, icon, sort_order, \
     last_connected_at, created_at, updated_at, auto_reconnect, reconnect_delay, \
     scrollback_lines, local_echo, font_size_override, font_family, profile_id, \
-    netbox_device_id, netbox_source_id, cli_flavor, terminal_theme, jump_host_id, \
+    netbox_device_id, netbox_source_id, cli_flavor, terminal_theme, jump_host_id, jump_session_id, \
     port_forwards, auto_commands, legacy_ssh, protocol, sftp_start_path";
 
 /// Internal row type for sessions from SQLite
@@ -92,6 +92,8 @@ struct SessionRow {
     terminal_theme: Option<String>,
     // Jump host reference (global jump hosts)
     jump_host_id: Option<String>,
+    // Session-as-jump alternative
+    jump_session_id: Option<String>,
     // Port forwarding (Phase 06.3)
     port_forwards: Option<String>,
     // Auto commands on connect
@@ -150,6 +152,8 @@ impl SessionRow {
             terminal_theme: self.terminal_theme,
             // Jump host reference (global jump hosts)
             jump_host_id: self.jump_host_id,
+            // Session-as-jump alternative (mutually exclusive with jump_host_id)
+            jump_session_id: self.jump_session_id,
             // Port forwarding (Phase 06.3)
             port_forwards: self
                 .port_forwards
@@ -344,6 +348,7 @@ struct CredentialProfileRow {
     cli_flavor: String,
     auto_commands: Option<String>,
     jump_host_id: Option<String>,
+    jump_session_id: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -384,6 +389,7 @@ impl CredentialProfileRow {
             cli_flavor,
             auto_commands,
             jump_host_id: self.jump_host_id,
+            jump_session_id: self.jump_session_id,
             created_at: parse_datetime(&self.created_at)?,
             updated_at: parse_datetime(&self.updated_at)?,
         })
@@ -1464,10 +1470,22 @@ impl DataProvider for LocalDataProvider {
 
         // Note: username and auth_type are deprecated but still required by the schema (NOT NULL)
         // We provide empty defaults since all auth now comes from profiles
+        // Validate jump references before insert.
+        crate::db::validate_entity_jump_refs(
+            &self.pool,
+            "session",
+            None,
+            &session.name,
+            session.jump_host_id.as_deref(),
+            session.jump_session_id.as_deref(),
+        )
+        .await
+        .map_err(|e| ProviderError::Validation(e.to_string()))?;
+
         sqlx::query(
             r#"
-            INSERT INTO sessions (id, name, folder_id, host, port, username, auth_type, color, sort_order, profile_id, netbox_device_id, netbox_source_id, cli_flavor, terminal_theme, font_family, font_size_override, jump_host_id, port_forwards, auto_commands, legacy_ssh, protocol, sftp_start_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, '', 'password', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (id, name, folder_id, host, port, username, auth_type, color, sort_order, profile_id, netbox_device_id, netbox_source_id, cli_flavor, terminal_theme, font_family, font_size_override, jump_host_id, jump_session_id, port_forwards, auto_commands, legacy_ssh, protocol, sftp_start_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, '', 'password', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -1484,6 +1502,7 @@ impl DataProvider for LocalDataProvider {
         .bind(&session.font_family)
         .bind(session.font_size_override.map(|v| v as i32))
         .bind(&session.jump_host_id)
+        .bind(&session.jump_session_id)
         .bind(&port_forwards_json)
         .bind(&auto_commands_json)
         .bind(session.legacy_ssh)
@@ -1540,6 +1559,18 @@ impl DataProvider for LocalDataProvider {
             updates.push("sort_order = ?".to_string());
             has_update = true;
         }
+        // Pre-existing update_session has a bug where has_update only tracks
+        // a subset of fields. Patch the jump fields explicitly so an update
+        // touching only jump_host_id / jump_session_id reaches validation +
+        // the SQL UPDATE below (which sets all columns from current+update).
+        if update.jump_host_id.is_some() {
+            updates.push("jump_host_id = ?".to_string());
+            has_update = true;
+        }
+        if update.jump_session_id.is_some() {
+            updates.push("jump_session_id = ?".to_string());
+            has_update = true;
+        }
 
         if !has_update {
             return self.get_session(id).await;
@@ -1579,6 +1610,32 @@ impl DataProvider for LocalDataProvider {
         let font_family = update.font_family.unwrap_or(current.font_family);
         // Jump host reference (global jump hosts)
         let jump_host_id = update.jump_host_id.unwrap_or(current.jump_host_id);
+        // Session-as-jump alternative
+        let jump_session_id = update.jump_session_id.unwrap_or(current.jump_session_id);
+
+        // Validate the resulting jump refs before writing.
+        crate::db::validate_entity_jump_refs(
+            &self.pool,
+            "session",
+            Some(id),
+            &name,
+            jump_host_id.as_deref(),
+            jump_session_id.as_deref(),
+        )
+        .await
+        .map_err(|e| ProviderError::Validation(e.to_string()))?;
+
+        // Symmetric: if this session is currently used as someone else's
+        // jump, it must remain a leaf — reject adding any jump to it.
+        crate::db::validate_session_not_used_as_jump(
+            &self.pool,
+            id,
+            jump_host_id.as_deref(),
+            jump_session_id.as_deref(),
+        )
+        .await
+        .map_err(|e| ProviderError::Validation(e.to_string()))?;
+
         // Port forwarding (Phase 06.3)
         let port_forwards = update.port_forwards.unwrap_or(current.port_forwards);
         let port_forwards_json = if port_forwards.is_empty() {
@@ -1608,7 +1665,7 @@ impl DataProvider for LocalDataProvider {
                 auto_reconnect = ?, reconnect_delay = ?, scrollback_lines = ?,
                 local_echo = ?, font_size_override = ?, font_family = ?,
                 profile_id = ?, netbox_device_id = ?, netbox_source_id = ?,
-                cli_flavor = ?, terminal_theme = ?, jump_host_id = ?,
+                cli_flavor = ?, terminal_theme = ?, jump_host_id = ?, jump_session_id = ?,
                 port_forwards = ?, auto_commands = ?, legacy_ssh = ?, protocol = ?, sftp_start_path = ?, updated_at = ?
             WHERE id = ?
             "#,
@@ -1632,6 +1689,7 @@ impl DataProvider for LocalDataProvider {
         .bind(cli_flavor)
         .bind(&terminal_theme)
         .bind(&jump_host_id)
+        .bind(&jump_session_id)
         .bind(&port_forwards_json)
         .bind(&auto_commands_json)
         .bind(legacy_ssh as i32)
@@ -2591,6 +2649,8 @@ impl DataProvider for LocalDataProvider {
                 font_size_override: None,
                 // Jump host reference (global jump hosts)
                 jump_host_id,
+                // Session-as-jump alternative (not used by import path)
+                jump_session_id: None,
                 // Port forwarding (Phase 06.3)
                 port_forwards: session.port_forwards.clone(),
                 // Auto commands on connect
@@ -2731,8 +2791,19 @@ impl DataProvider for LocalDataProvider {
         let auto_commands_json = serde_json::to_string(&profile.auto_commands)
             .unwrap_or_else(|_| "[]".to_string());
 
-        // Validate jump host chain before creating profile
+        // Validate jump host chain (existing) and the new mutual-exclusion +
+        // session-as-jump leaf rules before creating profile.
         Self::validate_profile_jump_host_chain(&self.pool, "", &profile.name, profile.jump_host_id.as_deref()).await?;
+        crate::db::validate_entity_jump_refs(
+            &self.pool,
+            "profile",
+            None,
+            &profile.name,
+            profile.jump_host_id.as_deref(),
+            profile.jump_session_id.as_deref(),
+        )
+        .await
+        .map_err(|e| ProviderError::Validation(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -2740,8 +2811,8 @@ impl DataProvider for LocalDataProvider {
                 id, name, username, auth_type, key_path, port, keepalive_interval,
                 connection_timeout, terminal_theme, default_font_size, default_font_family,
                 scrollback_lines, local_echo, auto_reconnect, reconnect_delay,
-                cli_flavor, auto_commands, jump_host_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cli_flavor, auto_commands, jump_host_id, jump_session_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -2762,6 +2833,7 @@ impl DataProvider for LocalDataProvider {
         .bind(&cli_flavor_str)
         .bind(&auto_commands_json)
         .bind(&profile.jump_host_id)
+        .bind(&profile.jump_session_id)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -2810,14 +2882,29 @@ impl DataProvider for LocalDataProvider {
             Some(v) => v,
             None => current.jump_host_id.clone(),
         };
+        let jump_session_id = match update.jump_session_id {
+            Some(v) => v,
+            None => current.jump_session_id.clone(),
+        };
 
-        // Validate jump host chain before updating profile
+        // Validate jump host chain (existing) and new mutual-exclusion +
+        // session-as-jump leaf rules before updating profile.
         Self::validate_profile_jump_host_chain(
             &self.pool,
             id,
             &name,
             jump_host_id.as_deref(),
         ).await?;
+        crate::db::validate_entity_jump_refs(
+            &self.pool,
+            "profile",
+            Some(id),
+            &name,
+            jump_host_id.as_deref(),
+            jump_session_id.as_deref(),
+        )
+        .await
+        .map_err(|e| ProviderError::Validation(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -2826,7 +2913,7 @@ impl DataProvider for LocalDataProvider {
                 keepalive_interval = ?, connection_timeout = ?,
                 terminal_theme = ?, default_font_size = ?, default_font_family = ?,
                 scrollback_lines = ?, local_echo = ?, auto_reconnect = ?, reconnect_delay = ?,
-                cli_flavor = ?, auto_commands = ?, jump_host_id = ?, updated_at = ?
+                cli_flavor = ?, auto_commands = ?, jump_host_id = ?, jump_session_id = ?, updated_at = ?
             WHERE id = ?
             "#,
         )
@@ -2847,6 +2934,7 @@ impl DataProvider for LocalDataProvider {
         .bind(&cli_flavor_str)
         .bind(&auto_commands_json)
         .bind(&jump_host_id)
+        .bind(&jump_session_id)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -6309,7 +6397,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::Auto,
             auto_commands: vec![],
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
         };
         let profile = provider.create_profile(new_profile).await.unwrap();
 
@@ -6327,7 +6415,7 @@ mod tests {
             terminal_theme: None,
             font_family: None,
             font_size_override: None,
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
             port_forwards: vec![],
             auto_commands: vec![],
             legacy_ssh: false,
@@ -6402,7 +6490,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::Auto,
             auto_commands: vec![],
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
         };
         let profile = provider.create_profile(new_profile).await.unwrap();
 
@@ -6420,7 +6508,7 @@ mod tests {
             terminal_theme: None,
             font_family: None,
             font_size_override: None,
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
             port_forwards: vec![],
             auto_commands: vec![],
             legacy_ssh: false,
@@ -6551,7 +6639,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::default(),
             auto_commands: vec![],
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
         };
         let created = p.create_profile(np).await.unwrap();
         let got = p.get_profile(&created.id).await.unwrap();
@@ -6578,7 +6666,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::default(),
             auto_commands: vec![],
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         let jh = p.create_jump_host(NewJumpHost {
             name: "edge".into(),
@@ -6603,7 +6691,7 @@ mod tests {
             reconnect_delay: 5,
             cli_flavor: CliFlavor::default(),
             auto_commands: vec![],
-            jump_host_id: None,
+            jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
 
         let updated = p.update_profile(&target.id, UpdateCredentialProfile {
@@ -6629,7 +6717,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         let _jh = p.create_jump_host(NewJumpHost {
             name: "edge-bastion".into(), host: "10.0.0.1".into(),
@@ -6643,7 +6731,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         let other_jh = p.create_jump_host(NewJumpHost {
             name: "inner-bastion".into(), host: "10.0.0.2".into(),
@@ -6671,7 +6759,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         let jump2 = p.create_jump_host(NewJumpHost {
             name: "inner-bastion".into(), host: "10.0.0.2".into(),
@@ -6685,7 +6773,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         let jump1 = p.create_jump_host(NewJumpHost {
             name: "edge-bastion".into(), host: "10.0.0.1".into(),
@@ -6708,7 +6796,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
 
         let err = p.update_profile(&target_profile.id, UpdateCredentialProfile {
@@ -6733,7 +6821,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         let inner_jh = p.create_jump_host(NewJumpHost {
             name: "inner-bastion".into(), host: "10.0.0.2".into(),
@@ -6747,7 +6835,7 @@ mod tests {
             terminal_theme: None, default_font_size: None, default_font_family: None,
             scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
             reconnect_delay: 5, cli_flavor: CliFlavor::default(),
-            auto_commands: vec![], jump_host_id: None,
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
         }).await.unwrap();
         sqlx::query("UPDATE credential_profiles SET jump_host_id = ? WHERE id = ?")
             .bind(&inner_jh.id).bind(&chained_profile.id)
@@ -6763,5 +6851,192 @@ mod tests {
         assert!(msg.contains("bastion-creds"), "msg should name profile: {msg}");
         assert!(msg.contains("inner-bastion"), "msg should name inner jump: {msg}");
         assert!(msg.contains("Jump hosts cannot be chained"), "msg should explain rule: {msg}");
+    }
+
+    // === T1 (sessions-as-jump-hosts): validation tests ===
+
+    /// Compact NewCredentialProfile builder for the validation tests.
+    fn ncp(name: &str) -> NewCredentialProfile {
+        NewCredentialProfile {
+            name: name.into(), username: "u".into(),
+            auth_type: AuthType::Password, key_path: None,
+            port: 22, keepalive_interval: 30, connection_timeout: 10,
+            terminal_theme: None, default_font_size: None, default_font_family: None,
+            scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
+            reconnect_delay: 5, cli_flavor: CliFlavor::default(),
+            auto_commands: vec![], jump_host_id: None, jump_session_id: None,
+        }
+    }
+
+    /// Compact NewSession builder for the validation tests.
+    fn nsess(name: &str, profile_id: &str) -> NewSession {
+        NewSession {
+            name: name.into(), folder_id: None,
+            host: "1.1.1.1".into(), port: 22,
+            color: None, profile_id: profile_id.into(),
+            netbox_device_id: None, netbox_source_id: None,
+            cli_flavor: CliFlavor::Auto, terminal_theme: None,
+            font_family: None, font_size_override: None,
+            jump_host_id: None, jump_session_id: None,
+            port_forwards: vec![], auto_commands: vec![],
+            legacy_ssh: false, protocol: Protocol::Ssh,
+            sftp_start_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_jump_refs_mutually_exclusive() {
+        let p = setup_provider().await;
+        let prof = p.create_profile(ncp("p")).await.unwrap();
+        let leaf = p.create_session(nsess("leaf", &prof.id)).await.unwrap();
+        let jh_prof = p.create_profile(ncp("jh-prof")).await.unwrap();
+        let jh = p.create_jump_host(NewJumpHost {
+            name: "jh".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: jh_prof.id.clone(),
+        }).await.unwrap();
+
+        // Try to create a session with BOTH set — must fail.
+        let mut bad = nsess("bad", &prof.id);
+        bad.jump_host_id = Some(jh.id.clone());
+        bad.jump_session_id = Some(leaf.id.clone());
+        let err = p.create_session(bad).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("both") && msg.contains("pick one"),
+            "msg should explain mutual exclusion: {msg}");
+    }
+
+    #[tokio::test]
+    async fn profile_jump_refs_mutually_exclusive() {
+        let p = setup_provider().await;
+        let target_prof = p.create_profile(ncp("target")).await.unwrap();
+        let leaf = p.create_session(nsess("leaf", &target_prof.id)).await.unwrap();
+        let jh_prof = p.create_profile(ncp("jh-prof")).await.unwrap();
+        let jh = p.create_jump_host(NewJumpHost {
+            name: "jh".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: jh_prof.id.clone(),
+        }).await.unwrap();
+
+        // Profile with both jump kinds set on create — must fail.
+        let mut bad = ncp("bad");
+        bad.jump_host_id = Some(jh.id.clone());
+        bad.jump_session_id = Some(leaf.id.clone());
+        let err = p.create_profile(bad).await.unwrap_err();
+        assert!(format!("{}", err).contains("pick one"));
+    }
+
+    #[tokio::test]
+    async fn session_cannot_jump_to_itself() {
+        let p = setup_provider().await;
+        let prof = p.create_profile(ncp("p")).await.unwrap();
+        let s = p.create_session(nsess("s", &prof.id)).await.unwrap();
+        let err = p.update_session(&s.id, UpdateSession {
+            jump_session_id: Some(Some(s.id.clone())),
+            ..Default::default()
+        }).await.unwrap_err();
+        assert!(format!("{}", err).contains("itself"),
+            "self-reference must be rejected: {err}");
+    }
+
+    #[tokio::test]
+    async fn session_as_jump_must_be_leaf() {
+        let p = setup_provider().await;
+        let p_a = p.create_profile(ncp("p_a")).await.unwrap();
+        let p_b = p.create_profile(ncp("p_b")).await.unwrap();
+
+        // Build a real chain: jump host record exists for p_b's jumping needs.
+        let real_jh_prof = p.create_profile(ncp("real-jh-prof")).await.unwrap();
+        let real_jh = p.create_jump_host(NewJumpHost {
+            name: "real-jh".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: real_jh_prof.id.clone(),
+        }).await.unwrap();
+
+        // Session A already has a jump configured (not a leaf).
+        let mut a_init = nsess("A", &p_a.id);
+        a_init.jump_host_id = Some(real_jh.id.clone());
+        let session_a = p.create_session(a_init).await.unwrap();
+
+        // Session B trying to use A as its jump → must fail (A isn't a leaf).
+        let mut b = nsess("B", &p_b.id);
+        b.jump_session_id = Some(session_a.id.clone());
+        let err = p.create_session(b).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Multi-hop") && msg.contains("'A'"),
+            "msg should explain leaf rule and name session A: {msg}");
+    }
+
+    #[tokio::test]
+    async fn session_as_jump_profile_must_be_leaf() {
+        let p = setup_provider().await;
+        // Backing profile for the real jump host
+        let backing_prof = p.create_profile(ncp("backing")).await.unwrap();
+        let real_jh = p.create_jump_host(NewJumpHost {
+            name: "real-jh".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: backing_prof.id.clone(),
+        }).await.unwrap();
+        // Profile that itself has a jump configured (not a leaf).
+        let mut chain_prof = ncp("chain-prof");
+        chain_prof.jump_host_id = Some(real_jh.id.clone());
+        let chain_prof = p.create_profile(chain_prof).await.unwrap();
+
+        // Session A uses the chain profile (so its profile is non-leaf).
+        let session_a = p.create_session(nsess("A", &chain_prof.id)).await.unwrap();
+
+        // Session B trying to use A as its jump → must fail (A's profile isn't a leaf).
+        let other = p.create_profile(ncp("other")).await.unwrap();
+        let mut b = nsess("B", &other.id);
+        b.jump_session_id = Some(session_a.id.clone());
+        let err = p.create_session(b).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("auth profile") && msg.contains("chain-prof"),
+            "msg should explain profile-leaf rule and name profile: {msg}");
+    }
+
+    #[tokio::test]
+    async fn session_in_use_as_jump_cannot_add_a_jump() {
+        let p = setup_provider().await;
+        let p_a = p.create_profile(ncp("p_a")).await.unwrap();
+        let p_b = p.create_profile(ncp("p_b")).await.unwrap();
+        let session_a = p.create_session(nsess("A", &p_a.id)).await.unwrap();
+
+        // Session B uses A as its jump (legal: A is a leaf).
+        let mut b = nsess("B", &p_b.id);
+        b.jump_session_id = Some(session_a.id.clone());
+        p.create_session(b).await.unwrap();
+
+        // Now try to add a jump_host_id to A → must be rejected by the
+        // symmetric check (A is in use as a jump).
+        let backing = p.create_profile(ncp("backing")).await.unwrap();
+        let real_jh = p.create_jump_host(NewJumpHost {
+            name: "real-jh".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: backing.id.clone(),
+        }).await.unwrap();
+
+        let err = p.update_session(&session_a.id, UpdateSession {
+            jump_host_id: Some(Some(real_jh.id.clone())),
+            ..Default::default()
+        }).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("used as a jump"),
+            "msg should explain symmetric block: {msg}");
+        assert!(msg.contains("'B'"), "msg should name dependent session B: {msg}");
+    }
+
+    #[tokio::test]
+    async fn session_as_jump_happy_path_persists() {
+        let p = setup_provider().await;
+        let p_a = p.create_profile(ncp("p_a")).await.unwrap();
+        let p_b = p.create_profile(ncp("p_b")).await.unwrap();
+        let session_a = p.create_session(nsess("A", &p_a.id)).await.unwrap();
+
+        let mut b = nsess("B", &p_b.id);
+        b.jump_session_id = Some(session_a.id.clone());
+        let created_b = p.create_session(b).await.unwrap();
+
+        assert_eq!(created_b.jump_session_id.as_deref(), Some(session_a.id.as_str()));
+        assert!(created_b.jump_host_id.is_none());
+
+        // Round-trip via DB.
+        let reread = p.get_session(&created_b.id).await.unwrap();
+        assert_eq!(reread.jump_session_id.as_deref(), Some(session_a.id.as_str()));
     }
 }

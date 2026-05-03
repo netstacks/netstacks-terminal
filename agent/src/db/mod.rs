@@ -115,6 +115,7 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), DbError> {
     migrate_ai_memory_table(pool).await?;
     migrate_scripts_provenance(pool).await?;
     migrate_credential_profile_jump_host(pool).await?;
+    migrate_jump_session_id_columns(pool).await?;
     seed_default_settings(pool).await?;
 
     Ok(())
@@ -135,6 +136,29 @@ async fn migrate_scripts_provenance(pool: &SqlitePool) -> Result<(), DbError> {
             .execute(pool)
             .await
             .map_err(|e| DbError::Migration(format!("Failed to add scripts.approved: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Add `jump_session_id` to `sessions`, `tunnels`, and `credential_profiles`
+/// so an existing Session can be selected as a jump endpoint anywhere a
+/// JumpHost record was previously the only option. Mutually exclusive with
+/// `jump_host_id` (enforced in the provider, not the schema).
+async fn migrate_jump_session_id_columns(pool: &SqlitePool) -> Result<(), DbError> {
+    for table in ["sessions", "tunnels", "credential_profiles"] {
+        if !column_exists(pool, table, "jump_session_id").await? {
+            let sql = format!(
+                "ALTER TABLE {} ADD COLUMN jump_session_id TEXT \
+                 REFERENCES sessions(id) ON DELETE SET NULL",
+                table
+            );
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .map_err(|e| DbError::Migration(format!(
+                    "Failed to add {}.jump_session_id: {}", table, e
+                )))?;
+        }
     }
     Ok(())
 }
@@ -1905,6 +1929,148 @@ async fn migrate_tunnels_table(_pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Validate the jump refs about to be written to a tunnel row.
+/// Enforces mutual exclusion of `jump_host_id` / `jump_session_id` and the
+/// "session-as-jump must be a leaf" rule (target session and its profile
+/// must not themselves have any jump configured).
+///
+/// Pass `entity_id = Some(id)` on update so self-reference is detected,
+/// `None` on create. `entity_name` is used in error messages.
+pub(crate) async fn validate_tunnel_jump_refs(
+    pool: &SqlitePool,
+    entity_id: Option<&str>,
+    entity_name: &str,
+    jump_host_id: Option<&str>,
+    jump_session_id: Option<&str>,
+) -> Result<(), DbError> {
+    validate_jump_refs_inner(pool, "tunnel", entity_id, entity_name, jump_host_id, jump_session_id).await
+}
+
+/// Same validation, exposed for sessions/profiles writes living in the
+/// provider layer. The `entity_kind` is "session" / "profile" / "tunnel"
+/// and only flavors the error message.
+pub async fn validate_entity_jump_refs(
+    pool: &SqlitePool,
+    entity_kind: &str,
+    entity_id: Option<&str>,
+    entity_name: &str,
+    jump_host_id: Option<&str>,
+    jump_session_id: Option<&str>,
+) -> Result<(), DbError> {
+    validate_jump_refs_inner(pool, entity_kind, entity_id, entity_name, jump_host_id, jump_session_id).await
+}
+
+async fn validate_jump_refs_inner(
+    pool: &SqlitePool,
+    entity_kind: &str,
+    entity_id: Option<&str>,
+    entity_name: &str,
+    jump_host_id: Option<&str>,
+    jump_session_id: Option<&str>,
+) -> Result<(), DbError> {
+    // Mutual exclusion.
+    if jump_host_id.is_some() && jump_session_id.is_some() {
+        return Err(DbError::Migration(format!(
+            "{} '{}' has both jump_host_id and jump_session_id set — pick one.",
+            entity_kind, entity_name
+        )));
+    }
+
+    let Some(target_session_id) = jump_session_id else {
+        return Ok(());
+    };
+
+    // Self-reference check.
+    if Some(target_session_id) == entity_id {
+        return Err(DbError::Migration(format!(
+            "{} '{}' cannot use itself as a jump session.",
+            entity_kind, entity_name
+        )));
+    }
+
+    // Target session must exist and be a leaf.
+    let row: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT s.name, s.jump_host_id, s.jump_session_id, s.profile_id \
+         FROM sessions s WHERE s.id = ?"
+    )
+    .bind(target_session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| DbError::Migration(e.to_string()))?;
+
+    let Some((session_name, s_jh_id, s_js_id, s_profile_id)) = row else {
+        return Err(DbError::Migration(format!(
+            "{} '{}' references jump session '{}' which does not exist.",
+            entity_kind, entity_name, target_session_id
+        )));
+    };
+
+    if s_jh_id.is_some() || s_js_id.is_some() {
+        return Err(DbError::Migration(format!(
+            "{} '{}' cannot use session '{}' as a jump — that session itself has a jump configured. \
+             Multi-hop jumps are not supported. Clear the jump on session '{}' first.",
+            entity_kind, entity_name, session_name, session_name
+        )));
+    }
+
+    // Target session's auth profile must also be a leaf.
+    let prof: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, jump_host_id, jump_session_id FROM credential_profiles WHERE id = ?"
+    )
+    .bind(&s_profile_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| DbError::Migration(e.to_string()))?;
+
+    if let Some((profile_name, p_jh_id, p_js_id)) = prof {
+        if p_jh_id.is_some() || p_js_id.is_some() {
+            return Err(DbError::Migration(format!(
+                "{} '{}' cannot use session '{}' as a jump — its auth profile '{}' has a jump configured. \
+                 Multi-hop jumps are not supported. Clear the jump on profile '{}' first.",
+                entity_kind, entity_name, session_name, profile_name, profile_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Symmetric check: when modifying a session/profile to add a jump, if
+/// that session is already referenced as someone else's jump_session, reject.
+/// This prevents creating a chain by editing the leaf to no longer be a leaf.
+pub async fn validate_session_not_used_as_jump(
+    pool: &SqlitePool,
+    session_id: &str,
+    new_jump_host_id: Option<&str>,
+    new_jump_session_id: Option<&str>,
+) -> Result<(), DbError> {
+    if new_jump_host_id.is_none() && new_jump_session_id.is_none() {
+        return Ok(()); // becoming a leaf is fine
+    }
+
+    let dependents: Vec<(String, String)> = sqlx::query_as(
+        "SELECT 'session' AS kind, name FROM sessions WHERE jump_session_id = ? AND id <> ? \
+         UNION ALL \
+         SELECT 'tunnel'  AS kind, name FROM tunnels  WHERE jump_session_id = ? \
+         UNION ALL \
+         SELECT 'profile' AS kind, name FROM credential_profiles WHERE jump_session_id = ?"
+    )
+    .bind(session_id).bind(session_id).bind(session_id).bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| DbError::Migration(e.to_string()))?;
+
+    if !dependents.is_empty() {
+        let names: Vec<String> = dependents.iter().map(|(k, n)| format!("{} '{}'", k, n)).collect();
+        return Err(DbError::Migration(format!(
+            "Cannot add a jump to this session — it is currently used as a jump by: {}. \
+             Multi-hop jumps are not supported. Detach those references first.",
+            names.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 // === Tunnel CRUD ===
 
 #[derive(sqlx::FromRow)]
@@ -1915,6 +2081,7 @@ struct TunnelRow {
     port: i64,
     profile_id: String,
     jump_host_id: Option<String>,
+    jump_session_id: Option<String>,
     forward_type: String,
     local_port: i64,
     bind_address: String,
@@ -1937,6 +2104,7 @@ impl TunnelRow {
             port: self.port as u16,
             profile_id: self.profile_id,
             jump_host_id: self.jump_host_id,
+            jump_session_id: self.jump_session_id,
             forward_type: match self.forward_type.as_str() {
                 "remote" => PortForwardType::Remote,
                 "dynamic" => PortForwardType::Dynamic,
@@ -1956,7 +2124,7 @@ impl TunnelRow {
     }
 }
 
-const TUNNEL_COLUMNS: &str = "id, name, host, port, profile_id, jump_host_id, \
+const TUNNEL_COLUMNS: &str = "id, name, host, port, profile_id, jump_host_id, jump_session_id, \
     forward_type, local_port, bind_address, remote_host, remote_port, \
     auto_start, auto_reconnect, max_retries, enabled, created_at, updated_at";
 
@@ -1988,14 +2156,24 @@ pub async fn create_tunnel(pool: &SqlitePool, new: NewTunnel) -> Result<Tunnel, 
         PortForwardType::Dynamic => "dynamic",
     };
 
+    // Validate tunnel jump references before insert.
+    validate_tunnel_jump_refs(
+        pool,
+        None, // no existing id on create
+        &new.name,
+        new.jump_host_id.as_deref(),
+        new.jump_session_id.as_deref(),
+    ).await?;
+
     sqlx::query(
-        "INSERT INTO tunnels (id, name, host, port, profile_id, jump_host_id, \
+        "INSERT INTO tunnels (id, name, host, port, profile_id, jump_host_id, jump_session_id, \
          forward_type, local_port, bind_address, remote_host, remote_port, \
          auto_start, auto_reconnect, max_retries, enabled) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
     )
     .bind(&id).bind(&new.name).bind(&new.host)
-    .bind(new.port as i64).bind(&new.profile_id).bind(&new.jump_host_id)
+    .bind(new.port as i64).bind(&new.profile_id)
+    .bind(&new.jump_host_id).bind(&new.jump_session_id)
     .bind(forward_type_str).bind(new.local_port as i64).bind(&new.bind_address)
     .bind(&new.remote_host).bind(new.remote_port.map(|p| p as i64))
     .bind(new.auto_start).bind(new.auto_reconnect)
@@ -2015,17 +2193,31 @@ pub async fn update_tunnel(pool: &SqlitePool, id: &str, update: UpdateTunnel) ->
         PortForwardType::Dynamic => "dynamic",
     };
 
+    let new_name = update.name.clone().unwrap_or_else(|| existing.name.clone());
+    let new_jump_host_id = update.jump_host_id.clone().unwrap_or(existing.jump_host_id.clone());
+    let new_jump_session_id = update.jump_session_id.clone().unwrap_or(existing.jump_session_id.clone());
+
+    // Validate the resulting jump refs.
+    validate_tunnel_jump_refs(
+        pool,
+        Some(id),
+        &new_name,
+        new_jump_host_id.as_deref(),
+        new_jump_session_id.as_deref(),
+    ).await?;
+
     sqlx::query(
-        "UPDATE tunnels SET name = ?, host = ?, port = ?, profile_id = ?, jump_host_id = ?, \
+        "UPDATE tunnels SET name = ?, host = ?, port = ?, profile_id = ?, jump_host_id = ?, jump_session_id = ?, \
          forward_type = ?, local_port = ?, bind_address = ?, remote_host = ?, remote_port = ?, \
          auto_start = ?, auto_reconnect = ?, max_retries = ?, enabled = ?, \
          updated_at = datetime('now') WHERE id = ?"
     )
-    .bind(update.name.unwrap_or(existing.name))
+    .bind(new_name)
     .bind(update.host.unwrap_or(existing.host))
     .bind(update.port.unwrap_or(existing.port) as i64)
     .bind(update.profile_id.unwrap_or(existing.profile_id))
-    .bind(update.jump_host_id.unwrap_or(existing.jump_host_id))
+    .bind(&new_jump_host_id)
+    .bind(&new_jump_session_id)
     .bind(forward_type_str)
     .bind(update.local_port.unwrap_or(existing.local_port) as i64)
     .bind(update.bind_address.unwrap_or(existing.bind_address))
