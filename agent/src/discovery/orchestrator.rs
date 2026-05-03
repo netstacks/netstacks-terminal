@@ -316,10 +316,23 @@ async fn discover_single_target(
     let ip = target.ip.clone();
     let mut last_error: Option<String> = None;
 
-    // Profile-level jump fallback: prefer the SNMP profile's jump, fall back
-    // to the credential profile's. Either may have a `jump_host_id` /
-    // `jump_session_id` configured (e.g. devices reachable only via a
-    // bastion). When neither has a jump, snmp_dest_for returns ::Direct.
+    // Jump-resolution rules:
+    //   * Profile is the default. If the profile has jump_host_id /
+    //     jump_session_id set, every operation against that profile uses it.
+    //   * Session overrides profile. If the session itself has jump set,
+    //     that wins regardless of what the profile says.
+    //   * No profile jump and no session jump → Direct.
+    // Look up the session's jump fields so we can pass them to
+    // snmp_dest_for; the resolver prefers session over profile.
+    let mut session_jump = crate::ws::JumpRef::None;
+    if let Some(ref sid) = target.session_id {
+        if let Ok(s) = provider.get_session(sid).await {
+            session_jump = crate::ws::JumpRef::from_pair(
+                s.jump_host_id.as_deref(),
+                s.jump_session_id.as_deref(),
+            );
+        }
+    }
     let jump_profile_id = target
         .snmp_profile_id
         .as_deref()
@@ -334,14 +347,15 @@ async fn discover_single_target(
                 }
 
                 // Resolve the SnmpDest once — same dest is reused across the
-                // try-each-community loop below. If jump resolution fails we
-                // fall back to direct so unreachable devices still surface
-                // their own clean error rather than a vault-credential one.
+                // try-each-community loop below. snmp_dest_for picks session
+                // jump first, then profile jump, then falls through to
+                // Direct. Vault failures fall back to direct so unreachable
+                // devices surface their own clean error.
                 let dest = match crate::snmp::dest::snmp_dest_for(
                     &provider,
                     ip.as_str(),
                     161,
-                    crate::ws::JumpRef::None,
+                    session_jump.clone(),
                     jump_profile_id,
                 )
                 .await

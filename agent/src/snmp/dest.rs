@@ -37,21 +37,37 @@ pub async fn snmp_dest_for(
     let profile_level = if session_jump.is_none() {
         if let Some(pid) = profile_id {
             match provider.get_profile(pid).await {
-                Ok(p) => JumpRef::from_pair(
-                    p.jump_host_id.as_deref(),
-                    p.jump_session_id.as_deref(),
-                ),
+                Ok(p) => {
+                    let jr = JumpRef::from_pair(
+                        p.jump_host_id.as_deref(),
+                        p.jump_session_id.as_deref(),
+                    );
+                    tracing::info!(
+                        "snmp_dest_for: profile '{}' (id={}) jump_host_id={:?} jump_session_id={:?} → {:?}",
+                        p.name, pid, p.jump_host_id, p.jump_session_id, jr
+                    );
+                    jr
+                }
                 // Profile-load failure is not fatal: drop to direct. The
                 // caller's actual SNMP attempt will surface a clearer error
                 // if the device is unreachable.
-                Err(_) => JumpRef::None,
+                Err(e) => {
+                    tracing::warn!("snmp_dest_for: profile id={} load failed: {}", pid, e);
+                    JumpRef::None
+                }
             }
         } else {
             JumpRef::None
         }
     } else {
+        tracing::info!("snmp_dest_for: session-level jump set, ignoring profile-level");
         JumpRef::None
     };
+
+    tracing::info!(
+        "snmp_dest_for: target={}:{} session_jump={:?} profile_level={:?} profile_id={:?}",
+        target_host, target_port, session_jump, profile_level, profile_id
+    );
 
     let resolution = resolve_effective_jump(session_jump, profile_level, provider)
         .await
