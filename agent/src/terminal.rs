@@ -158,7 +158,9 @@ impl TerminalSession {
         })
     }
 
-    /// Create a new SSH session using native russh library
+    /// Create a new SSH session using native russh library.
+    /// When `jump_host` is set, routes through it via russh ProxyJump
+    /// (each hop authenticates with its own credentials).
     pub async fn new_ssh(
         id: String,
         output_tx: mpsc::UnboundedSender<TerminalMessage>,
@@ -172,6 +174,10 @@ impl TerminalSession {
         jump_host: Option<&str>,
         jump_port: Option<u16>,
         jump_username: Option<&str>,
+        jump_password: Option<&str>,
+        jump_key_path: Option<&str>,
+        jump_key_passphrase: Option<&str>,
+        jump_legacy_ssh: bool,
         // Port forwarding - delegated to TunnelManager
         port_forwards: Vec<PortForward>,
         // Legacy SSH support for older devices
@@ -183,125 +189,63 @@ impl TerminalSession {
         // Port forwards are started via TunnelManager in ws.rs, not here
         let _ = port_forwards;
 
-        // If jump host is configured, use PTY-based SSH with ProxyJump flag
-        // This is simpler and more reliable than native russh channel tunneling
-        if let Some(jump) = jump_host {
-            tracing::info!("Creating SSH session to {} via jump host {}", host, jump);
-
-            // Build jump host specification for -J flag
-            let jump_user = jump_username.unwrap_or(username);
-            let jump_p = jump_port.unwrap_or(22);
-            let jump_spec = format!("{}@{}:{}", jump_user, jump, jump_p);
-
-            // Build SSH command with ProxyJump
-            let mut cmd = CommandBuilder::new("ssh");
-            cmd.arg("-J");
-            cmd.arg(&jump_spec);
-            cmd.arg("-p");
-            cmd.arg(port.to_string());
-
-            // Add key or handle password auth
-            if let Some(key) = key_path {
-                cmd.arg("-i");
-                cmd.arg(key);
-            }
-            // Note: Password auth through jump host would require sshpass
-            // which we'll handle in a future iteration if needed
-
-            // TOFU: auto-add new host keys to known_hosts, reject changes.
-            // Matches the trust model of the direct (russh) SSH path —
-            // never silently accept a key that doesn't match a previously-seen
-            // one for the same host.
-            cmd.arg("-o");
-            cmd.arg("StrictHostKeyChecking=accept-new");
-
-            if legacy_ssh {
-                cmd.arg("-o");
-                cmd.arg("KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1");
-                cmd.arg("-o");
-                cmd.arg("HostKeyAlgorithms=+ssh-rsa,ssh-dss");
-            }
-
-            cmd.arg(format!("{}@{}", username, host));
-            cmd.env("TERM", "xterm-256color");
-
-            // Create PTY session for jump host connection
-            let pty_system = native_pty_system();
-            let pair = pty_system.openpty(PtySize {
-                rows: if initial_rows == 0 { 24 } else { initial_rows as u16 },
-                cols: if initial_cols == 0 { 80 } else { initial_cols as u16 },
-                pixel_width: 0,
-                pixel_height: 0,
-            })?;
-
-            let _child = pair.slave.spawn_command(cmd)?;
-            drop(pair.slave);
-
-            let writer: Box<dyn Write + Send> = pair.master.take_writer()?;
-            let writer = Arc::new(Mutex::new(writer));
-            let mut reader = pair.master.try_clone_reader()?;
-            let master: Box<dyn MasterPty + Send> = pair.master;
-            let master = Arc::new(Mutex::new(master));
-
-            // Spawn reader task for PTY output
-            let reader_handle = tokio::task::spawn_blocking(move || {
-                let mut buf = [0u8; 4096];
-                let mut decoder = Utf8Decoder::new();
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => {
-                            let _ = output_tx.send(TerminalMessage::Close);
-                            break;
-                        }
-                        Ok(n) => {
-                            let data = decoder.decode(&buf[..n]);
-                            if data.is_empty() {
-                                continue;
-                            }
-                            if output_tx.send(TerminalMessage::Output(data)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = output_tx.send(TerminalMessage::Error(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            });
-
-            return Ok(Self {
-                id,
-                kind: SessionKind::Local { writer, master },
-                _reader_handle: reader_handle,
-            });
-        }
-
-        // Direct connection (no jump host) - use native russh
-        // Build authentication method
-        let auth = if let Some(password) = password {
-            SshAuth::Password(password.to_string())
-        } else if let Some(key_path) = key_path {
+        // Build target SshConfig
+        let target_auth = if let Some(pw) = password {
+            SshAuth::Password(pw.to_string())
+        } else if let Some(kp) = key_path {
             SshAuth::KeyFile {
-                path: key_path.to_string(),
+                path: kp.to_string(),
                 passphrase: key_passphrase.map(|s| s.to_string()),
             }
         } else {
-            return Err(anyhow::anyhow!("No authentication method provided"));
+            return Err(anyhow::anyhow!("No authentication method provided for target"));
         };
 
-        let config = SshConfig {
+        let target_cfg = SshConfig {
             host: host.to_string(),
             port,
             username: username.to_string(),
-            auth,
+            auth: target_auth,
             legacy_ssh,
         };
 
-        // Connect to SSH server with initial PTY dimensions
-        let session = SshSession::connect(config, initial_cols, initial_rows)
-            .await
-            .map_err(|e| anyhow::anyhow!("SSH connection failed: {}", e))?;
+        // Connect — via jump host (native russh ProxyJump) or direct
+        let session = if let Some(jump_host_str) = jump_host {
+            let jump_user = jump_username.unwrap_or(username);
+            let jump_p = jump_port.unwrap_or(22);
+            let jump_auth = if let Some(pw) = jump_password {
+                SshAuth::Password(pw.to_string())
+            } else if let Some(kp) = jump_key_path {
+                SshAuth::KeyFile {
+                    path: kp.to_string(),
+                    passphrase: jump_key_passphrase.map(|s| s.to_string()),
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "No authentication method provided for jump host '{}'. \
+                     Configure credentials in the jump host's profile.",
+                    jump_host_str
+                ));
+            };
+            let jump_cfg = SshConfig {
+                host: jump_host_str.to_string(),
+                port: jump_p,
+                username: jump_user.to_string(),
+                auth: jump_auth,
+                legacy_ssh: jump_legacy_ssh,
+            };
+            tracing::info!(
+                "Creating SSH session to {} via jump host {} (russh ProxyJump)",
+                host, jump_host_str
+            );
+            SshSession::connect_via_jump(target_cfg, jump_cfg, initial_cols, initial_rows)
+                .await
+                .map_err(|e| anyhow::anyhow!("SSH connection via jump failed: {}", e))?
+        } else {
+            SshSession::connect(target_cfg, initial_cols, initial_rows)
+                .await
+                .map_err(|e| anyhow::anyhow!("SSH connection failed: {}", e))?
+        };
 
         let session = Arc::new(session);
         let session_for_reader = session.clone();
@@ -481,6 +425,10 @@ impl TerminalManager {
         jump_host: Option<&str>,
         jump_port: Option<u16>,
         jump_username: Option<&str>,
+        jump_password: Option<&str>,
+        jump_key_path: Option<&str>,
+        jump_key_passphrase: Option<&str>,
+        jump_legacy_ssh: bool,
         // Port forwarding (Phase 06.3)
         port_forwards: Vec<PortForward>,
         // Legacy SSH support for older devices
@@ -502,6 +450,10 @@ impl TerminalManager {
             jump_host,
             jump_port,
             jump_username,
+            jump_password,
+            jump_key_path,
+            jump_key_passphrase,
+            jump_legacy_ssh,
             port_forwards,
             legacy_ssh,
             initial_cols,
