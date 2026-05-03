@@ -88,6 +88,7 @@ import { createTopology, addNeighborDevice, createConnection as createTopologyCo
 // Note: Session topology API moved to TopologyTabEditor in Phase 20.1
 import type { Topology, Device } from './types/topology'
 import { TracerouteParser } from './lib/tracerouteParser'
+import { parseSysDescr } from './lib/sysDescrParser'
 import { saveDeviceEnrichmentToDoc, saveLinkEnrichmentToDoc } from './lib/enrichmentExport'
 import DeviceDetailsOverlay from './components/DeviceDetailsOverlay'
 import ConnectionDetailsOverlay from './components/ConnectionDetailsOverlay'
@@ -815,7 +816,7 @@ function AppContent() {
   } = useTabSelection()
 
   // Enrichment context for storing device/link data
-  const { deviceEnrichments, getLinkEnrichment } = useEnrichment()
+  const { deviceEnrichments, getLinkEnrichment, setDeviceEnrichment } = useEnrichment()
 
   // Troubleshooting session hook (Phase 26)
   const {
@@ -3701,6 +3702,25 @@ def main(command: str = "show version"):
       return
     }
 
+    // Hydrate the live EnrichmentContext for each discovered device so
+    // DeviceDetailTab (read path) shows vendor/model/OS the moment the
+    // user clicks a device — without waiting for the topology DB round-trip.
+    // The persisted topology write below is the durable copy; this is the
+    // in-memory cache the UI actually reads on render.
+    for (const r of results) {
+      const sessionId = r.tabId;
+      if (!sessionId) continue;
+      const parsed = parseSysDescr(r.sysDescr);
+      setDeviceEnrichment(sessionId, {
+        sessionId,
+        collectedAt: new Date().toISOString(),
+        hostname: r.sysName || undefined,
+        vendor: parsed.vendor,
+        model: parsed.model,
+        osVersion: parsed.osVersion,
+      });
+    }
+
     try {
       // Step 1: Create topology in database
       const topologyName = `${discoveryGroupName} Topology`
@@ -3784,93 +3804,106 @@ def main(command: str = "show version"):
         deviceIdMap.set(result.device, deviceResult.id)
       }
 
-      // Step 3: Create connections between group devices (found as mutual neighbors)
-      const groupDeviceNames = new Set(results.map(r => r.device.toLowerCase()))
-      const createdConnections = new Set<string>()
-
-      for (const result of results) {
-        const sourceId = deviceIdMap.get(result.device)
-        if (!sourceId) continue
-
-        for (const neighbor of result.neighbors) {
-          if (groupDeviceNames.has(neighbor.neighborName.toLowerCase())) {
-            // This neighbor is another primary device in the group
-            const targetId = deviceIdMap.get(
-              results.find(r => r.device.toLowerCase() === neighbor.neighborName.toLowerCase())?.device || ''
-            )
-            if (!targetId) continue
-
-            // Deduplicate (A->B and B->A)
-            const connKey = [sourceId, targetId].sort().join('-')
-            if (createdConnections.has(connKey)) continue
-            createdConnections.add(connKey)
-
-            try {
-              await createTopologyConnection(savedTopology.id, {
-                source_device_id: sourceId,
-                target_device_id: targetId,
-                source_interface: neighbor.localInterface,
-                target_interface: neighbor.neighborInterface || undefined,
-              })
-            } catch (err) {
-              console.error('Failed to create connection:', err)
-            }
-          }
+      // Identity index: lowercase alias (sysName | IP | tab name) → canonical
+      // device ID. Lets us detect "this neighbor is the same device we already
+      // added under a different name" — fixes the common case where one tab
+      // is named by IP (e.g. 172.30.0.200) but appears in another device's
+      // CDP/LLDP table by hostname (e.g. RR1-NYC) or vice-versa.
+      const aliasToDeviceId = new Map<string, string>()
+      const registerAlias = (alias: string | undefined | null, deviceId: string) => {
+        if (!alias) return
+        const key = alias.toLowerCase().trim()
+        if (key && !aliasToDeviceId.has(key)) {
+          aliasToDeviceId.set(key, deviceId)
         }
       }
 
-      // Step 4: Add neighbor devices (not in the group) with 'discovery:neighbor' notes
-      const addedNeighborNames = new Set<string>()
+      // Register aliases for every primary device we just created so neighbor
+      // resolution below can find them under any of (tab name, sysName, IP).
+      for (const result of results) {
+        const id = deviceIdMap.get(result.device)
+        if (!id) continue
+        registerAlias(result.device, id)
+        registerAlias(result.sysName, id)
+        registerAlias(result.ip, id)
+      }
+
+      const createdConnections = new Set<string>()
       let neighborIndex = 0
 
+      // Single pass: for each primary's neighbors, either link to an existing
+      // node (when alias resolves) or add as a new neighbor node and register
+      // its aliases for the rest of the pass.
       for (const result of results) {
-        const sourceDeviceId = deviceIdMap.get(result.device)
-        if (!sourceDeviceId) continue
+        const sourceId = deviceIdMap.get(result.device)
+        if (!sourceId) continue
 
         const resultIndex = results.indexOf(result)
         const sourceX = 300 + (resultIndex % 3) * 200
         const sourceY = 200 + Math.floor(resultIndex / 3) * 150
 
         for (const neighbor of result.neighbors) {
-          const neighborKey = neighbor.neighborName.toLowerCase()
-          if (groupDeviceNames.has(neighborKey)) continue // Already a primary device
-          if (addedNeighborNames.has(neighborKey)) continue // Already added as neighbor
+          const nameKey = neighbor.neighborName?.toLowerCase().trim() ?? ''
+          const ipKey = neighbor.neighborIp?.toLowerCase().trim() ?? ''
+          // Resolve identity: try name first, then IP — first hit wins.
+          const existingId =
+            (nameKey && aliasToDeviceId.get(nameKey)) ||
+            (ipKey && aliasToDeviceId.get(ipKey))
 
-          // Position neighbors in a fan around the source device
+          if (existingId) {
+            // Same device already on the canvas (either as a primary or a
+            // previously-added neighbor). Just draw the link.
+            if (existingId === sourceId) continue
+            const connKey = [sourceId, existingId].sort().join('-')
+            if (createdConnections.has(connKey)) continue
+            createdConnections.add(connKey)
+            try {
+              await createTopologyConnection(savedTopology.id, {
+                source_device_id: sourceId,
+                target_device_id: existingId,
+                source_interface: neighbor.localInterface,
+                target_interface: neighbor.neighborInterface || undefined,
+              })
+            } catch (err) {
+              console.error('Failed to create connection:', err)
+            }
+            continue
+          }
+
+          // Net-new neighbor — add it to the topology + register its aliases.
+          // Position in a fan around the source device.
           const angle = (neighborIndex * 45) * (Math.PI / 180)
           const radius = 120
           const nx = sourceX + Math.cos(angle) * radius
           const ny = sourceY + Math.sin(angle) * radius
 
-          try {
-            // Infer device type from neighbor name, then platform description
-            let neighborDeviceType = 'unknown'
-            const nName = neighbor.neighborName.toLowerCase()
-            if (nName.startsWith('pe') || nName.startsWith('p-') || nName.includes('-pe') ||
-                nName.startsWith('rtr') || nName.startsWith('rr') || nName.includes('router') ||
-                /^p\d/.test(nName)) {
+          // Infer device type from neighbor name, then platform description
+          let neighborDeviceType = 'unknown'
+          const nName = neighbor.neighborName.toLowerCase()
+          if (nName.startsWith('pe') || nName.startsWith('p-') || nName.includes('-pe') ||
+              nName.startsWith('rtr') || nName.startsWith('rr') || nName.includes('router') ||
+              /^p\d/.test(nName)) {
+            neighborDeviceType = 'router'
+          } else if (nName.startsWith('sw') || nName.includes('switch')) {
+            neighborDeviceType = 'switch'
+          } else if (nName.startsWith('fw') || nName.includes('firewall') || nName.startsWith('asa')) {
+            neighborDeviceType = 'firewall'
+          }
+          if (neighborDeviceType === 'unknown' && neighbor.neighborPlatform) {
+            const platLower = neighbor.neighborPlatform.toLowerCase()
+            if (platLower.includes('router') || platLower.includes('ios xr') || platLower.includes('junos')) {
               neighborDeviceType = 'router'
-            } else if (nName.startsWith('sw') || nName.includes('switch')) {
+            } else if (platLower.includes('switch') || platLower.includes('catalyst') || platLower.includes('nexus') ||
+                       platLower.includes('eos') || platLower.includes('arista')) {
               neighborDeviceType = 'switch'
-            } else if (nName.startsWith('fw') || nName.includes('firewall') || nName.startsWith('asa')) {
+            } else if (platLower.includes('firewall') || platLower.includes('fortigate') || platLower.includes('asa')) {
               neighborDeviceType = 'firewall'
+            } else if (platLower.includes('ios') || platLower.includes('cisco')) {
+              neighborDeviceType = 'router'
             }
+          }
 
-            // Refine with neighbor platform if name didn't match
-            if (neighborDeviceType === 'unknown' && neighbor.neighborPlatform) {
-              const platLower = neighbor.neighborPlatform.toLowerCase()
-              if (platLower.includes('router') || platLower.includes('ios xr') || platLower.includes('junos')) {
-                neighborDeviceType = 'router'
-              } else if (platLower.includes('switch') || platLower.includes('catalyst') || platLower.includes('nexus') ||
-                         platLower.includes('eos') || platLower.includes('arista')) {
-                neighborDeviceType = 'switch'
-              } else if (platLower.includes('firewall') || platLower.includes('fortigate') || platLower.includes('asa')) {
-                neighborDeviceType = 'firewall'
-              } else if (platLower.includes('ios') || platLower.includes('cisco')) {
-                neighborDeviceType = 'router'
-              }
-            }
-
+          try {
             const neighborResult = await addNeighborDevice(savedTopology.id, {
               name: neighbor.neighborName,
               host: neighbor.neighborIp || '',
@@ -3881,18 +3914,17 @@ def main(command: str = "show version"):
               snmp_profile_id: result.snmpProfileId,
             })
             neighborIndex++
-            addedNeighborNames.add(neighborKey)
+            registerAlias(neighbor.neighborName, neighborResult.id)
+            registerAlias(neighbor.neighborIp, neighborResult.id)
 
-            // Persist neighbor status and platform info
             await updateDevice(savedTopology.id, neighborResult.id, {
               notes: 'discovery:neighbor',
               ...(neighbor.neighborPlatform ? { platform: neighbor.neighborPlatform } : {}),
               ...(neighbor.neighborIp ? { primary_ip: neighbor.neighborIp } : {}),
             })
 
-            // Create connection from source to neighbor
             await createTopologyConnection(savedTopology.id, {
-              source_device_id: sourceDeviceId,
+              source_device_id: sourceId,
               target_device_id: neighborResult.id,
               source_interface: neighbor.localInterface,
               target_interface: neighbor.neighborInterface || undefined,
@@ -3928,7 +3960,7 @@ def main(command: str = "show version"):
       console.error('Failed to save topology:', err)
       alert(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
-  }, [discoveryGroupName, discoveryDevices, tabs])
+  }, [discoveryGroupName, discoveryDevices, tabs, setDeviceEnrichment])
 
   // Discovery toast handlers
   const handleToastRunDiscovery = useCallback(() => {

@@ -23,6 +23,7 @@ import {
   formatRelativeTime,
 } from '../lib/enrichmentHelpers';
 import { snmpTryInterfaceStats, snmpTryCommunities, snmpGet, snmpWalk, type SnmpInterfaceStatsResponse } from '../api/snmp';
+import { parseSysDescr } from '../lib/sysDescrParser';
 import { getCurrentMode } from '../api/client';
 import { formatRate } from '../utils/formatRate';
 import { saveEnrichmentToDoc } from '../lib/enrichmentExport';
@@ -896,15 +897,27 @@ export default function DeviceDetailTab({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canPoll]);
 
+  // Last-resort fallbacks parsed from the locally-polled SNMP system info.
+  // Only kicks in when neither the enrichment cache nor the persisted device
+  // record has the field — i.e. when DeviceDetailTab is opened directly from
+  // a session tab (no topology context, EnrichmentContext empty for this
+  // session). The data is fetched live in the SNMP-poll effect above.
+  const parsedDescr = useMemo(
+    () => parseSysDescr(snmpSystemInfo?.['Description']),
+    [snmpSystemInfo]
+  );
+
   // Get display values
-  const vendor = enrichment?.vendor || device?.vendor || 'Unknown';
-  const model = enrichment?.model || device?.model || device?.platform || 'Unknown';
-  const osVersion = enrichment?.osVersion || device?.version || 'Unknown';
+  const vendor = enrichment?.vendor || device?.vendor || parsedDescr.vendor || 'Unknown';
+  const model = enrichment?.model || device?.model || device?.platform || parsedDescr.model || 'Unknown';
+  const osVersion = enrichment?.osVersion || device?.version || parsedDescr.osVersion || 'Unknown';
   const serial = enrichment?.serialNumber || device?.serial || 'N/A';
   const hostname = enrichment?.hostname || device?.name || deviceName;
   const deviceType = device?.type || 'unknown';
 
-  // Uptime
+  // Uptime — fall back to the SNMP sysUpTime string the poll already
+  // formatted into snmpSystemInfo['SNMP Uptime'] (e.g. "7h 35m") so we don't
+  // show "N/A" right next to a populated SNMP Uptime row.
   const getUptimeDisplay = (): string => {
     if (enrichment?.uptimeSeconds !== undefined) {
       return formatUptime(enrichment.uptimeSeconds);
@@ -914,6 +927,9 @@ export default function DeviceDetailTab({
     }
     if (device?.uptime) {
       return device.uptime;
+    }
+    if (snmpSystemInfo?.['SNMP Uptime']) {
+      return snmpSystemInfo['SNMP Uptime'];
     }
     return 'N/A';
   };
