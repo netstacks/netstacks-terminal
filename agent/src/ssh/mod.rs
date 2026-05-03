@@ -3,6 +3,8 @@
 pub mod host_keys;
 pub mod approvals;
 pub mod jump;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 use futures::future::join_all;
 use russh::client::{self, KeyboardInteractiveAuthResponse};
@@ -384,6 +386,106 @@ impl SshSession {
         let handle = connect_and_authenticate(&config, false).await?;
 
         // Open session channel
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+
+        // Request PTY with xterm-256color terminal type and caller-specified size
+        channel
+            .request_pty(
+                false,
+                "xterm-256color",
+                cols,    // columns
+                rows,    // rows
+                0,       // pixel width
+                0,       // pixel height
+                &[],
+            )
+            .await
+            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+
+        // Request shell
+        channel
+            .request_shell(false)
+            .await
+            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+
+        // Create internal channels for non-blocking communication
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
+        let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Spawn a task to handle all channel I/O
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    // Handle incoming data from SSH
+                    msg = channel.wait() => {
+                        match msg {
+                            Some(ChannelMsg::Data { data }) => {
+                                if output_tx.send(data.to_vec()).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(ChannelMsg::ExtendedData { data, .. }) => {
+                                if output_tx.send(data.to_vec()).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Handle outgoing data to SSH
+                    Some(data) = input_rx.recv() => {
+                        use std::io::Cursor;
+                        let mut cursor = Cursor::new(data);
+                        if channel.data(&mut cursor).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Handle resize requests
+                    Some((cols, rows)) = resize_rx.recv() => {
+                        let _ = channel.window_change(cols, rows, 0, 0).await;
+                    }
+                }
+            }
+            // Clean up
+            let _ = channel.eof().await;
+            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        });
+
+        Ok(Self {
+            input_tx,
+            resize_tx,
+            output_rx: Mutex::new(output_rx),
+            _closed: Mutex::new(false),
+        })
+    }
+
+    /// Connect to a target host through a jump host and open a shell session.
+    /// Same PTY and I/O semantics as `connect()`, but the underlying TCP
+    /// connection goes through russh's direct-tcpip channel.
+    ///
+    /// `cols` and `rows` set the initial PTY dimensions (defaults to 80x24 if 0).
+    pub async fn connect_via_jump(
+        target: SshConfig,
+        jump: SshConfig,
+        cols: u32,
+        rows: u32,
+    ) -> Result<Self, SshError> {
+        let cols = if cols == 0 { 80 } else { cols };
+        let rows = if rows == 0 { 24 } else { rows };
+
+        // Use the jump module helper. Pass `None` for approvals — the
+        // approvals service is not currently threaded through here; if
+        // T9 needs it, plumb it as a parameter then.
+        let handle = crate::ssh::jump::connect_via_jump(&target, &jump, None).await?;
+
+        // Open session channel, request PTY, request shell — same as connect().
         let mut channel = handle
             .channel_open_session()
             .await
