@@ -1350,6 +1350,44 @@ impl LocalDataProvider {
 
         Ok(())
     }
+
+    /// Validate that creating/updating a jump host whose auth profile is
+    /// `profile_id` won't form a chain. Fails if the profile already has its
+    /// own `jump_host_id` set.
+    async fn validate_jump_host_profile_is_leaf(
+        pool: &SqlitePool,
+        new_jump_name: &str,
+        profile_id: &str,
+    ) -> Result<(), ProviderError> {
+        let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT p.name, p.jump_host_id, \
+                    (SELECT name FROM jump_hosts WHERE id = p.jump_host_id) \
+             FROM credential_profiles p WHERE p.id = ?"
+        )
+        .bind(profile_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let Some((profile_name, profile_jh_id, inner_jump_name)) = row else {
+            return Err(ProviderError::Validation(format!(
+                "Cannot configure jump host '{}' — auth profile '{}' does not exist.",
+                new_jump_name, profile_id
+            )));
+        };
+
+        if profile_jh_id.is_some() {
+            let inner = inner_jump_name.unwrap_or_else(|| "<unknown>".into());
+            return Err(ProviderError::Validation(format!(
+                "Cannot configure jump host '{}' — its auth profile '{}' itself has a jump host \
+                 configured ('{}'). Jump hosts cannot be chained. \
+                 Clear the jump host on profile '{}' first.",
+                new_jump_name, profile_name, inner, profile_name
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2959,6 +2997,9 @@ impl DataProvider for LocalDataProvider {
         let id = Uuid::new_v4().to_string();
         let now = format_datetime(&Utc::now());
 
+        // Validate that the auth profile is a leaf (no jump_host_id)
+        Self::validate_jump_host_profile_is_leaf(&self.pool, &jump_host.name, &jump_host.profile_id).await?;
+
         // Verify profile exists
         let _ = self.get_profile(&jump_host.profile_id).await?;
 
@@ -2991,6 +3032,9 @@ impl DataProvider for LocalDataProvider {
         let host = update.host.unwrap_or(current.host);
         let port = update.port.unwrap_or(current.port) as i32;
         let profile_id = update.profile_id.unwrap_or(current.profile_id);
+
+        // Validate that the auth profile is a leaf (no jump_host_id)
+        Self::validate_jump_host_profile_is_leaf(&self.pool, &name, &profile_id).await?;
 
         // Verify profile exists if updated
         let _ = self.get_profile(&profile_id).await?;
@@ -6676,5 +6720,48 @@ mod tests {
         assert!(msg.contains("edge-bastion"), "msg should name chosen jump: {msg}");
         assert!(msg.contains("bastion-creds"), "msg should name jump's profile: {msg}");
         assert!(msg.contains("inner-bastion"), "msg should name inner jump: {msg}");
+    }
+
+    #[tokio::test]
+    async fn cannot_create_jump_host_pointing_at_chained_profile() {
+        let p = setup_provider().await;
+        // Build a leaf profile to back an inner jump.
+        let inner_backing = p.create_profile(NewCredentialProfile {
+            name: "inner-backing".into(), username: "x".into(),
+            auth_type: AuthType::Password, key_path: None,
+            port: 22, keepalive_interval: 30, connection_timeout: 10,
+            terminal_theme: None, default_font_size: None, default_font_family: None,
+            scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
+            reconnect_delay: 5, cli_flavor: CliFlavor::default(),
+            auto_commands: vec![], jump_host_id: None,
+        }).await.unwrap();
+        let inner_jh = p.create_jump_host(NewJumpHost {
+            name: "inner-bastion".into(), host: "10.0.0.2".into(),
+            port: 22, profile_id: inner_backing.id.clone(),
+        }).await.unwrap();
+        // Profile that has its own jump (legacy / direct-DB to skip profile validator).
+        let chained_profile = p.create_profile(NewCredentialProfile {
+            name: "bastion-creds".into(), username: "bastion".into(),
+            auth_type: AuthType::Password, key_path: None,
+            port: 22, keepalive_interval: 30, connection_timeout: 10,
+            terminal_theme: None, default_font_size: None, default_font_family: None,
+            scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
+            reconnect_delay: 5, cli_flavor: CliFlavor::default(),
+            auto_commands: vec![], jump_host_id: None,
+        }).await.unwrap();
+        sqlx::query("UPDATE credential_profiles SET jump_host_id = ? WHERE id = ?")
+            .bind(&inner_jh.id).bind(&chained_profile.id)
+            .execute(p.get_pool()).await.unwrap();
+
+        // Now try to create a jump host that uses chained_profile — must fail.
+        let err = p.create_jump_host(NewJumpHost {
+            name: "edge-bastion".into(), host: "10.0.0.1".into(),
+            port: 22, profile_id: chained_profile.id.clone(),
+        }).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("edge-bastion"), "msg should name new jump: {msg}");
+        assert!(msg.contains("bastion-creds"), "msg should name profile: {msg}");
+        assert!(msg.contains("inner-bastion"), "msg should name inner jump: {msg}");
+        assert!(msg.contains("Jump hosts cannot be chained"), "msg should explain rule: {msg}");
     }
 }
