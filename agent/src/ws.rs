@@ -1313,8 +1313,9 @@ async fn poll_single_target(
 
     // Try each community with snmp_bulk_interface_stats (same try-communities pattern)
     let mut last_error: Option<String> = None;
+    let dest = crate::snmp::SnmpDest::direct(host.as_str(), port);
     for community in &communities {
-        match crate::snmp::snmp_bulk_interface_stats(host, port, community, &target.interfaces).await {
+        match crate::snmp::snmp_bulk_interface_stats(&dest, community, &target.interfaces).await {
             Ok(stats) => {
                 let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -1402,7 +1403,7 @@ async fn poll_single_target(
 
                 // Fetch device system info (one extra UDP round-trip for sysUpTime + sysDescr)
                 let (sys_uptime_seconds, sys_descr) =
-                    match crate::snmp::snmp_device_system_info(host, port, community).await {
+                    match crate::snmp::snmp_device_system_info(&dest, community).await {
                         Ok(info) => (
                             info.sys_uptime_hundredths.map(|h| h as f64 / 100.0),
                             info.sys_descr,
@@ -1415,7 +1416,7 @@ async fn poll_single_target(
 
                 // Fetch CPU/memory resources (1-2 extra UDP round-trips)
                 let (cpu_percent, memory_percent, memory_used_mb, memory_total_mb) =
-                    match crate::snmp::snmp_device_resources(host, port, community).await {
+                    match crate::snmp::snmp_device_resources(&dest, community).await {
                         Ok(res) => {
                             let mem_pct = match (res.memory_used_bytes, res.memory_free_bytes) {
                                 (Some(used), Some(free)) if used + free > 0 => {

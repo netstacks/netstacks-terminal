@@ -6,11 +6,68 @@
 //! All functions are stateless helpers that create a session per-call.
 //! This is intentional for network equipment polling where connections
 //! are lightweight UDP exchanges, not persistent TCP sessions.
+//!
+//! For devices reachable only via a jump host (where direct UDP/161 won't
+//! work — SSH only forwards TCP), see `cli_parse` (and the upcoming T2
+//! `cli_exec`) which run net-snmp CLI tools on the jump and parse stdout
+//! back into the same `SnmpValueEntry` shape.
+
+pub mod cli_parse;
+pub mod cli_exec;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::time::timeout;
+
+/// Where an SNMP operation should be performed.
+///
+/// `Direct` keeps today's pure-Rust UDP path: open a UDP socket from the
+/// agent process to `host:port`. `ViaJump` is for devices reachable only
+/// via a jump host (SSH only forwards TCP, so UDP/161 can't be tunneled
+/// directly): open an SSH exec channel on the jump and run net-snmp's CLI
+/// tools there. Both paths produce the same `SnmpValueEntry` shape, so
+/// every downstream consumer (interface stats, neighbor discovery,
+/// frontend rendering) is dest-agnostic.
+///
+/// The `ViaJump` variant takes a fully-resolved `SshConfig` rather than a
+/// jump id — the SNMP module doesn't know about session/profile lookup or
+/// vault resolution. Callers (typically `api.rs` handlers) build the
+/// SshConfig from `resolve_effective_jump` before dispatching.
+#[derive(Debug, Clone)]
+pub enum SnmpDest {
+    Direct {
+        host: String,
+        port: u16,
+    },
+    // Constructed by tests in this commit and by api.rs handlers in the
+    // next commit (T3 — API + frontend wiring). Without that wiring there
+    // is no production caller in release builds, hence the allow.
+    #[allow(dead_code)]
+    ViaJump {
+        /// SSH connection target — the jump host. Includes its auth.
+        jump: crate::ssh::SshConfig,
+        /// The actual SNMP target the jump will reach over UDP.
+        target_host: String,
+        target_port: u16,
+    },
+}
+
+impl SnmpDest {
+    /// Convenience constructor for the common direct case.
+    pub fn direct(host: impl Into<String>, port: u16) -> Self {
+        Self::Direct { host: host.into(), port }
+    }
+
+    /// The (host, port) pair the SNMP query is ultimately aimed at,
+    /// regardless of whether it travels direct or via a jump.
+    fn target(&self) -> (&str, u16) {
+        match self {
+            Self::Direct { host, port } => (host.as_str(), *port),
+            Self::ViaJump { target_host, target_port, .. } => (target_host.as_str(), *target_port),
+        }
+    }
+}
 
 /// Default SNMP operation timeout (5 seconds)
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,7 +109,7 @@ pub enum SnmpError {
     InterfaceNotFound(String),
 
     #[error("SNMP error: {0}")]
-    _Other(String),
+    Other(String),
 }
 
 // === Value Types ===
@@ -253,22 +310,21 @@ fn map_snmp_error(err: snmp2::Error, context: &str) -> SnmpError {
 
 /// Perform an SNMPv2c GET for one or more OIDs.
 ///
-/// Returns the values for each requested OID.
-///
-/// # Arguments
-/// * `host` - Target hostname or IP address
-/// * `port` - UDP port (typically 161)
-/// * `community` - SNMP community string
-/// * `oids` - OID strings in dotted notation (e.g., "1.3.6.1.2.1.1.1.0")
+/// Returns the values for each requested OID. Routes either over UDP/161
+/// directly or as a `snmpget` invocation on a jump host, depending on
+/// `dest`.
 pub async fn snmp_get(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     community: &str,
     oids: &[&str],
 ) -> Result<Vec<SnmpValueEntry>, SnmpError> {
     if oids.is_empty() {
         return Ok(Vec::new());
     }
+    if let SnmpDest::ViaJump { jump, target_host, target_port } = dest {
+        return cli_exec::snmp_get_via_jump(jump, target_host, *target_port, community, oids).await;
+    }
+    let (host, port) = dest.target();
 
     let mut session = create_session(host, port, community).await?;
 
@@ -342,20 +398,20 @@ pub async fn snmp_get(
 
 /// Perform an SNMPv2c WALK using GETNEXT loop.
 ///
-/// Walks the subtree under `root_oid`, collecting all values until
-/// the returned OID is outside the root subtree.
-///
-/// # Arguments
-/// * `host` - Target hostname or IP address
-/// * `port` - UDP port (typically 161)
-/// * `community` - SNMP community string
-/// * `root_oid` - Root OID to walk (e.g., "1.3.6.1.2.1.2.2.1" for ifTable)
+/// Walks the subtree under `root_oid`, collecting all values until the
+/// returned OID is outside the root subtree. Routes either over UDP/161
+/// directly or as a `snmpwalk` invocation on a jump host, depending on
+/// `dest`.
 pub async fn snmp_walk(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     community: &str,
     root_oid: &str,
 ) -> Result<Vec<(String, SnmpValue)>, SnmpError> {
+    if let SnmpDest::ViaJump { jump, target_host, target_port } = dest {
+        return cli_exec::snmp_walk_via_jump(jump, target_host, *target_port, community, root_oid).await;
+    }
+    let (host, port) = dest.target();
+
     let mut session = create_session(host, port, community).await?;
     let root_components = parse_oid_components(root_oid)?;
     let mut current_oid = snmp2::Oid::from(root_components.as_slice())
@@ -430,19 +486,22 @@ pub async fn snmp_walk(
 /// This is useful for auto-detecting which community string works for a device.
 ///
 /// # Arguments
-/// * `host` - Target hostname or IP address
-/// * `port` - UDP port (typically 161)
+/// * `dest` - Where to query (direct UDP or via a jump host)
 /// * `communities` - List of community strings to try
 pub async fn try_communities(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     communities: &[String],
 ) -> Result<SnmpTryCommunityResponse, SnmpError> {
+    if let SnmpDest::ViaJump { jump, target_host, target_port } = dest {
+        return cli_exec::try_communities_via_jump(jump, target_host, *target_port, communities).await;
+    }
+    let (host, port) = dest.target();
+
     // sysName.0 OID: 1.3.6.1.2.1.1.5.0
     let sys_name_oid = "1.3.6.1.2.1.1.5.0";
 
     for community in communities {
-        match snmp_get(host, port, community, &[sys_name_oid]).await {
+        match snmp_get(dest, community, &[sys_name_oid]).await {
             Ok(values) => {
                 if let Some(entry) = values.first() {
                     let sys_name = match &entry.value {
@@ -614,11 +673,11 @@ fn snmp_value_to_string(val: &SnmpValue) -> String {
 /// * `community` - SNMP community string
 /// * `interface_name` - Interface name or abbreviation (e.g., "Gi0/0", "GigabitEthernet0/0")
 pub async fn snmp_interface_stats(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     community: &str,
     interface_name: &str,
 ) -> Result<InterfaceStats, SnmpError> {
+    let (host, port) = dest.target();
     // Step 1: Walk ifDescr, ifName, and ifAlias to find the matching ifIndex.
     // LLDP port descriptions may map to ifAlias rather than ifDescr, so we
     // search all three tables to maximise the chance of a match.
@@ -633,7 +692,7 @@ pub async fn snmp_interface_stats(
         if found_index.is_some() {
             break;
         }
-        let walk_results = match snmp_walk(host, port, community, table_oid).await {
+        let walk_results = match snmp_walk(dest, community, table_oid).await {
             Ok(results) => results,
             Err(_) => continue, // Table might not exist on this device
         };
@@ -690,7 +749,7 @@ pub async fn snmp_interface_stats(
         format!("1.3.6.1.2.1.31.1.1.1.18.{}", idx), // ifAlias
     ];
     let oid_refs: Vec<&str> = oids_to_get.iter().map(|s| s.as_str()).collect();
-    let values = snmp_get(host, port, community, &oid_refs).await?;
+    let values = snmp_get(dest, community, &oid_refs).await?;
 
     // Build a lookup map by OID suffix for easier access
     let get_val = |oid_suffix: &str| -> &SnmpValue {
@@ -796,8 +855,7 @@ pub async fn snmp_interface_stats(
 /// * `community` - SNMP community string
 /// * `interface_names` - Interface names or abbreviations (e.g., ["Gi0/0", "Te1/0/1"])
 pub async fn snmp_bulk_interface_stats(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     community: &str,
     interface_names: &[String],
 ) -> Result<Vec<InterfaceStats>, SnmpError> {
@@ -807,7 +865,7 @@ pub async fn snmp_bulk_interface_stats(
 
     // Step 1: ONE ifDescr walk to build index map for the whole device
     let if_descr_oid = "1.3.6.1.2.1.2.2.1.2";
-    let walk_results = snmp_walk(host, port, community, if_descr_oid).await?;
+    let walk_results = snmp_walk(dest, community, if_descr_oid).await?;
 
     // Step 2: Match all requested interface_names against the walk results
     let mut matched: Vec<(u64, String)> = Vec::new(); // (ifIndex, requested_name)
@@ -866,7 +924,7 @@ pub async fn snmp_bulk_interface_stats(
         ];
         let oid_refs: Vec<&str> = oids_to_get.iter().map(|s| s.as_str()).collect();
 
-        match snmp_get(host, port, community, &oid_refs).await {
+        match snmp_get(dest, community, &oid_refs).await {
             Ok(values) => {
                 let get_val = |oid_suffix: &str| -> &SnmpValue {
                     let target_oid = format!("{}.{}", oid_suffix, idx);
@@ -954,6 +1012,7 @@ pub async fn snmp_bulk_interface_stats(
                 });
             }
             Err(e) => {
+                let (host, port) = dest.target();
                 tracing::warn!(
                     "Failed to get stats for ifIndex {} on {}:{}: {}",
                     idx, host, port, e
@@ -985,8 +1044,7 @@ pub struct DeviceResourceInfo {
 /// then falls back to HOST-RESOURCES-MIB (hrProcessorLoad) for CPU.
 /// Cost: 1-2 extra UDP round-trips per device.
 pub async fn snmp_device_resources(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     community: &str,
 ) -> Result<DeviceResourceInfo, SnmpError> {
     // Try Cisco-specific OIDs first (single GET for all 3)
@@ -995,7 +1053,7 @@ pub async fn snmp_device_resources(
     let cisco_mem_free_oid = "1.3.6.1.4.1.9.9.48.1.1.1.6.1";  // ciscoMemoryPoolFree
 
     let cisco_result = snmp_get(
-        host, port, community,
+        dest, community,
         &[cisco_cpu_oid, cisco_mem_used_oid, cisco_mem_free_oid],
     ).await;
 
@@ -1031,7 +1089,7 @@ pub async fn snmp_device_resources(
     let hr_processor_load_oid = "1.3.6.1.2.1.25.3.3.1.2"; // hrProcessorLoad
     let mut cpu_percent = None;
 
-    if let Ok(entries) = snmp_walk(host, port, community, hr_processor_load_oid).await {
+    if let Ok(entries) = snmp_walk(dest, community, hr_processor_load_oid).await {
         if !entries.is_empty() {
             let mut total: f64 = 0.0;
             let mut count: usize = 0;
@@ -1068,14 +1126,13 @@ pub struct DeviceSystemInfo {
 ///
 /// Lightweight: one UDP round-trip for 2 OIDs.
 pub async fn snmp_device_system_info(
-    host: &str,
-    port: u16,
+    dest: &SnmpDest,
     community: &str,
 ) -> Result<DeviceSystemInfo, SnmpError> {
     let sys_uptime_oid = "1.3.6.1.2.1.1.3.0"; // sysUpTime.0
     let sys_descr_oid = "1.3.6.1.2.1.1.1.0";  // sysDescr.0
 
-    let values = snmp_get(host, port, community, &[sys_uptime_oid, sys_descr_oid]).await?;
+    let values = snmp_get(dest, community, &[sys_uptime_oid, sys_descr_oid]).await?;
 
     let mut sys_uptime_hundredths = None;
     let mut sys_descr = None;

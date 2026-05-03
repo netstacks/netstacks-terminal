@@ -83,6 +83,7 @@ mod tests {
             accept_password: None,
             accept_key_user: Some("jumpuser".into()),
             allow_direct_tcpip: true,
+            exec_responder: None,
             host_key: jump_host_key,
         })
         .await;
@@ -92,6 +93,7 @@ mod tests {
             accept_password: Some(("devuser".into(), "devpw".into())),
             accept_key_user: None,
             allow_direct_tcpip: false,
+            exec_responder: None,
             host_key: target_host_key,
         })
         .await;
@@ -151,6 +153,7 @@ mod tests {
             accept_password: Some(("right-user".into(), "right-pw".into())),
             accept_key_user: None,
             allow_direct_tcpip: true,
+            exec_responder: None,
             host_key: jump_host_key,
         })
         .await;
@@ -192,6 +195,7 @@ mod tests {
             accept_password: Some(("jumpuser".into(), "jumppw".into())),
             accept_key_user: None,
             allow_direct_tcpip: true,
+            exec_responder: None,
             host_key: jump_host_key,
         })
         .await;
@@ -199,6 +203,7 @@ mod tests {
             accept_password: Some(("right".into(), "right".into())),
             accept_key_user: None,
             allow_direct_tcpip: false,
+            exec_responder: None,
             host_key: target_host_key,
         })
         .await;
@@ -237,6 +242,7 @@ mod tests {
             accept_password: Some(("u".into(), "p".into())),
             accept_key_user: None,
             allow_direct_tcpip: false, // KEY: refuse forwarding
+            exec_responder: None,
             host_key: jump_host_key,
         })
         .await;

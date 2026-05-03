@@ -235,21 +235,24 @@ fn lldp_local_port_num(suffix: &str) -> Option<String> {
 /// Walks all LLDP remote tables concurrently and correlates entries by
 /// their 3-component index (timeMark.localPortNum.remIndex).
 pub async fn discover_lldp_neighbors(
-    host: &str,
-    port: u16,
+    dest: &snmp::SnmpDest,
     community: &str,
 ) -> Result<Vec<DiscoveredNeighbor>, String> {
+    let (host, port) = match dest {
+        snmp::SnmpDest::Direct { host, port } => (host.as_str(), *port),
+        snmp::SnmpDest::ViaJump { target_host, target_port, .. } => (target_host.as_str(), *target_port),
+    };
     tracing::debug!("Starting LLDP SNMP discovery on {}:{}", host, port);
 
     // Walk all LLDP tables concurrently
     let (sys_name_result, port_id_result, port_desc_result, sys_desc_result, man_addr_result, loc_port_result, loc_port_id_result) = tokio::join!(
-        snmp::snmp_walk(host, port, community, LLDP_REM_SYS_NAME),
-        snmp::snmp_walk(host, port, community, LLDP_REM_PORT_ID),
-        snmp::snmp_walk(host, port, community, LLDP_REM_PORT_DESC),
-        snmp::snmp_walk(host, port, community, LLDP_REM_SYS_DESC),
-        snmp::snmp_walk(host, port, community, LLDP_REM_MAN_ADDR),
-        snmp::snmp_walk(host, port, community, LLDP_LOC_PORT_DESC),
-        snmp::snmp_walk(host, port, community, LLDP_LOC_PORT_ID),
+        snmp::snmp_walk(dest, community, LLDP_REM_SYS_NAME),
+        snmp::snmp_walk(dest, community, LLDP_REM_PORT_ID),
+        snmp::snmp_walk(dest, community, LLDP_REM_PORT_DESC),
+        snmp::snmp_walk(dest, community, LLDP_REM_SYS_DESC),
+        snmp::snmp_walk(dest, community, LLDP_REM_MAN_ADDR),
+        snmp::snmp_walk(dest, community, LLDP_LOC_PORT_DESC),
+        snmp::snmp_walk(dest, community, LLDP_LOC_PORT_ID),
     );
 
     let sys_names = sys_name_result.map_err(|e| format!("LLDP SysName walk failed: {}", e))?;
@@ -361,18 +364,21 @@ pub async fn discover_lldp_neighbors(
 /// Walks CDP cache tables and correlates entries by their
 /// 2-component index (ifIndex.deviceIndex).
 pub async fn discover_cdp_neighbors(
-    host: &str,
-    port: u16,
+    dest: &snmp::SnmpDest,
     community: &str,
 ) -> Result<Vec<DiscoveredNeighbor>, String> {
+    let (host, port) = match dest {
+        snmp::SnmpDest::Direct { host, port } => (host.as_str(), *port),
+        snmp::SnmpDest::ViaJump { target_host, target_port, .. } => (target_host.as_str(), *target_port),
+    };
     tracing::debug!("Starting CDP SNMP discovery on {}:{}", host, port);
 
     // Walk all CDP tables concurrently
     let (device_id_result, address_result, platform_result, device_port_result) = tokio::join!(
-        snmp::snmp_walk(host, port, community, CDP_CACHE_DEVICE_ID),
-        snmp::snmp_walk(host, port, community, CDP_CACHE_ADDRESS),
-        snmp::snmp_walk(host, port, community, CDP_CACHE_PLATFORM),
-        snmp::snmp_walk(host, port, community, CDP_CACHE_DEVICE_PORT),
+        snmp::snmp_walk(dest, community, CDP_CACHE_DEVICE_ID),
+        snmp::snmp_walk(dest, community, CDP_CACHE_ADDRESS),
+        snmp::snmp_walk(dest, community, CDP_CACHE_PLATFORM),
+        snmp::snmp_walk(dest, community, CDP_CACHE_DEVICE_PORT),
     );
 
     let device_ids = device_id_result.map_err(|e| format!("CDP DeviceId walk failed: {}", e))?;
@@ -426,7 +432,7 @@ pub async fn discover_cdp_neighbors(
         } else {
             // Resolve ifIndex to ifDescr via SNMP GET
             let if_descr_oid = format!("1.3.6.1.2.1.2.2.1.2.{}", if_index);
-            let name = match snmp::snmp_get(host, port, community, &[&if_descr_oid]).await {
+            let name = match snmp::snmp_get(dest, community, &[&if_descr_oid]).await {
                 Ok(values) => values
                     .first()
                     .and_then(|v| snmp_value_to_string_lossy(&v.value))
@@ -456,12 +462,17 @@ pub async fn discover_cdp_neighbors(
 /// Returns an SnmpDiscoveryResult with the device sysName, discovered neighbors,
 /// the method used, and any error that occurred. Never panics.
 pub async fn discover_snmp_neighbors(
-    host: &str,
-    port: u16,
+    dest: &snmp::SnmpDest,
     community: &str,
 ) -> SnmpDiscoveryResult {
+    let (host, port) = match dest {
+        snmp::SnmpDest::Direct { host, port } => (host.as_str(), *port),
+        snmp::SnmpDest::ViaJump { target_host, target_port, .. } => (target_host.as_str(), *target_port),
+    };
+    let _ = port; // host is used for tracing/result building; port currently isn't needed here
+
     // Get sysName and sysDescr first (response varbinds are in request order)
-    let (sys_name, sys_descr) = match snmp::snmp_get(host, port, community, &[SYS_NAME_OID, SYS_DESCR_OID]).await {
+    let (sys_name, sys_descr) = match snmp::snmp_get(dest, community, &[SYS_NAME_OID, SYS_DESCR_OID]).await {
         Ok(values) => {
             let name = values.first().and_then(|v| snmp_value_to_string_lossy(&v.value));
             let descr = values.get(1).and_then(|v| snmp_value_to_string_lossy(&v.value));
@@ -474,7 +485,7 @@ pub async fn discover_snmp_neighbors(
     };
 
     // Try LLDP first
-    match discover_lldp_neighbors(host, port, community).await {
+    match discover_lldp_neighbors(dest, community).await {
         Ok(neighbors) if !neighbors.is_empty() => {
             return SnmpDiscoveryResult {
                 host: host.to_string(),
@@ -491,7 +502,7 @@ pub async fn discover_snmp_neighbors(
         Err(lldp_err) => {
             tracing::warn!("LLDP failed for {}: {}, trying CDP", host, lldp_err);
             // Try CDP as fallback
-            match discover_cdp_neighbors(host, port, community).await {
+            match discover_cdp_neighbors(dest, community).await {
                 Ok(neighbors) if !neighbors.is_empty() => {
                     return SnmpDiscoveryResult {
                         host: host.to_string(),
@@ -527,7 +538,7 @@ pub async fn discover_snmp_neighbors(
     }
 
     // LLDP returned empty, try CDP
-    match discover_cdp_neighbors(host, port, community).await {
+    match discover_cdp_neighbors(dest, community).await {
         Ok(neighbors) if !neighbors.is_empty() => {
             SnmpDiscoveryResult {
                 host: host.to_string(),

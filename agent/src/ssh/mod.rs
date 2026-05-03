@@ -78,6 +78,25 @@ pub struct SshConfig {
     pub legacy_ssh: bool,
 }
 
+// Manual Debug that redacts auth so passwords/passphrases never appear in
+// log output or `{:?}` traces (the auto-derive would expose them).
+impl std::fmt::Debug for SshConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let auth_kind = match self.auth {
+            SshAuth::Password(_) => "Password(<redacted>)",
+            SshAuth::KeyFile { .. } => "KeyFile { path: <set>, passphrase: <redacted> }",
+            SshAuth::_Certificate { .. } => "Certificate(<redacted>)",
+        };
+        f.debug_struct("SshConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("auth", &format_args!("{}", auth_kind))
+            .field("legacy_ssh", &self.legacy_ssh)
+            .finish()
+    }
+}
+
 use crate::models::{Session, CredentialProfile, ProfileCredential, AuthType};
 
 /// Build an SshConfig from a session, its credential profile, and optional vault credential.
@@ -967,6 +986,76 @@ where
     Ok(handle)
 }
 
+/// Result of `exec_on_remote` — the slim, programmatic counterpart to
+/// `CommandResult` (which is shaped for the command-runner UI).
+#[derive(Debug, Clone)]
+pub struct ExecResult {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// Exit status reported by the remote shell. `None` means the server
+    /// closed the channel without sending one (some servers do this for
+    /// signal-terminated processes); treat as failure.
+    pub exit_status: Option<u32>,
+}
+
+/// Open an SSH connection, exec a single command, drain stdout/stderr,
+/// capture exit status, disconnect. Programmatic primitive for callers
+/// that need the raw output + exit code (e.g. running net-snmp CLI tools
+/// on a jump host for SNMP-via-jump). For interactive UI command-running
+/// see `execute_command_on_session_with_approvals` instead.
+pub async fn exec_on_remote(
+    config: &SshConfig,
+    command: &str,
+    timeout_total: Duration,
+) -> Result<ExecResult, SshError> {
+    let result = tokio::time::timeout(timeout_total, async {
+        let handle = connect_and_authenticate(config, false).await?;
+
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+
+        channel
+            .exec(true, command.as_bytes())
+            .await
+            .map_err(|e| SshError::ChannelError(e.to_string()))?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_status: Option<u32> = None;
+
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                Some(ChannelMsg::ExtendedData { data, ext }) => {
+                    if ext == 1 {
+                        stderr.extend_from_slice(&data);
+                    } else {
+                        stdout.extend_from_slice(&data);
+                    }
+                }
+                Some(ChannelMsg::ExitStatus { exit_status: s }) => exit_status = Some(s),
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        Ok::<ExecResult, SshError>(ExecResult { stdout, stderr, exit_status })
+    })
+    .await;
+
+    match result {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(SshError::ConnectionFailed(format!(
+            "exec on {}:{} timed out after {}s",
+            config.host, config.port, timeout_total.as_secs()
+        ))),
+    }
+}
+
 /// Execute a command on a single session with timeout.
 ///
 /// Backwards-compatible wrapper without host-key approval. New callers
@@ -1655,5 +1744,110 @@ pub async fn execute_bulk_command(
         total_time_ms: start.elapsed().as_millis() as u64,
         success_count,
         error_count,
+    }
+}
+
+#[cfg(test)]
+mod exec_on_remote_tests {
+    use super::*;
+    use super::test_utils::{
+        ephemeral_ed25519, start_test_server, ExecResponse, TestServerConfig,
+    };
+    use std::sync::Arc;
+
+    fn cfg(host: std::net::SocketAddr) -> SshConfig {
+        SshConfig {
+            host: host.ip().to_string(),
+            port: host.port(),
+            username: "u".into(),
+            auth: SshAuth::Password("p".into()),
+            legacy_ssh: false,
+        }
+    }
+
+    /// Server that accepts password u/p and answers exec commands via the
+    /// supplied responder. Used by all 4 tests below.
+    async fn server_with_responder(
+        responder: impl Fn(&str) -> Option<ExecResponse> + Send + Sync + 'static,
+    ) -> std::net::SocketAddr {
+        start_test_server(TestServerConfig {
+            accept_password: Some(("u".into(), "p".into())),
+            accept_key_user: None,
+            allow_direct_tcpip: false,
+            exec_responder: Some(Arc::new(responder)),
+            host_key: ephemeral_ed25519(),
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn exec_on_remote_captures_stdout_and_zero_exit() {
+        let addr = server_with_responder(|cmd| {
+            assert_eq!(cmd, "echo hello");
+            Some(ExecResponse {
+                stdout: b"hello\n".to_vec(),
+                stderr: vec![],
+                exit_status: 0,
+            })
+        })
+        .await;
+
+        let r = exec_on_remote(&cfg(addr), "echo hello", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(r.stdout, b"hello\n");
+        assert!(r.stderr.is_empty());
+        assert_eq!(r.exit_status, Some(0));
+    }
+
+    #[tokio::test]
+    async fn exec_on_remote_propagates_nonzero_exit() {
+        let addr = server_with_responder(|_| Some(ExecResponse {
+            stdout: vec![],
+            stderr: vec![],
+            exit_status: 2,
+        }))
+        .await;
+
+        let r = exec_on_remote(&cfg(addr), "false", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(r.exit_status, Some(2));
+    }
+
+    #[tokio::test]
+    async fn exec_on_remote_captures_stderr_separately_from_stdout() {
+        let addr = server_with_responder(|_| Some(ExecResponse {
+            stdout: b"out\n".to_vec(),
+            stderr: b"err\n".to_vec(),
+            exit_status: 1,
+        }))
+        .await;
+
+        let r = exec_on_remote(&cfg(addr), "noisy-cmd", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(r.stdout, b"out\n");
+        assert_eq!(r.stderr, b"err\n");
+        assert_eq!(r.exit_status, Some(1));
+    }
+
+    #[tokio::test]
+    async fn exec_on_remote_reports_command_not_found_via_exit_127() {
+        // Mirror real shell behavior: missing command → stderr message + exit 127.
+        // The SNMP-via-jump path uses this exit code to surface a clear
+        // "snmpget not found on jump host" error.
+        let addr = server_with_responder(|_| Some(ExecResponse {
+            stdout: vec![],
+            stderr: b"bash: snmpget: command not found\n".to_vec(),
+            exit_status: 127,
+        }))
+        .await;
+
+        let r = exec_on_remote(&cfg(addr), "snmpget -v2c -c x 1.2.3.4 .1", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(r.exit_status, Some(127));
+        assert!(String::from_utf8_lossy(&r.stderr).contains("not found"));
     }
 }

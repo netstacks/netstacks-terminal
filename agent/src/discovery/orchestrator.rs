@@ -329,7 +329,8 @@ async fn discover_single_target(
                     let task_ip = ip.clone();
                     let community = community.clone();
                     let result = tokio::spawn(async move {
-                        snmp_neighbors::discover_snmp_neighbors(&task_ip, 161, &community).await
+                        let dest = crate::snmp::SnmpDest::direct(task_ip.as_str(), 161);
+                        snmp_neighbors::discover_snmp_neighbors(&dest, &community).await
                     })
                     .await;
 
@@ -606,8 +607,9 @@ async fn resolve_single_hop(
 
         // Step 2: Run SNMP neighbor discovery on management IP
         let mut neighbors = Vec::new();
+        let mgmt_dest = crate::snmp::SnmpDest::direct(mgmt_ip.as_str(), 161);
         for community in communities {
-            let result = snmp_neighbors::discover_snmp_neighbors(&mgmt_ip, 161, community).await;
+            let result = snmp_neighbors::discover_snmp_neighbors(&mgmt_dest, community).await;
             if !result.neighbors.is_empty() {
                 neighbors = result.neighbors;
                 break;
@@ -627,8 +629,9 @@ async fn resolve_single_hop(
     }
 
     // Step 3: Not resolved via integrations - try SNMP directly on hop IP
+    let hop_dest = crate::snmp::SnmpDest::direct(ip.as_str(), 161);
     for community in communities {
-        let result = snmp_neighbors::discover_snmp_neighbors(&ip, 161, community).await;
+        let result = snmp_neighbors::discover_snmp_neighbors(&hop_dest, community).await;
         if !result.neighbors.is_empty() {
             return HopResolutionResult {
                 hop_number,

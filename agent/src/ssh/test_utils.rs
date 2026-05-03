@@ -14,6 +14,18 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Canned response for an exec request the test server should serve.
+#[derive(Clone, Default)]
+pub(crate) struct ExecResponse {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_status: u32,
+}
+
+/// Map of exec command -> canned response. The match is against the full
+/// exec command string sent by the client.
+pub(crate) type ExecResponder = Arc<dyn Fn(&str) -> Option<ExecResponse> + Send + Sync>;
+
 /// Configuration for the test SSH server.
 #[derive(Clone)]
 pub(crate) struct TestServerConfig {
@@ -23,6 +35,10 @@ pub(crate) struct TestServerConfig {
     pub accept_key_user: Option<String>,
     /// Whether to allow direct-tcpip channels.
     pub allow_direct_tcpip: bool,
+    /// If Some, called for every exec_request. Returning Some(response)
+    /// makes the server emit that stdout/stderr + exit status. Returning
+    /// None makes the server reject the exec (channel close, no exit).
+    pub exec_responder: Option<ExecResponder>,
     /// Host key for the server.
     pub host_key: PrivateKey,
 }
@@ -116,6 +132,31 @@ impl russh::server::Handler for TestServer {
         let handle = session.handle();
         tokio::spawn(async move {
             let _ = handle.data(channel, b"READY\n".to_vec().into()).await;
+        });
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let cmd = String::from_utf8_lossy(data).to_string();
+        let responder = self.cfg.exec_responder.clone();
+        let handle = session.handle();
+        tokio::spawn(async move {
+            let response = responder.as_ref().and_then(|r| r(&cmd)).unwrap_or_default();
+            if !response.stdout.is_empty() {
+                let _ = handle.data(channel, response.stdout.into()).await;
+            }
+            if !response.stderr.is_empty() {
+                // ext = 1 = stderr per RFC 4254
+                let _ = handle.extended_data(channel, 1, response.stderr.into()).await;
+            }
+            let _ = handle.exit_status_request(channel, response.exit_status).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
         });
         Ok(())
     }
@@ -222,6 +263,7 @@ pub(crate) async fn start_jump_and_target(
         accept_password: Some((jump_user.into(), jump_pw.into())),
         accept_key_user: None,
         allow_direct_tcpip: true,
+        exec_responder: None,
         host_key: ephemeral_ed25519(),
     })
     .await;
@@ -230,6 +272,7 @@ pub(crate) async fn start_jump_and_target(
         accept_password: Some((target_user.into(), target_pw.into())),
         accept_key_user: None,
         allow_direct_tcpip: false,
+        exec_responder: None,
         host_key: ephemeral_ed25519(),
     })
     .await;

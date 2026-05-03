@@ -7087,7 +7087,8 @@ pub async fn snmp_get(
     tracing::info!("SNMP GET {}:{} OIDs: {:?}", req.host, port, req.oids);
 
     let oid_refs: Vec<&str> = req.oids.iter().map(|s| s.as_str()).collect();
-    let values = crate::snmp::snmp_get(&req.host, port, &req.community, &oid_refs)
+    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let values = crate::snmp::snmp_get(&dest, &req.community, &oid_refs)
         .await
         .map_err(|e| {
             let api_err = snmp_error_to_api_error(e);
@@ -7109,7 +7110,8 @@ pub async fn snmp_walk(
 
     tracing::info!("SNMP WALK {}:{} root: {}", req.host, port, req.root_oid);
 
-    let walk_results = crate::snmp::snmp_walk(&req.host, port, &req.community, &req.root_oid)
+    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let walk_results = crate::snmp::snmp_walk(&dest, &req.community, &req.root_oid)
         .await
         .map_err(|e| {
             let api_err = snmp_error_to_api_error(e);
@@ -7206,7 +7208,8 @@ pub async fn snmp_try_communities(
         return Err((StatusCode::BAD_REQUEST, Json(api_err)).into_response());
     }
 
-    let result = crate::snmp::try_communities(&req.host, port, &communities)
+    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let result = crate::snmp::try_communities(&dest, &communities)
         .await
         .map_err(|e| {
             let api_err = snmp_error_to_api_error(e);
@@ -7348,7 +7351,8 @@ pub async fn snmp_interface_stats(
         req.host, port, req.interface_name
     );
 
-    let stats = crate::snmp::snmp_interface_stats(&req.host, port, &req.community, &req.interface_name)
+    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
+    let stats = crate::snmp::snmp_interface_stats(&dest, &req.community, &req.interface_name)
         .await
         .map_err(|e| {
             let api_err = snmp_error_to_api_error(e);
@@ -7423,8 +7427,9 @@ pub async fn snmp_try_interface_stats(
         communities.len(), req.host, port, req.interface_name
     );
     let mut last_error: Option<crate::snmp::SnmpError> = None;
+    let dest = crate::snmp::SnmpDest::direct(req.host.as_str(), port);
     for community in &communities {
-        match crate::snmp::snmp_interface_stats(&req.host, port, community, &req.interface_name).await {
+        match crate::snmp::snmp_interface_stats(&dest, community, &req.interface_name).await {
             Ok(stats) => {
                 tracing::info!("SNMP interface stats success for {}:{}", req.host, port);
                 return Ok(Json(interface_stats_to_response(stats)));
