@@ -482,10 +482,15 @@ struct SshParams {
     password: Option<String>,
     key_path: Option<String>,
     key_passphrase: Option<String>,
-    // Jump host / proxy support (Phase 06.2)
+    // Effective jump host (session override or profile default).
+    jump_host_id_effective: Option<String>,
     jump_host: Option<String>,
     jump_port: Option<u16>,
     jump_username: Option<String>,
+    jump_password: Option<String>,
+    jump_key_path: Option<String>,
+    jump_key_passphrase: Option<String>,
+    jump_legacy_ssh: bool,
     // Port forwarding (Phase 06.3)
     port_forwards: Vec<PortForward>,
     // Profile ID for tunnel credential lookup
@@ -575,17 +580,38 @@ async fn get_ssh_params_with_vault(query: &WsQuery, app_state: &Arc<AppState>) -
                         session.auto_commands.clone()
                     };
 
-                    // Resolve jump host parameters if session has a jump_host_id
-                    let (jump_host, jump_port, jump_username) = if let Some(jump_host_id) = &session.jump_host_id {
-                        match resolve_jump_host_params(jump_host_id, app_state).await {
-                            Ok((host, port, username)) => (Some(host), Some(port), Some(username)),
-                            Err(e) => {
-                                return Err(format!("Failed to resolve jump host: {}", e));
-                            }
-                        }
-                    } else {
-                        (None, None, None)
-                    };
+                    // Resolve effective jump (session override > profile default).
+                    let jump_resolution = resolve_effective_jump(
+                        session.jump_host_id.as_deref(),
+                        profile.jump_host_id.as_deref(),
+                        &app_state.provider,
+                    ).await?;
+
+                    let (jump_host_id_effective, jump_host, jump_port, jump_username,
+                         jump_password, jump_key_path, jump_key_passphrase, jump_legacy_ssh) =
+                        if let Some(r) = jump_resolution {
+                            let (jp_pw, jp_kpath, jp_kpass) = match r.jump_profile.auth_type {
+                                AuthType::Password => (
+                                    r.jump_credential.as_ref().and_then(|c| c.password.clone()),
+                                    None, None,
+                                ),
+                                AuthType::Key => (
+                                    None,
+                                    r.jump_profile.key_path.clone(),
+                                    r.jump_credential.as_ref().and_then(|c| c.key_passphrase.clone()),
+                                ),
+                            };
+                            (
+                                Some(r.jump_host.id.clone()),
+                                Some(r.jump_host.host.clone()),
+                                Some(r.jump_host.port),
+                                Some(r.jump_profile.username.clone()),
+                                jp_pw, jp_kpath, jp_kpass,
+                                false, // jump_legacy_ssh — no profile field for it yet; can wire later
+                            )
+                        } else {
+                            (None, None, None, None, None, None, None, false)
+                        };
 
                     return Ok(SshParams {
                         host: session.host,
@@ -594,17 +620,17 @@ async fn get_ssh_params_with_vault(query: &WsQuery, app_state: &Arc<AppState>) -
                         password,
                         key_path,
                         key_passphrase,
-                        // Jump host / proxy support
+                        jump_host_id_effective,
                         jump_host,
                         jump_port,
                         jump_username,
-                        // Port forwarding (Phase 06.3)
+                        jump_password,
+                        jump_key_path,
+                        jump_key_passphrase,
+                        jump_legacy_ssh,
                         port_forwards: session.port_forwards,
-                        // Profile ID for tunnel credential lookup
                         profile_id: session.profile_id,
-                        // Auto commands on connect (profile + session merged)
                         auto_commands,
-                        // Legacy SSH support for older devices
                         legacy_ssh: session.legacy_ssh,
                     });
                 }
@@ -622,28 +648,54 @@ async fn get_ssh_params_with_vault(query: &WsQuery, app_state: &Arc<AppState>) -
     get_ssh_params(query)
 }
 
-/// Resolve jump host parameters from a jump host ID
-async fn resolve_jump_host_params(
-    jump_host_id: &str,
-    app_state: &Arc<AppState>,
-) -> Result<(String, u16, String), String> {
-    // Get the jump host
-    let jump_host = match app_state.provider.get_jump_host(jump_host_id).await {
-        Ok(jh) => jh,
-        Err(e) => {
-            return Err(format!("Jump host not found: {}", e));
+/// Fully-resolved jump host context for one connection.
+#[derive(Debug, Clone)]
+pub struct JumpResolution {
+    pub jump_host: crate::models::JumpHost,
+    pub jump_profile: crate::models::CredentialProfile,
+    pub jump_credential: Option<crate::models::ProfileCredential>,
+}
+
+/// Resolve the effective jump host for a connection.
+/// Session-level `Some(id)` overrides profile-level. Returns Ok(None)
+/// when neither is set (direct connection).
+pub async fn resolve_effective_jump(
+    session_jump_id: Option<&str>,
+    profile_jump_id: Option<&str>,
+    provider: &Arc<dyn crate::providers::DataProvider>,
+) -> Result<Option<JumpResolution>, String> {
+    let id = session_jump_id.or(profile_jump_id);
+    let Some(id) = id else { return Ok(None); };
+
+    let jump_host = provider.get_jump_host(id).await
+        .map_err(|e| format!(
+            "Jump host '{}' referenced by session/profile no longer exists. \
+             Edit the session or profile to fix. (Underlying error: {})",
+            id, e
+        ))?;
+
+    let jump_profile = provider.get_profile(&jump_host.profile_id).await
+        .map_err(|e| format!(
+            "Failed to load auth profile '{}' for jump host '{}': {}",
+            jump_host.profile_id, jump_host.name, e
+        ))?;
+
+    let jump_credential = match provider.get_profile_credential(&jump_host.profile_id).await {
+        Ok(opt) => opt,
+        Err(crate::providers::ProviderError::VaultLocked) => {
+            return Err(format!(
+                "Vault is locked — cannot read credentials for jump host '{}'. \
+                 Unlock in Settings > Security.",
+                jump_host.name
+            ));
         }
+        Err(e) => return Err(format!(
+            "Failed to read credentials for jump host '{}': {}",
+            jump_host.name, e
+        )),
     };
 
-    // Get the jump host's profile for username
-    let jump_profile = match app_state.provider.get_profile(&jump_host.profile_id).await {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(format!("Jump host profile not found: {}", e));
-        }
-    };
-
-    Ok((jump_host.host, jump_host.port, jump_profile.username))
+    Ok(Some(JumpResolution { jump_host, jump_profile, jump_credential }))
 }
 
 /// Get SSH parameters from query
@@ -674,9 +726,14 @@ fn get_ssh_params(query: &WsQuery) -> Result<SshParams, String> {
         key_path,
         key_passphrase: None,
         // Jump host / proxy not supported in quick connect (only stored sessions)
+        jump_host_id_effective: None,
         jump_host: None,
         jump_port: None,
         jump_username: None,
+        jump_password: None,
+        jump_key_path: None,
+        jump_key_passphrase: None,
+        jump_legacy_ssh: false,
         // Port forwarding not supported in quick connect (only stored sessions)
         port_forwards: vec![],
         profile_id: String::new(),
@@ -1439,4 +1496,96 @@ async fn handle_task_progress(socket: WebSocket, app_state: Arc<AppState>) {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TaskWsCommand {
     Cancel { task_id: String },
+}
+
+#[cfg(test)]
+mod resolve_effective_jump_tests {
+    use super::*;
+    use crate::models::{NewCredentialProfile, NewJumpHost, AuthType, CliFlavor};
+    use crate::providers::local::LocalDataProvider;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    async fn fresh_provider() -> Arc<dyn crate::providers::DataProvider> {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = crate::db::init_db(&db_path).await.unwrap();
+        std::mem::forget(dir);
+        Arc::new(LocalDataProvider::new(pool))
+    }
+
+    fn np(name: &str, jump_host_id: Option<String>) -> NewCredentialProfile {
+        NewCredentialProfile {
+            name: name.into(),
+            username: "u".into(),
+            auth_type: AuthType::Password,
+            key_path: None,
+            port: 22,
+            keepalive_interval: 30,
+            connection_timeout: 10,
+            terminal_theme: None,
+            default_font_size: None,
+            default_font_family: None,
+            scrollback_lines: 1000,
+            local_echo: false,
+            auto_reconnect: false,
+            reconnect_delay: 5,
+            cli_flavor: CliFlavor::default(),
+            auto_commands: vec![],
+            jump_host_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_jump_overrides_profile_jump() {
+        let provider = fresh_provider().await;
+        let session_jump_profile = provider.create_profile(np("session-jump-creds", None)).await.unwrap();
+        let profile_jump_profile = provider.create_profile(np("profile-jump-creds", None)).await.unwrap();
+        let session_jump = provider.create_jump_host(NewJumpHost {
+            name: "session-jump".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: session_jump_profile.id.clone(),
+        }).await.unwrap();
+        let profile_jump = provider.create_jump_host(NewJumpHost {
+            name: "profile-jump".into(), host: "10.0.0.2".into(), port: 22,
+            profile_id: profile_jump_profile.id.clone(),
+        }).await.unwrap();
+
+        let result = resolve_effective_jump(
+            Some(&session_jump.id), Some(&profile_jump.id), &provider,
+        ).await.unwrap();
+
+        let r = result.expect("should resolve");
+        assert_eq!(r.jump_host.id, session_jump.id, "session jump should win");
+        assert_eq!(r.jump_profile.name, "session-jump-creds");
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_profile_jump_when_session_has_none() {
+        let provider = fresh_provider().await;
+        let backing = provider.create_profile(np("backing", None)).await.unwrap();
+        let jh = provider.create_jump_host(NewJumpHost {
+            name: "the-jump".into(), host: "10.0.0.1".into(), port: 22,
+            profile_id: backing.id.clone(),
+        }).await.unwrap();
+
+        let result = resolve_effective_jump(None, Some(&jh.id), &provider).await.unwrap();
+        let r = result.expect("should resolve from profile");
+        assert_eq!(r.jump_host.id, jh.id);
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_neither_set() {
+        let provider = fresh_provider().await;
+        let result = resolve_effective_jump(None, None, &provider).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_jump_host_returns_descriptive_error() {
+        let provider = fresh_provider().await;
+        let result = resolve_effective_jump(Some("does-not-exist"), None, &provider).await;
+        let err = result.unwrap_err();
+        assert!(err.contains("does-not-exist"), "msg should name the missing id: {err}");
+        assert!(err.contains("no longer exists"), "msg should explain: {err}");
+    }
 }
