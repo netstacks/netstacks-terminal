@@ -8,7 +8,7 @@ import {
   type NewCredentialProfile,
   type AuthType,
 } from '../api/profiles';
-import { CLI_FLAVOR_OPTIONS, listJumpHosts, type CliFlavor, type JumpHost } from '../api/sessions';
+import { CLI_FLAVOR_OPTIONS, listJumpHosts, listSessions, type CliFlavor, type JumpHost, type Session } from '../api/sessions';
 import { TERMINAL_THEMES } from '../lib/terminalThemes';
 import './ProfileEditorDialog.css';
 
@@ -107,14 +107,20 @@ export default function ProfileEditorDialog({
   const [autoCommands, setAutoCommands] = useState<string[]>([]);
   const [newAutoCommand, setNewAutoCommand] = useState('');
 
-  // Jump host (default for sessions/tunnels using this profile)
-  const [jumpHostId, setJumpHostId] = useState<string | null>(null);
+  // Jump (default for sessions/tunnels using this profile). Encoded as a
+  // single string so a single <select> can offer both kinds in optgroups:
+  //   ''             — none / direct
+  //   'host:<id>'    — use a JumpHost record
+  //   'session:<id>' — use another Session as the jump endpoint
+  const [jumpSelection, setJumpSelection] = useState<string>('');
   const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([]);
+  const [jumpSessions, setJumpSessions] = useState<Session[]>([]);
 
-  // Load jump hosts whenever the dialog opens (so the dropdown is fresh).
+  // Load jump hosts AND sessions whenever the dialog opens (so the dropdown is fresh).
   useEffect(() => {
     if (isOpen) {
       listJumpHosts().then(setJumpHosts).catch(() => setJumpHosts([]));
+      listSessions().then(setJumpSessions).catch(() => setJumpSessions([]));
     }
   }, [isOpen]);
 
@@ -145,7 +151,14 @@ export default function ProfileEditorDialog({
         setReconnectDelay(sourceProfile.reconnect_delay);
         setCliFlavor((sourceProfile.cli_flavor || 'auto') as CliFlavor);
         setAutoCommands(sourceProfile.auto_commands || []);
-        setJumpHostId(sourceProfile.jump_host_id || null);
+        // Encode existing jump ref (host or session) into the unified selection.
+        if (sourceProfile.jump_host_id) {
+          setJumpSelection(`host:${sourceProfile.jump_host_id}`);
+        } else if (sourceProfile.jump_session_id) {
+          setJumpSelection(`session:${sourceProfile.jump_session_id}`);
+        } else {
+          setJumpSelection('');
+        }
 
         // Load SNMP community count from vault metadata (edit mode only)
         if (profile && !cloneFrom) {
@@ -177,7 +190,7 @@ export default function ProfileEditorDialog({
         setReconnectDelay(5);
         setCliFlavor('auto');
         setAutoCommands([]);
-        setJumpHostId(null);
+        setJumpSelection('');
       }
 
       // Reset to first tab and clear errors
@@ -236,7 +249,9 @@ export default function ProfileEditorDialog({
         reconnect_delay: reconnectDelay,
         cli_flavor: cliFlavor,
         auto_commands: autoCommands,
-        jump_host_id: jumpHostId,
+        // Decode the unified jump selection into mutually-exclusive fields.
+        jump_host_id: jumpSelection.startsWith('host:') ? jumpSelection.slice(5) : null,
+        jump_session_id: jumpSelection.startsWith('session:') ? jumpSelection.slice(8) : null,
       };
 
       let savedProfile: CredentialProfile;
@@ -463,24 +478,37 @@ export default function ProfileEditorDialog({
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="profile-jump-host">Jump Host</label>
+                  <label htmlFor="profile-jump-host">Default Jump</label>
                   <select
                     id="profile-jump-host"
-                    value={jumpHostId || ''}
-                    onChange={(e) =>
-                      setJumpHostId(e.target.value === '' ? null : e.target.value)
-                    }
+                    value={jumpSelection}
+                    onChange={(e) => setJumpSelection(e.target.value)}
                   >
                     <option value="">(None — direct connect)</option>
-                    {jumpHosts.map((jh) => (
-                      <option key={jh.id} value={jh.id}>
-                        {jh.name}
-                      </option>
-                    ))}
+                    {jumpSessions.length > 0 && (
+                      <optgroup label="Sessions">
+                        {jumpSessions.map((s) => (
+                          <option key={`session:${s.id}`} value={`session:${s.id}`}>
+                            {s.name} ({s.host})
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {jumpHosts.length > 0 && (
+                      <optgroup label="Jump Hosts">
+                        {jumpHosts.map((jh) => (
+                          <option key={`host:${jh.id}`} value={`host:${jh.id}`}>
+                            {jh.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
                   <span className="form-hint">
-                    Sessions and tunnels using this profile connect through this jump host
-                    by default. Can be overridden per-session or per-tunnel.
+                    Sessions and tunnels using this profile connect through this jump
+                    by default. You can pick another Session as the jump (one source
+                    of truth per machine) or use a dedicated Jump Host record.
+                    Can be overridden per-session or per-tunnel.
                   </span>
                 </div>
               </div>

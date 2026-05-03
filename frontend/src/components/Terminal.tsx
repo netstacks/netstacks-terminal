@@ -53,6 +53,10 @@ interface TerminalMessage {
   data?: string | { cols: number; rows: number }
   session_id?: string
   reason?: string
+  /** Display name of the resolved jump (jump host name or session name) for
+   *  Connected messages — `undefined` for direct connections. Drives the
+   *  top-right "via {jumpName}" pill. */
+  via_jump?: string
 }
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting' | 'error'
@@ -257,6 +261,10 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
   const [countdown, setCountdown] = useState(reconnectDelay)
   const [attemptCount, setAttemptCount] = useState(0)
   const [autoReconnectDisabled, setAutoReconnectDisabled] = useState(!autoReconnect)
+
+  // Display name of the resolved jump for THIS connection (sent on Connected).
+  // Drives the top-right "via {jumpName}" pill. `null` for direct connections.
+  const [viaJumpName, setViaJumpName] = useState<string | null>(null)
 
   // Find bar state
   const [showFindBar, setShowFindBar] = useState(false)
@@ -1000,6 +1008,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
             setShowReconnectOverlay(false)
             setAttemptCount(0)
             setCountdown(reconnectDelay)
+            // Capture the resolved jump for the "via X" pill (null = direct).
+            setViaJumpName(typeof msg.via_jump === 'string' ? msg.via_jump : null)
             // Re-send the actual terminal size now that the DOM is laid out.
             // The initial size in the WS query string can be stale because
             // fit() runs synchronously before measurement is complete; if the
@@ -3149,6 +3159,18 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
       {isEnterpriseMode && (
         <div className="terminal-proxy-badge" title="Connected via Controller (Enterprise Mode)">
           via {instanceName}
+        </div>
+      )}
+      {/* Jump badge — shows the resolved jump (host or session) for SSH
+          connections that went through one. Stacks below the Controller
+          pill when both are present so they don't overlap. */}
+      {viaJumpName && (
+        <div
+          className="terminal-jump-badge"
+          style={isEnterpriseMode ? { top: 36 } : undefined}
+          title={`Connected through jump: ${viaJumpName}`}
+        >
+          via {viaJumpName}
         </div>
       )}
       {/* Save to Docs dialog */}

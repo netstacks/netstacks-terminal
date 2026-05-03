@@ -35,6 +35,10 @@ export interface CredentialProfile {
    *  inherit it unless they set their own `jump_host_id`. */
   jump_host_id: string | null;
 
+  /** Alternative default jump: another Session used as the jump endpoint
+   *  (mutually exclusive with jump_host_id; backend rejects setting both). */
+  jump_session_id: string | null;
+
   created_at: string;
   updated_at: string;
 }
@@ -58,6 +62,7 @@ export interface NewCredentialProfile {
   cli_flavor?: string;
   auto_commands?: string[];
   jump_host_id?: string | null;
+  jump_session_id?: string | null;
 }
 
 // Request to update a credential profile (all fields optional)
@@ -79,6 +84,7 @@ export interface UpdateCredentialProfile {
   cli_flavor?: string;
   auto_commands?: string[];
   jump_host_id?: string | null;
+  jump_session_id?: string | null;
 }
 
 // Credential for a profile (stored encrypted in vault)

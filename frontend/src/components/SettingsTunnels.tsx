@@ -8,8 +8,8 @@ import {
 } from '../api/tunnels'
 import { listProfiles } from '../api/profiles'
 import type { CredentialProfile } from '../api/profiles'
-import { listJumpHosts } from '../api/sessions'
-import type { JumpHost } from '../api/sessions'
+import { listJumpHosts, listSessions } from '../api/sessions'
+import type { JumpHost, Session } from '../api/sessions'
 import { showToast } from './Toast'
 import './SettingsTunnels.css'
 
@@ -33,6 +33,7 @@ export default function SettingsTunnels() {
   const fetchTunnels = useTunnelStore(state => state.fetchTunnels)
   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
   const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([])
+  const [jumpSessions, setJumpSessions] = useState<Session[]>([])
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
 
@@ -41,7 +42,11 @@ export default function SettingsTunnels() {
   const [host, setHost] = useState('')
   const [port, setPort] = useState(22)
   const [profileId, setProfileId] = useState('')
-  const [jumpHostId, setJumpHostId] = useState('')
+  // Unified jump selection (mutually exclusive at the data layer):
+  //   ''             — inherit from profile
+  //   'host:<id>'    — a JumpHost record
+  //   'session:<id>' — a Session as the jump endpoint
+  const [jumpSelection, setJumpSelection] = useState('')
   const [forwardType, setForwardType] = useState<ForwardType>('local')
   const [localPort, setLocalPort] = useState(8080)
   const [bindAddress, setBindAddress] = useState('127.0.0.1')
@@ -55,6 +60,7 @@ export default function SettingsTunnels() {
     fetchTunnels()
     listProfiles().then(setProfiles).catch(() => {})
     listJumpHosts().then(setJumpHosts).catch(() => {})
+    listSessions().then(setJumpSessions).catch(() => {})
   }, [fetchTunnels])
 
   function resetForm() {
@@ -62,7 +68,7 @@ export default function SettingsTunnels() {
     setHost('')
     setPort(22)
     setProfileId('')
-    setJumpHostId('')
+    setJumpSelection('')
     setForwardType('local')
     setLocalPort(8080)
     setBindAddress('127.0.0.1')
@@ -81,7 +87,13 @@ export default function SettingsTunnels() {
     setHost(tunnel.host)
     setPort(tunnel.port)
     setProfileId(tunnel.profile_id)
-    setJumpHostId(tunnel.jump_host_id || '')
+    if (tunnel.jump_host_id) {
+      setJumpSelection(`host:${tunnel.jump_host_id}`)
+    } else if (tunnel.jump_session_id) {
+      setJumpSelection(`session:${tunnel.jump_session_id}`)
+    } else {
+      setJumpSelection('')
+    }
     setForwardType(tunnel.forward_type)
     setLocalPort(tunnel.local_port)
     setBindAddress(tunnel.bind_address)
@@ -129,7 +141,8 @@ export default function SettingsTunnels() {
       host: host.trim(),
       port,
       profile_id: profileId,
-      jump_host_id: jumpHostId || null,
+      jump_host_id: jumpSelection.startsWith('host:') ? jumpSelection.slice(5) : null,
+      jump_session_id: jumpSelection.startsWith('session:') ? jumpSelection.slice(8) : null,
       forward_type: forwardType,
       local_port: localPort,
       bind_address: bindAddress,
@@ -248,20 +261,35 @@ export default function SettingsTunnels() {
                 </select>
               </div>
               <div className="tunnel-form-field">
-                <label className="setting-label">Jump Host (optional)</label>
-                <select className="setting-select" value={jumpHostId} onChange={e => setJumpHostId(e.target.value)}>
+                <label className="setting-label">Jump (optional)</label>
+                <select className="setting-select" value={jumpSelection} onChange={e => setJumpSelection(e.target.value)}>
                   {(() => {
-                    const inheritedId = profiles.find(p => p.id === profileId)?.jump_host_id ?? null;
-                    const inheritedName = inheritedId
-                      ? jumpHosts.find(j => j.id === inheritedId)?.name ?? '(deleted)'
-                      : 'direct';
+                    const profile = profiles.find(p => p.id === profileId)
+                    let inheritedName = 'direct'
+                    if (profile?.jump_host_id) {
+                      inheritedName = jumpHosts.find(j => j.id === profile.jump_host_id)?.name ?? '(deleted jump host)'
+                    } else if (profile?.jump_session_id) {
+                      const sess = jumpSessions.find(s => s.id === profile.jump_session_id)
+                      inheritedName = sess ? `session: ${sess.name}` : '(deleted session)'
+                    }
                     return (
                       <option value="">{`Inherit from profile (${inheritedName})`}</option>
-                    );
+                    )
                   })()}
-                  {jumpHosts.map(j => (
-                    <option key={j.id} value={j.id}>{j.name}</option>
-                  ))}
+                  {jumpSessions.length > 0 && (
+                    <optgroup label="Sessions">
+                      {jumpSessions.map(s => (
+                        <option key={`session:${s.id}`} value={`session:${s.id}`}>{s.name} ({s.host})</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {jumpHosts.length > 0 && (
+                    <optgroup label="Jump Hosts">
+                      {jumpHosts.map(j => (
+                        <option key={`host:${j.id}`} value={`host:${j.id}`}>{j.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </div>
             </div>
