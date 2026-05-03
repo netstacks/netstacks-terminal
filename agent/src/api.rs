@@ -7083,19 +7083,14 @@ fn snmp_error_to_api_error(err: crate::snmp::SnmpError) -> ApiError {
     }
 }
 
-/// Build a `SnmpDest` from a request's optional jump fields.
-///
-/// - Both jump_host_id and jump_session_id unset → `Direct`.
-/// - One set → resolves the jump (loads its profile + vault credential)
-///   and returns `ViaJump` with the SshConfig the cli_exec layer needs.
-/// - Both set → 400 Bad Request (mutual exclusion).
+/// HTTP-layer wrapper around [`crate::snmp::dest::snmp_dest_for`] that
+/// validates request-level jump fields and maps the domain `String` error
+/// to a `400 Bad Request`.
 async fn build_snmp_dest(
     state: &Arc<AppState>,
     host: &str,
     port: u16,
     jump: &SnmpJumpRef,
-    // When set, profile's jump_host_id/jump_session_id is the fallback if the
-    // request didn't supply jump fields — same inheritance as the SSH path.
     profile_id: Option<&str>,
 ) -> Result<crate::snmp::SnmpDest, Response> {
     if jump.jump_host_id.is_some() && jump.jump_session_id.is_some() {
@@ -7111,110 +7106,12 @@ async fn build_snmp_dest(
         jump.jump_session_id.as_deref(),
     );
 
-    // Profile-level fallback: if the caller named a profile and the
-    // session-level fields are unset, inherit from that profile's jump
-    // configuration. resolve_effective_jump prefers session_level when set.
-    let profile_level = if matches!(session_level, crate::ws::JumpRef::None) {
-        if let Some(pid) = profile_id {
-            match state.provider.get_profile(pid).await {
-                Ok(p) => crate::ws::JumpRef::from_pair(
-                    p.jump_host_id.as_deref(),
-                    p.jump_session_id.as_deref(),
-                ),
-                // Profile load failure isn't fatal — drop to Direct.
-                Err(_) => crate::ws::JumpRef::None,
-            }
-        } else {
-            crate::ws::JumpRef::None
-        }
-    } else {
-        crate::ws::JumpRef::None
-    };
-
-    tracing::info!(
-        "build_snmp_dest: target={}:{} req_jump_host={:?} req_jump_session={:?} profile={:?}",
-        host, port, jump.jump_host_id, jump.jump_session_id, profile_id
-    );
-
-    let resolution = crate::ws::resolve_effective_jump(
-        session_level,
-        profile_level,
-        &state.provider,
-    )
-    .await
-    .map_err(|e| {
-        let api_err = ApiError {
-            error: format!("Failed to resolve jump: {}", e),
-            code: "VALIDATION".into(),
-        };
-        (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
-    })?;
-
-    let Some(r) = resolution else {
-        tracing::info!(
-            "build_snmp_dest: no jump resolved → SnmpDest::Direct({}:{})",
-            host, port
-        );
-        return Ok(crate::snmp::SnmpDest::direct(host, port));
-    };
-    tracing::info!(
-        "build_snmp_dest: resolved jump → SnmpDest::ViaJump (jump='{}' at {}:{}, target={}:{})",
-        r.source.display_name(), r.host, r.port, host, port
-    );
-
-    // Translate the JumpResolution's profile + credential into the SshAuth
-    // shape russh wants. Errors here are user-actionable (missing creds in
-    // the vault) so they surface with descriptive 400 messages.
-    let auth = match r.profile.auth_type {
-        crate::models::AuthType::Password => {
-            let password = r
-                .credential
-                .as_ref()
-                .and_then(|c| c.password.clone())
-                .ok_or_else(|| {
-                    let api_err = ApiError {
-                        error: format!(
-                            "Jump '{}' has no stored password (profile '{}'). \
-                             Configure credentials in profile settings.",
-                            r.source.display_name(),
-                            r.profile.name
-                        ),
-                        code: "VALIDATION".into(),
-                    };
-                    (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
-                })?;
-            crate::ssh::SshAuth::Password(password)
-        }
-        crate::models::AuthType::Key => {
-            let path = r.profile.key_path.clone().ok_or_else(|| {
-                let api_err = ApiError {
-                    error: format!(
-                        "Jump '{}' (profile '{}') has no SSH key path configured.",
-                        r.source.display_name(),
-                        r.profile.name
-                    ),
-                    code: "VALIDATION".into(),
-                };
-                (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
-            })?;
-            let passphrase = r.credential.as_ref().and_then(|c| c.key_passphrase.clone());
-            crate::ssh::SshAuth::KeyFile { path, passphrase }
-        }
-    };
-
-    let jump_cfg = crate::ssh::SshConfig {
-        host: r.host.clone(),
-        port: r.port,
-        username: r.profile.username.clone(),
-        auth,
-        legacy_ssh: false,
-    };
-
-    Ok(crate::snmp::SnmpDest::ViaJump {
-        jump: jump_cfg,
-        target_host: host.to_string(),
-        target_port: port,
-    })
+    crate::snmp::dest::snmp_dest_for(&state.provider, host, port, session_level, profile_id)
+        .await
+        .map_err(|e| {
+            let api_err = ApiError { error: e, code: "VALIDATION".into() };
+            (StatusCode::BAD_REQUEST, Json(api_err)).into_response()
+        })
 }
 
 /// Custom IntoResponse for SNMP ApiError that maps codes to HTTP status

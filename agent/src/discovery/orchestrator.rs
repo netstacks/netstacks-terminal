@@ -311,9 +311,19 @@ async fn discover_single_target(
     target: DiscoveryTarget,
     methods: Vec<String>,
     creds: ResolvedCredentials,
+    provider: Arc<dyn crate::providers::DataProvider>,
 ) -> TargetDiscoveryResult {
     let ip = target.ip.clone();
     let mut last_error: Option<String> = None;
+
+    // Profile-level jump fallback: prefer the SNMP profile's jump, fall back
+    // to the credential profile's. Either may have a `jump_host_id` /
+    // `jump_session_id` configured (e.g. devices reachable only via a
+    // bastion). When neither has a jump, snmp_dest_for returns ::Direct.
+    let jump_profile_id = target
+        .snmp_profile_id
+        .as_deref()
+        .or(target.credential_profile_id.as_deref());
 
     for method in &methods {
         match method.as_str() {
@@ -323,13 +333,35 @@ async fn discover_single_target(
                     continue;
                 }
 
+                // Resolve the SnmpDest once — same dest is reused across the
+                // try-each-community loop below. If jump resolution fails we
+                // fall back to direct so unreachable devices still surface
+                // their own clean error rather than a vault-credential one.
+                let dest = match crate::snmp::dest::snmp_dest_for(
+                    &provider,
+                    ip.as_str(),
+                    161,
+                    crate::ws::JumpRef::None,
+                    jump_profile_id,
+                )
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Jump resolution for discovery target {} failed ({}); using direct",
+                            ip, e
+                        );
+                        crate::snmp::SnmpDest::direct(ip.as_str(), 161)
+                    }
+                };
+
                 // Try each community string — spawn as separate task to isolate
                 // the large SNMP future (6-way tokio::join of walks)
                 for community in &creds.snmp_communities {
-                    let task_ip = ip.clone();
                     let community = community.clone();
+                    let dest = dest.clone();
                     let result = tokio::spawn(async move {
-                        let dest = crate::snmp::SnmpDest::direct(task_ip.as_str(), 161);
                         snmp_neighbors::discover_snmp_neighbors(&dest, &community).await
                     })
                     .await;
@@ -490,7 +522,7 @@ pub async fn run_batch_discovery(
             // Resolve credentials for this target
             let creds = resolve_credentials(&target, provider.as_ref()).await;
 
-            discover_single_target(target, methods, creds).await
+            discover_single_target(target, methods, creds, provider).await
         }));
     }
 
@@ -549,6 +581,17 @@ pub async fn resolve_traceroute_hops(
         }
     }
 
+    // Pre-resolve a single jump for all hops: if any of the supplied
+    // snmp/credential profiles has a jump configured, route hop SNMP
+    // through it. In practice the caller passes one or two profiles all
+    // pointing at the same bastion, so first-with-jump-wins is correct.
+    let jump_dest = resolve_traceroute_jump(
+        &request.snmp_profile_ids,
+        &request.credential_profile_ids,
+        provider,
+    )
+    .await;
+
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TARGETS));
     let mut handles = Vec::with_capacity(request.hops.len());
 
@@ -558,11 +601,12 @@ pub async fn resolve_traceroute_hops(
         let configs = integration_configs.clone();
         let communities = all_communities.clone();
         let ssh_auths = ssh_auths.clone();
+        let jump_dest = jump_dest.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
 
-            resolve_single_hop(hop, &resolver, &configs, &communities, &ssh_auths).await
+            resolve_single_hop(hop, &resolver, &configs, &communities, &ssh_auths, jump_dest.as_ref()).await
         }));
     }
 
@@ -583,6 +627,55 @@ pub async fn resolve_traceroute_hops(
     results
 }
 
+/// Probe each profile in turn; the first one with a `jump_host_id` or
+/// `jump_session_id` set drives the jump for every hop. Returns `None`
+/// when no profile has jump configured (hop SNMP runs direct, as before).
+///
+/// Uses snmp_dest_for to resolve into a fully-formed SshConfig, then
+/// peels the jump SshConfig back out — we want a "jump template" we can
+/// apply to many hop targets. Resolution failure (vault credential
+/// missing) is treated as "no jump"; the hop's direct SNMP attempt will
+/// surface the right error if it's actually unreachable.
+async fn resolve_traceroute_jump(
+    snmp_profile_ids: &[String],
+    credential_profile_ids: &[String],
+    provider: &Arc<dyn crate::providers::DataProvider>,
+) -> Option<crate::ssh::SshConfig> {
+    let mut tried = std::collections::HashSet::new();
+    let candidates = snmp_profile_ids.iter().chain(credential_profile_ids.iter());
+    for pid in candidates {
+        if !tried.insert(pid.as_str()) {
+            continue;
+        }
+        // Use a placeholder target — we only care about extracting the jump.
+        let dest = crate::snmp::dest::snmp_dest_for(
+            provider,
+            "0.0.0.0",
+            161,
+            crate::ws::JumpRef::None,
+            Some(pid),
+        )
+        .await;
+        if let Ok(crate::snmp::SnmpDest::ViaJump { jump, .. }) = dest {
+            return Some(jump);
+        }
+    }
+    None
+}
+
+/// Build a `SnmpDest` for a hop target, applying the pre-resolved jump
+/// template if present.
+fn hop_dest(jump: Option<&crate::ssh::SshConfig>, host: &str, port: u16) -> crate::snmp::SnmpDest {
+    match jump {
+        Some(j) => crate::snmp::SnmpDest::ViaJump {
+            jump: j.clone(),
+            target_host: host.to_string(),
+            target_port: port,
+        },
+        None => crate::snmp::SnmpDest::direct(host, port),
+    }
+}
+
 /// Resolve a single traceroute hop
 async fn resolve_single_hop(
     hop: TracerouteHop,
@@ -590,6 +683,7 @@ async fn resolve_single_hop(
     configs: &IntegrationConfigs,
     communities: &[String],
     ssh_auths: &[(String, crate::ssh::SshAuth)],
+    jump: Option<&crate::ssh::SshConfig>,
 ) -> HopResolutionResult {
     let hop_number = hop.hop_number;
     let ip = hop.ip.clone();
@@ -607,7 +701,7 @@ async fn resolve_single_hop(
 
         // Step 2: Run SNMP neighbor discovery on management IP
         let mut neighbors = Vec::new();
-        let mgmt_dest = crate::snmp::SnmpDest::direct(mgmt_ip.as_str(), 161);
+        let mgmt_dest = hop_dest(jump, mgmt_ip.as_str(), 161);
         for community in communities {
             let result = snmp_neighbors::discover_snmp_neighbors(&mgmt_dest, community).await;
             if !result.neighbors.is_empty() {
@@ -629,9 +723,9 @@ async fn resolve_single_hop(
     }
 
     // Step 3: Not resolved via integrations - try SNMP directly on hop IP
-    let hop_dest = crate::snmp::SnmpDest::direct(ip.as_str(), 161);
+    let hop_snmp_dest = hop_dest(jump, ip.as_str(), 161);
     for community in communities {
-        let result = snmp_neighbors::discover_snmp_neighbors(&hop_dest, community).await;
+        let result = snmp_neighbors::discover_snmp_neighbors(&hop_snmp_dest, community).await;
         if !result.neighbors.is_empty() {
             return HopResolutionResult {
                 hop_number,

@@ -14,6 +14,7 @@
 
 pub mod cli_parse;
 pub mod cli_exec;
+pub mod dest;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

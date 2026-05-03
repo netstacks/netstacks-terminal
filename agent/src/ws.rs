@@ -1311,9 +1311,31 @@ async fn poll_single_target(
         }
     };
 
+    // Resolve via the profile so live polling honors any configured jump
+    // (matches the per-call API behavior). Vault/credential failures fall
+    // back to direct so unreachable devices surface their own error rather
+    // than a misleading credential one.
+    let dest = match crate::snmp::dest::snmp_dest_for(
+        &app_state.provider,
+        host.as_str(),
+        port,
+        crate::ws::JumpRef::None,
+        Some(&target.profile_id),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                "Live-poll jump resolution for {} failed ({}); using direct",
+                host, e
+            );
+            crate::snmp::SnmpDest::direct(host.as_str(), port)
+        }
+    };
+
     // Try each community with snmp_bulk_interface_stats (same try-communities pattern)
     let mut last_error: Option<String> = None;
-    let dest = crate::snmp::SnmpDest::direct(host.as_str(), port);
     for community in &communities {
         match crate::snmp::snmp_bulk_interface_stats(&dest, community, &target.interfaces).await {
             Ok(stats) => {
