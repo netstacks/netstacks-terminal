@@ -69,6 +69,57 @@ support boundary — see `SUPPORT.md`. Teams that need response-time
 guarantees, named contacts, or implementation help can purchase a support
 contract — see <https://netstacks.net/support>.
 
+## Backup & restore
+
+All persistent state lives in a single SQLite database — sessions, profiles,
+encrypted vault credentials, topologies, and history. Backing up the app
+means backing up that file.
+
+**Locations**
+
+| Platform | Database |
+|---|---|
+| macOS | `~/Library/Application Support/netstacks/netstacks.db` |
+| Linux | `~/.local/share/netstacks/netstacks.db` |
+| Windows | `%APPDATA%\netstacks\netstacks.db` |
+
+The `~/Library/Application Support/com.netstacks.terminal/` directory
+(macOS — analogous paths on Linux/Windows) holds the local TLS cert and
+`app-config.json`. The cert auto-regenerates, so you only need to back up
+`app-config.json` if you've configured an Enterprise Controller URL.
+
+**Backup**
+
+While the app is **stopped**, a plain copy is fine:
+
+```bash
+cp ~/Library/Application\ Support/netstacks/netstacks.db ~/netstacks.db.backup
+```
+
+While the app is **running**, use SQLite's atomic backup so you don't
+capture mid-transaction state:
+
+```bash
+sqlite3 ~/Library/Application\ Support/netstacks/netstacks.db \
+  ".backup ~/netstacks.db.backup"
+```
+
+The database uses `journal_mode=delete` (no `-wal` / `-shm` siblings to
+worry about).
+
+**Restore**
+
+Stop the app, drop the backup back in place, restart, unlock the vault
+with your master password.
+
+**About the master password**
+
+Vault entries (SSH passwords, API tokens, SNMP communities) are encrypted
+inside the database with a key derived from your master password. The .db
+file alone won't leak credentials — but you must remember the master
+password to use the backup. If you lose it, the encrypted vault entries
+are unrecoverable.
+
 ## Documentation
 
 - Build from source: `docs/BUILD-LINUX.md`, `docs/BUILD-MACOS.md`, `docs/BUILD-WINDOWS.md`
