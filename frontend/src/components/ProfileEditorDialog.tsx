@@ -8,7 +8,7 @@ import {
   type NewCredentialProfile,
   type AuthType,
 } from '../api/profiles';
-import { CLI_FLAVOR_OPTIONS, type CliFlavor } from '../api/sessions';
+import { CLI_FLAVOR_OPTIONS, listJumpHosts, type CliFlavor, type JumpHost } from '../api/sessions';
 import { TERMINAL_THEMES } from '../lib/terminalThemes';
 import './ProfileEditorDialog.css';
 
@@ -107,6 +107,17 @@ export default function ProfileEditorDialog({
   const [autoCommands, setAutoCommands] = useState<string[]>([]);
   const [newAutoCommand, setNewAutoCommand] = useState('');
 
+  // Jump host (default for sessions/tunnels using this profile)
+  const [jumpHostId, setJumpHostId] = useState<string | null>(null);
+  const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([]);
+
+  // Load jump hosts whenever the dialog opens (so the dropdown is fresh).
+  useEffect(() => {
+    if (isOpen) {
+      listJumpHosts().then(setJumpHosts).catch(() => setJumpHosts([]));
+    }
+  }, [isOpen]);
+
   // Load profile data when dialog opens
   useEffect(() => {
     if (isOpen) {
@@ -134,6 +145,7 @@ export default function ProfileEditorDialog({
         setReconnectDelay(sourceProfile.reconnect_delay);
         setCliFlavor((sourceProfile.cli_flavor || 'auto') as CliFlavor);
         setAutoCommands(sourceProfile.auto_commands || []);
+        setJumpHostId(sourceProfile.jump_host_id || null);
 
         // Load SNMP community count from vault metadata (edit mode only)
         if (profile && !cloneFrom) {
@@ -165,6 +177,7 @@ export default function ProfileEditorDialog({
         setReconnectDelay(5);
         setCliFlavor('auto');
         setAutoCommands([]);
+        setJumpHostId(null);
       }
 
       // Reset to first tab and clear errors
@@ -223,6 +236,7 @@ export default function ProfileEditorDialog({
         reconnect_delay: reconnectDelay,
         cli_flavor: cliFlavor,
         auto_commands: autoCommands,
+        jump_host_id: jumpHostId,
       };
 
       let savedProfile: CredentialProfile;
@@ -446,6 +460,28 @@ export default function ProfileEditorDialog({
                     style={{ width: '100px' }}
                   />
                   <span className="form-hint">Timeout for establishing connection</span>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="profile-jump-host">Jump Host</label>
+                  <select
+                    id="profile-jump-host"
+                    value={jumpHostId || ''}
+                    onChange={(e) =>
+                      setJumpHostId(e.target.value === '' ? null : e.target.value)
+                    }
+                  >
+                    <option value="">(None — direct connect)</option>
+                    {jumpHosts.map((jh) => (
+                      <option key={jh.id} value={jh.id}>
+                        {jh.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="form-hint">
+                    Sessions and tunnels using this profile connect through this jump host
+                    by default. Can be overridden per-session or per-tunnel.
+                  </span>
                 </div>
               </div>
             </div>

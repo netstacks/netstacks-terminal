@@ -31,6 +31,10 @@ export interface CredentialProfile {
   cli_flavor: string;
   auto_commands: string[];
 
+  /** Optional default jump host. Sessions/tunnels using this profile
+   *  inherit it unless they set their own `jump_host_id`. */
+  jump_host_id: string | null;
+
   created_at: string;
   updated_at: string;
 }
@@ -53,6 +57,7 @@ export interface NewCredentialProfile {
   reconnect_delay?: number;
   cli_flavor?: string;
   auto_commands?: string[];
+  jump_host_id?: string | null;
 }
 
 // Request to update a credential profile (all fields optional)
@@ -73,6 +78,7 @@ export interface UpdateCredentialProfile {
   reconnect_delay?: number;
   cli_flavor?: string;
   auto_commands?: string[];
+  jump_host_id?: string | null;
 }
 
 // Credential for a profile (stored encrypted in vault)

@@ -250,7 +250,15 @@ export default function SettingsTunnels() {
               <div className="tunnel-form-field">
                 <label className="setting-label">Jump Host (optional)</label>
                 <select className="setting-select" value={jumpHostId} onChange={e => setJumpHostId(e.target.value)}>
-                  <option value="">None</option>
+                  {(() => {
+                    const inheritedId = profiles.find(p => p.id === profileId)?.jump_host_id ?? null;
+                    const inheritedName = inheritedId
+                      ? jumpHosts.find(j => j.id === inheritedId)?.name ?? '(deleted)'
+                      : 'direct';
+                    return (
+                      <option value="">{`Inherit from profile (${inheritedName})`}</option>
+                    );
+                  })()}
                   {jumpHosts.map(j => (
                     <option key={j.id} value={j.id}>{j.name}</option>
                   ))}
