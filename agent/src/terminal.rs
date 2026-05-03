@@ -235,7 +235,7 @@ impl TerminalSession {
                 legacy_ssh: jump_legacy_ssh,
             };
             tracing::info!(
-                "Creating SSH session to {} via jump host {} (russh ProxyJump)",
+                "Creating SSH session to {} via jump {} (russh ProxyJump)",
                 host, jump_host_str
             );
             SshSession::connect_via_jump(target_cfg, jump_cfg, initial_cols, initial_rows)
