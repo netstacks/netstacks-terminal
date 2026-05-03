@@ -53,12 +53,23 @@ export default function DiscoveryModal({
   const [progress, setProgress] = useState(0);
   const [_results, setResults] = useState<DiscoveryResult[]>([]);
   const [capabilities, setCapabilities] = useState<DiscoveryCapabilities | null>(null);
+  // Wall-clock seconds since the discovery run started — gives the user a
+  // visible heartbeat while the agent is busy. Without this the modal looks
+  // hung whenever batch discovery takes more than a few seconds.
+  const [elapsedSec, setElapsedSec] = useState(0);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll logs
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+  // Tick elapsed-time counter while the modal is actively working.
+  useEffect(() => {
+    if (phase !== 'discovering' && phase !== 'analyzing') return;
+    const id = setInterval(() => setElapsedSec(s => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
 
   // Reset state and fetch capabilities when modal opens
   useEffect(() => {
@@ -67,6 +78,7 @@ export default function DiscoveryModal({
       setPhase('idle');
       setProgress(0);
       setResults([]);
+      setElapsedSec(0);
 
       // Fetch discovery capabilities (informational — failures are silent)
       getDiscoveryCapabilities()
@@ -82,8 +94,9 @@ export default function DiscoveryModal({
   const startDiscovery = async () => {
     setPhase('discovering');
     setProgress(0);
+    setElapsedSec(0);
     addLog({ level: 'info', message: `Starting batch discovery for "${groupName}"` });
-    addLog({ level: 'info', message: `Sending ${devices.length} target(s) to discovery API` });
+    addLog({ level: 'info', message: `Sending ${devices.length} target(s) to discovery API (timeout: 5 min)` });
 
     try {
       // Build batch request from devices
@@ -266,10 +279,10 @@ export default function DiscoveryModal({
                 />
               </div>
               <span className="discovery-progress-text">
-                {phase === 'discovering' && `Running batch discovery... ${progress}%`}
-                {phase === 'analyzing' && 'Analyzing connections...'}
-                {phase === 'complete' && 'Complete'}
-                {phase === 'error' && 'Error'}
+                {phase === 'discovering' && `Running batch discovery... ${progress}% (${elapsedSec}s elapsed${elapsedSec >= 30 ? ' — large groups can take several minutes' : ''})`}
+                {phase === 'analyzing' && `Analyzing connections... (${elapsedSec}s elapsed)`}
+                {phase === 'complete' && `Complete (${elapsedSec}s)`}
+                {phase === 'error' && `Error (${elapsedSec}s)`}
               </span>
             </div>
           )}

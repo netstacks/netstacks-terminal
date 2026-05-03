@@ -424,7 +424,13 @@ pub async fn snmp_walk(
             break;
         }
 
-        let pdu_future = session.getnext(&current_oid);
+        // Use GETBULK (SNMPv2c) instead of GETNEXT — one PDU returns up to
+        // BULK_REPS rows instead of one. For a 200-row table that's 8 PDUs
+        // instead of 200 — roughly 25x fewer round-trips. Massive win for
+        // walks against devices with hundreds of interfaces / neighbors.
+        const BULK_REPS: u32 = 25;
+        let oids_arr = [&current_oid];
+        let pdu_future = session.getbulk(&oids_arr, 0, BULK_REPS);
         let pdu = match timeout(DEFAULT_TIMEOUT, pdu_future).await {
             Ok(Ok(pdu)) => pdu,
             Ok(Err(e)) => {
@@ -458,7 +464,7 @@ pub async fn snmp_walk(
                 return Ok(results);
             }
 
-            // Parse the response OID for next iteration
+            // Track the last in-subtree OID so the next GETBULK starts there.
             if let Ok(next_components) = parse_oid_components(&oid_string) {
                 if let Ok(next_oid) = snmp2::Oid::from(next_components.as_slice()) {
                     current_oid = next_oid;

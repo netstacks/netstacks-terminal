@@ -14,11 +14,22 @@ import type {
  * Run batch neighbor discovery on multiple targets.
  * POST /api/discovery/batch
  * Returns per-target results with neighbors, method used, and errors.
+ *
+ * Discovery is inherently long-running for large groups: per-target it walks
+ * LLDP/CDP tables (small) but may fall through to CLI (SSH login + neighbor
+ * parsing) when SNMP fails. Targets run with bounded concurrency on the
+ * agent (MAX_CONCURRENT_TARGETS=10), so a 40-device group can take minutes.
+ * 5-minute timeout gives all reasonable runs room without inviting infinite
+ * hangs.
  */
+const DISCOVERY_BATCH_TIMEOUT_MS = 300_000;
+
 export async function runBatchDiscovery(
   request: BatchDiscoveryRequest
 ): Promise<TargetDiscoveryResult[]> {
-  const { data } = await getClient().http.post('/discovery/batch', request);
+  const { data } = await getClient().http.post('/discovery/batch', request, {
+    timeout: DISCOVERY_BATCH_TIMEOUT_MS,
+  });
   return data;
 }
 
