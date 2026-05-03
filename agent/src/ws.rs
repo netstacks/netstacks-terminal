@@ -197,13 +197,16 @@ async fn handle_ssh_terminal(socket: WebSocket, query: WsQuery, manager: Arc<Ter
         if !enabled_forwards.is_empty() {
             tracing::info!("Starting {} session tunnel(s) for {}", enabled_forwards.len(), host_for_log);
             for fwd in enabled_forwards {
+                // Inherit the SSH session's resolved jump host so this
+                // session-attached tunnel travels the same path (and shares
+                // the pooled SSH connection where possible).
                 let tunnel = crate::models::Tunnel {
                     id: format!("session:{}:{}", session_id, fwd.id),
                     name: format!("Session forward :{}", fwd.local_port),
                     host: ssh_params.host.clone(),
                     port: ssh_params.port,
                     profile_id: ssh_params.profile_id.clone(),
-                    jump_host_id: None,
+                    jump_host_id: ssh_params.jump_host_id_effective.clone(),
                     forward_type: fwd.forward_type.clone(),
                     local_port: fwd.local_port,
                     bind_address: fwd.bind_address.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
