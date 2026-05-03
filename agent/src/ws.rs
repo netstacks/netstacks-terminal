@@ -1877,4 +1877,119 @@ mod resolve_effective_jump_tests {
         assert!(err.contains("ghost"), "msg should name missing id: {err}");
         assert!(err.contains("no longer exists"), "msg should explain: {err}");
     }
+
+    /// End-to-end smoke for the full sessions-as-jump-hosts feature.
+    ///
+    /// Mirrors `end_to_end_profile_default_jump_with_vault_credentials`
+    /// from PR #1 but for the session-as-jump path. Real DB + real vault
+    /// + stored credentials. Verifies:
+    /// 1. A session set up as another session's jump_session_id resolves.
+    /// 2. The resolved jump host/port match the upstream session's host/port
+    ///    (one source of truth — the user's pain in PR #1).
+    /// 3. The resolved credential is the upstream session's profile's
+    ///    credential, NOT the device's — so the auth bug that prompted
+    ///    this whole project cannot recur for the session-as-jump path.
+    #[tokio::test]
+    async fn end_to_end_session_as_jump_with_vault_credentials() {
+        let provider = fresh_provider().await;
+        provider.set_master_password("test-password").await.unwrap();
+
+        // Set up Session A — the future jump.
+        let p_a = provider.create_profile(
+            crate::models::NewCredentialProfile {
+                name: "homelab-bastion-creds".into(), username: "cwdavis".into(),
+                auth_type: AuthType::Password, key_path: None,
+                port: 22, keepalive_interval: 30, connection_timeout: 10,
+                terminal_theme: None, default_font_size: None, default_font_family: None,
+                scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
+                reconnect_delay: 5,
+                cli_flavor: crate::models::CliFlavor::default(),
+                auto_commands: vec![], jump_host_id: None, jump_session_id: None,
+            }
+        ).await.unwrap();
+        provider.store_profile_credential(&p_a.id, crate::models::ProfileCredential {
+            password: Some("the-real-bastion-password".into()),
+            key_passphrase: None, snmp_communities: None,
+        }).await.unwrap();
+        let session_a = provider.create_session(crate::models::NewSession {
+            name: "homelab-bastion".into(), folder_id: None,
+            host: "192.168.50.127".into(), port: 22,
+            color: None, profile_id: p_a.id.clone(),
+            netbox_device_id: None, netbox_source_id: None,
+            cli_flavor: crate::models::CliFlavor::Auto, terminal_theme: None,
+            font_family: None, font_size_override: None,
+            jump_host_id: None, jump_session_id: None,
+            port_forwards: vec![], auto_commands: vec![],
+            legacy_ssh: false, protocol: crate::models::Protocol::Ssh,
+            sftp_start_path: None,
+        }).await.unwrap();
+
+        // Set up Session B with jump_session_id = A. Different profile,
+        // different password (this is the exact divergence that bit us
+        // in PR #1's debugging session).
+        let p_b = provider.create_profile(
+            crate::models::NewCredentialProfile {
+                name: "router-creds".into(), username: "admin".into(),
+                auth_type: AuthType::Password, key_path: None,
+                port: 22, keepalive_interval: 30, connection_timeout: 10,
+                terminal_theme: None, default_font_size: None, default_font_family: None,
+                scrollback_lines: 1000, local_echo: false, auto_reconnect: false,
+                reconnect_delay: 5,
+                cli_flavor: crate::models::CliFlavor::default(),
+                auto_commands: vec![], jump_host_id: None, jump_session_id: None,
+            }
+        ).await.unwrap();
+        provider.store_profile_credential(&p_b.id, crate::models::ProfileCredential {
+            password: Some("device-password-DIFFERENT".into()),
+            key_passphrase: None, snmp_communities: None,
+        }).await.unwrap();
+        let session_b = provider.create_session(crate::models::NewSession {
+            name: "router-via-bastion".into(), folder_id: None,
+            host: "172.30.0.200".into(), port: 22,
+            color: None, profile_id: p_b.id.clone(),
+            netbox_device_id: None, netbox_source_id: None,
+            cli_flavor: crate::models::CliFlavor::Auto, terminal_theme: None,
+            font_family: None, font_size_override: None,
+            jump_host_id: None,
+            jump_session_id: Some(session_a.id.clone()),
+            port_forwards: vec![], auto_commands: vec![],
+            legacy_ssh: false, protocol: crate::models::Protocol::Ssh,
+            sftp_start_path: None,
+        }).await.unwrap();
+
+        // Resolve the effective jump for session B (no profile-level jump).
+        let session_level = JumpRef::from_pair(
+            session_b.jump_host_id.as_deref(),
+            session_b.jump_session_id.as_deref(),
+        );
+        let r = resolve_effective_jump(session_level, JumpRef::None, &provider)
+            .await
+            .unwrap()
+            .expect("session-as-jump must resolve");
+
+        // Source kind + id correct.
+        assert!(matches!(r.source, JumpSource::Session { .. }));
+        assert_eq!(r.source.id(), session_a.id);
+        assert_eq!(r.source.display_name(), "homelab-bastion");
+
+        // Endpoint matches Session A — one source of truth.
+        assert_eq!(r.host, "192.168.50.127");
+        assert_eq!(r.port, 22);
+
+        // Profile matches Session A's profile, NOT B's.
+        assert_eq!(r.profile.id, p_a.id);
+        assert_eq!(r.profile.username, "cwdavis");
+
+        // The bug fix: resolved credential is A's stored password, NOT B's.
+        // If we ever loaded the device's password for the jump hop, this
+        // assertion would fail loudly.
+        let cred = r.credential.expect("vault credential must be loaded");
+        assert_eq!(
+            cred.password.as_deref(),
+            Some("the-real-bastion-password"),
+            "must load Session A's own password (the upstream jump), \
+             never the device's — this is the exact regression that PR #1 \
+             diagnosed and this PR makes structurally impossible"
+        );
+    }
 }
