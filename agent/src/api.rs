@@ -426,6 +426,11 @@ pub async fn unlock_vault(
     Json(req): Json<UnlockRequest>,
 ) -> Result<StatusCode, ApiError> {
     state.provider.unlock(&req.password).await?;
+    crate::docs::migrate_unencrypted_notes_in_background(
+        state.pool.clone(),
+        state.provider.clone(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -511,6 +516,11 @@ pub async fn enable_biometric(
     }
     // Verify the password is correct by unlocking. (Idempotent if already unlocked.)
     state.provider.unlock(&req.password).await?;
+    crate::docs::migrate_unencrypted_notes_in_background(
+        state.pool.clone(),
+        state.provider.clone(),
+    )
+    .await;
     crate::biometric::BiometricVaultStore::store(req.password.clone())
         .await
         .map_err(biometric_err_to_api)?;
@@ -532,7 +542,14 @@ pub async fn unlock_with_biometric(
         .await
         .map_err(biometric_err_to_api)?;
     match state.provider.unlock(&password).await {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Ok(_) => {
+            crate::docs::migrate_unencrypted_notes_in_background(
+                state.pool.clone(),
+                state.provider.clone(),
+            )
+            .await;
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(e) => {
             // Stored password no longer matches the vault — most likely the
             // master password was changed somewhere else. Wipe the stale entry

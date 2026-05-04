@@ -19,6 +19,16 @@ export interface Document {
   session_id: string | null;
   created_at: string;
   updated_at: string;
+  /** True if this document is encrypted at rest (Secure Notes). */
+  encrypted?: boolean;
+  /** True if encrypted but vault was locked when read; `content` is empty. */
+  locked?: boolean;
+}
+
+/** Categories whose contents are stored encrypted in the vault. */
+export const SECURE_CATEGORIES: ReadonlySet<DocumentCategory> = new Set(['notes']);
+export function isSecureCategory(category: DocumentCategory): boolean {
+  return SECURE_CATEGORIES.has(category);
 }
 
 // Request to create a new document

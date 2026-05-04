@@ -399,8 +399,9 @@ ${editContent}`;
             </button>
           )}
 
-          {/* AI Enhance button - shown for markdown/text content when not editing */}
-          {isEditable && !isEditing && !isEnhancing && document.content_type !== 'csv' && document.content_type !== 'json' && (
+          {/* AI Enhance button - shown for markdown/text content when not editing.
+              Hidden for Secure Notes so private content never leaves the vault for an AI provider. */}
+          {isEditable && !isEditing && !isEnhancing && document.content_type !== 'csv' && document.content_type !== 'json' && document.category !== 'notes' && (
             <button
               className="doc-tab-editor-btn ai-enhance"
               onClick={handleAIEnhance}

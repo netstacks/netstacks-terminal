@@ -847,8 +847,12 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/:id/approve", post(scripts::approve_script))
         .with_state(scripts_state);
 
-    // Docs state (separate from app state)
-    let docs_state = Arc::new(docs::DocsState { pool });
+    // Docs state (separate from app state). Carries the vault-aware provider
+    // so Notes (Secure Notes) can encrypt/decrypt at rest.
+    let docs_state = Arc::new(docs::DocsState {
+        pool,
+        provider: app_state.provider.clone(),
+    });
 
     // Docs routes
     let docs_routes = TrackedRouter::new()

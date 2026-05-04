@@ -102,6 +102,15 @@ pub trait DataProvider: Send + Sync {
     /// Lock the vault
     fn lock(&self);
 
+    /// Encrypt a plain string with the unlocked vault. Returned bytes are
+    /// `salt || nonce || ciphertext` and round-trip via `vault_decrypt_string`.
+    /// Used by callers (e.g. Secure Notes) that store opaque encrypted blobs
+    /// in their own tables instead of the credential vault.
+    fn vault_encrypt_string(&self, value: &str) -> Result<Vec<u8>, ProviderError>;
+
+    /// Decrypt bytes previously produced by `vault_encrypt_string`.
+    fn vault_decrypt_string(&self, encrypted: &[u8]) -> Result<String, ProviderError>;
+
     /// Get credential for a session (vault must be unlocked)
     async fn _get_credential(&self, session_id: &str) -> Result<Option<_Credential>, ProviderError>;
 

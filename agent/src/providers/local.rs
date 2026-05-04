@@ -1987,6 +1987,14 @@ impl DataProvider for LocalDataProvider {
         *self.master_salt.write().unwrap() = None;
     }
 
+    fn vault_encrypt_string(&self, value: &str) -> Result<Vec<u8>, ProviderError> {
+        self.vault_store_string(value)
+    }
+
+    fn vault_decrypt_string(&self, encrypted: &[u8]) -> Result<String, ProviderError> {
+        self.vault_get_string(encrypted)
+    }
+
     async fn _get_credential(&self, session_id: &str) -> Result<Option<_Credential>, ProviderError> {
         let row: Option<(Vec<u8>,)> =
             sqlx::query_as("SELECT encrypted_data FROM credentials WHERE session_id = ?")

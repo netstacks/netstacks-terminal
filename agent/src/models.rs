@@ -673,6 +673,14 @@ pub struct Document {
     pub session_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// True if this document is encrypted at rest (Secure Notes).
+    /// When true and the vault is locked, `content` is empty in API responses.
+    #[serde(default)]
+    pub encrypted: bool,
+    /// True if this document is encrypted but the vault was locked when read,
+    /// so `content` could not be decrypted and is returned empty.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// Request to create a new document

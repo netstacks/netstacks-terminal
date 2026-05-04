@@ -169,12 +169,15 @@ CREATE TABLE IF NOT EXISTS profile_credentials (
 );
 
 -- Documents (outputs, templates, notes, backups, history, troubleshooting, mops)
+-- encrypted_content is non-NULL only for Secure Notes; when set, `content`
+-- is the empty string and the encrypted blob is decrypted via the vault.
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     category TEXT NOT NULL CHECK (category IN ('outputs', 'templates', 'notes', 'backups', 'history', 'troubleshooting', 'mops')),
     content_type TEXT NOT NULL CHECK (content_type IN ('csv', 'json', 'jinja', 'config', 'text', 'markdown', 'recording')),
     content TEXT NOT NULL,
+    encrypted_content BLOB,
     parent_folder TEXT,
     session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -186,6 +189,7 @@ CREATE TABLE IF NOT EXISTS document_versions (
     id TEXT PRIMARY KEY,
     document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
+    encrypted_content BLOB,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

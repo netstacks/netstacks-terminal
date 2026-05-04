@@ -5,6 +5,7 @@ import {
   deleteDocument,
   createDocument,
   updateDocument,
+  isSecureCategory,
   type Document,
   type DocumentCategory,
   type ContentType,
@@ -123,6 +124,12 @@ const Icons = {
       <path d="M12 3v12" />
       <polyline points="8 11 12 15 16 11" />
       <path d="M20 21H4" />
+    </svg>
+  ),
+  lock: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V8a4 4 0 018 0v3" />
     </svg>
   ),
 };
@@ -407,6 +414,7 @@ function DocsPanel({ onOpenDocument, onNewDocument }: DocsPanelProps) {
     if (!meta) return null;
     const docs = documentsByCategory.get(category) || [];
     const isExpanded = expandedCategories.has(category);
+    const secure = isSecureCategory(category);
 
     return (
       <div key={category} className="docs-section">
@@ -419,6 +427,15 @@ function DocsPanel({ onOpenDocument, onNewDocument }: DocsPanelProps) {
           </span>
           <span className="docs-section-icon">{meta.icon}</span>
           <span className="docs-section-name">{meta.name}</span>
+          {secure && (
+            <span
+              className="docs-section-lock"
+              title="Encrypted at rest with your vault password"
+              aria-label="Encrypted at rest"
+            >
+              {Icons.lock}
+            </span>
+          )}
           <span className="docs-section-count">{docs.length}</span>
           <span className="docs-section-actions">
             {meta.allowAdd && (

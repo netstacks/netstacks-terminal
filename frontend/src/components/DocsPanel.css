@@ -133,6 +133,19 @@
   letter-spacing: 0.5px;
 }
 
+.docs-section-lock {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  color: var(--color-text-muted);
+  opacity: 0.7;
+}
+
+.docs-section-lock svg {
+  width: 11px;
+  height: 11px;
+}
+
 .docs-section-count {
   margin-left: auto;
   min-width: 18px;

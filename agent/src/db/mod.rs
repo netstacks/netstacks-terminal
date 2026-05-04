@@ -646,6 +646,26 @@ async fn migrate_documents_table(pool: &SqlitePool) -> Result<(), DbError> {
             .map_err(|e| DbError::Migration(format!("Failed to create document_versions document_id index: {}", e)))?;
     }
 
+    // Secure Notes: add nullable BLOB columns that hold the
+    // vault-encrypted body. When `encrypted_content` is non-NULL, the
+    // plaintext `content` column is the empty string and decryption goes
+    // through the vault. The Notes category is encrypted by default;
+    // other categories continue to use `content` directly.
+    if !column_exists(pool, "documents", "encrypted_content").await? {
+        sqlx::query("ALTER TABLE documents ADD COLUMN encrypted_content BLOB")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to add documents.encrypted_content: {}", e)))?;
+        tracing::info!("Added documents.encrypted_content column for Secure Notes");
+    }
+    if !column_exists(pool, "document_versions", "encrypted_content").await? {
+        sqlx::query("ALTER TABLE document_versions ADD COLUMN encrypted_content BLOB")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to add document_versions.encrypted_content: {}", e)))?;
+        tracing::info!("Added document_versions.encrypted_content column for Secure Notes");
+    }
+
     Ok(())
 }
 
