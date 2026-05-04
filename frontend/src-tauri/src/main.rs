@@ -35,6 +35,18 @@ fn cert_fingerprint(pem: &str) -> String {
     format!("{}:{}", trimmed.len(), prefix)
 }
 
+/// Path to the flag marking that the macOS Local Network access prompt has been
+/// shown to this user. Presence of the file means we've already explained the
+/// requirement and triggered the OS prompt — don't bother the user again.
+#[cfg(target_os = "macos")]
+fn lan_prompt_flag_path() -> std::path::PathBuf {
+    const APP_ID: &str = "com.netstacks.terminal";
+    let base = std::env::var("HOME")
+        .map(|h| format!("{}/Library/Application Support/{}", h, APP_ID))
+        .unwrap_or_default();
+    std::path::PathBuf::from(base).join("lan_prompt_shown.txt")
+}
+
 /// Holds the sidecar child process so we can kill it when the app exits.
 struct SidecarChild(Mutex<Option<CommandChild>>);
 
@@ -219,6 +231,54 @@ async fn install_cert_os(cert_path: &std::path::Path) -> Result<String, String> 
     }
 }
 
+/// On macOS, RFC1918 connections from a bundled app silently fail with
+/// "No route to host" until the user grants Local Network access. The OS
+/// prompt only fires after the first RFC1918/multicast attempt — and it
+/// fires without context, so users don't know what they're being asked.
+///
+/// On first launch we show our own explanation dialog, then fire a one-shot
+/// mDNS multicast send to deterministically trigger the OS prompt right
+/// after the user dismisses our message. Multicast (224.0.0.251:5353) is
+/// the most reliable trigger and doesn't depend on which subnet the user
+/// is on. A flag file in Application Support records that we've done this,
+/// so the dialog never appears twice for the same user.
+#[cfg(target_os = "macos")]
+fn maybe_prompt_for_lan_access(app: &tauri::AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let flag = lan_prompt_flag_path();
+    if flag.exists() {
+        return;
+    }
+
+    if let Some(parent) = flag.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    app.dialog()
+        .message(
+            "NetStacks needs permission to reach devices on your local network \
+             (SSH, telnet, SNMP, discovery).\n\n\
+             macOS will ask you to allow this on the next screen. Click Allow.\n\n\
+             You can change this later in System Settings \u{2192} Privacy & Security \u{2192} Local Network.",
+        )
+        .title("Local Network Access Required")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| {
+            // User dismissed — fire mDNS multicast send to trigger the OS prompt.
+            // Errors are intentionally ignored: even a failed send registers the
+            // app with TCC, which is the only thing we actually need.
+            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                let _ = socket.send_to(b"\x00", "224.0.0.251:5353");
+            }
+            let _ = std::fs::write(&flag, "1");
+        });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn maybe_prompt_for_lan_access(_app: &tauri::AppHandle) {}
+
 #[cfg(target_os = "linux")]
 async fn install_cert_os(cert_path: &std::path::Path) -> Result<String, String> {
     // Install to user-local certificate directory
@@ -346,6 +406,11 @@ fn main() {
             });
 
             println!("netstacks-agent sidecar started");
+
+            // First-run only: explain macOS Local Network requirement and
+            // trigger the OS prompt. No-op on other platforms and on
+            // subsequent launches.
+            maybe_prompt_for_lan_access(app.handle());
 
             Ok(())
         })
