@@ -181,10 +181,10 @@ export function eventToBinding(e: KeyboardEvent): string {
 export function matchesBinding(e: KeyboardEvent, binding: string): boolean {
   const parsed = parseKeybinding(binding)
 
-  // Check modifiers
-  const metaMatch = isMac()
-    ? (parsed.meta === e.metaKey && parsed.ctrl === e.ctrlKey)
-    : (parsed.ctrl === e.ctrlKey || parsed.meta === e.metaKey)
+  // Check modifiers — both Ctrl and Meta states must match the binding spec.
+  // The Windows branch previously used ||, which meant bindings like Ctrl+W
+  // would match a bare W keypress (parsed.meta===false matches e.metaKey===false).
+  const metaMatch = parsed.meta === e.metaKey && parsed.ctrl === e.ctrlKey
 
   if (!metaMatch) return false
   if (parsed.shift !== e.shiftKey) return false
