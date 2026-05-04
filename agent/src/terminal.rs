@@ -99,8 +99,26 @@ impl TerminalSession {
         ];
         #[cfg(target_os = "windows")]
         const FORWARDED_ENV: &[&str] = &[
+            // User identity
             "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA",
-            "TEMP", "TMP", "COMPUTERNAME", "HOMEDRIVE", "HOMEPATH",
+            "TEMP", "TMP", "COMPUTERNAME", "HOMEDRIVE", "HOMEPATH", "PUBLIC",
+            // System paths required by Windows PowerShell to initialize the
+            // crypto provider. Without SystemRoot, powershell.exe fails with
+            // "Loading managed Windows PowerShell failed with error 8009001d"
+            // (NTE_PROVIDER_DLL_FAIL — the CSP DLLs in %SystemRoot%\System32
+            // can't be located).
+            "SystemRoot", "windir", "SystemDrive",
+            // PowerShell module discovery
+            "PSModulePath",
+            // Program directories used by .NET Framework / .NET Core
+            "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
+            "ProgramData", "ALLUSERSPROFILE", "CommonProgramFiles",
+            "CommonProgramFiles(x86)", "CommonProgramW6432",
+            // Command resolution
+            "PATHEXT",
+            // Architecture / hardware
+            "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+            "NUMBER_OF_PROCESSORS", "OS",
         ];
         for var in FORWARDED_ENV {
             if let Ok(value) = std::env::var(var) {
