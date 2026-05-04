@@ -93,7 +93,12 @@ export default function UpdateChecker() {
       // Relaunch app after successful install
       await relaunch();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Update failed';
+      console.error('Update install failed:', err);
+      const message =
+        err instanceof Error ? err.message :
+        typeof err === 'string' ? err :
+        err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) :
+        `Update failed: ${JSON.stringify(err)}`;
       setError(message);
       setDownloading(false);
     }
