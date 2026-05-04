@@ -11,9 +11,11 @@ import { useState, useEffect, useCallback } from 'react'
 import { loadAppConfig, saveAppConfig } from '../lib/appConfig'
 import { useMode } from '../hooks/useMode'
 import { fetchCaCertificateInfo, installCaCertificate, type CaCertificateInfo } from '../api/tlsTrust'
+import { useCapabilitiesStore } from '../stores/capabilitiesStore'
 
 export default function SettingsConnection() {
   const { controllerUrl, isEnterprise } = useMode()
+  const hasFeature = useCapabilitiesStore((s) => s.hasFeature)
 
   // Controller URL editing
   const [urlInput, setUrlInput] = useState(controllerUrl || '')
@@ -93,6 +95,23 @@ export default function SettingsConnection() {
       setCaError(err instanceof Error ? err.message : 'Failed to install certificate')
     } finally {
       setCaInstalling(false)
+    }
+  }
+
+  // De-enroll from enterprise mode
+  const [deenrolling, setDeenrolling] = useState(false)
+  const [deenrollMessage, setDeenrollMessage] = useState<string | null>(null)
+
+  const handleDeenroll = async () => {
+    setDeenrolling(true)
+    setDeenrollMessage(null)
+    try {
+      await saveAppConfig({ controllerUrl: null })
+      setDeenrollMessage('Switched to standalone mode. Restart the app to apply.')
+    } catch {
+      setDeenrollMessage('Failed to de-enroll. Try clearing the URL above.')
+    } finally {
+      setDeenrolling(false)
     }
   }
 
@@ -263,6 +282,35 @@ export default function SettingsConnection() {
           </div>
         )}
       </div>
+
+      {/* De-enroll from enterprise mode */}
+      {isEnterprise && hasFeature('terminal_deenrollment') && (
+        <div className="settings-category">
+          <h3 className="settings-category-title">Switch to Standalone</h3>
+          <div className="setting-item">
+            <div className="setting-description">
+              Disconnect from the Enterprise Controller and return to local agent mode. The app will restart in standalone mode.
+            </div>
+            <div style={{ marginTop: '12px' }}>
+              <button
+                className="settings-btn"
+                onClick={handleDeenroll}
+                disabled={deenrolling || !!deenrollMessage}
+                style={{
+                  background: 'var(--bg-tertiary)',
+                  color: 'var(--error, #e57373)',
+                  border: '1px solid var(--error, #e57373)',
+                }}
+              >
+                {deenrolling ? 'Switching...' : 'Switch to Standalone Mode'}
+              </button>
+            </div>
+            {deenrollMessage && (
+              <div className="settings-success" style={{ marginTop: '8px' }}>{deenrollMessage}</div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -84,7 +84,8 @@ export type EnterpriseFeature =
   | 'shared_topology'
   | 'sso'
   | 'knowledge_base'
-  | 'central_sftp';
+  | 'central_sftp'
+  | 'terminal_deenrollment';
 
 /**
  * Known local-only feature names.

@@ -661,10 +661,6 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
                 </button>
               </div>
             </div>
-            <div className="settings-category" style={{ marginTop: '24px' }}>
-              <h3 className="settings-category-title">Controller Connection</h3>
-              <SettingsConnection />
-            </div>
           </div>
         )}
 
