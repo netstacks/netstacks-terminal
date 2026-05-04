@@ -111,6 +111,10 @@ rmcp = { version = "0.14", features = ["client", "transport-child-process", "tra
 lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder"] }
 
 # Platform-specific deps
+[target.'cfg(unix)'.dependencies]
+# Process signaling for parent-PID watcher and orphan-agent eviction.
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 which = "6"
 

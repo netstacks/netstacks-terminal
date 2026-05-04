@@ -120,6 +120,136 @@ fn check_enterprise_mode() -> bool {
     }
 }
 
+/// Single-instance enforcement: if `addr` is already bound, confirm the
+/// listener is one of our agents (responds 2xx on `/api/health` over our
+/// self-signed TLS) before evicting it. Foreign processes are left alone.
+///
+/// Sequence: SIGTERM → wait up to 2s for the port to free → escalate to
+/// SIGKILL if it didn't. Returns once the port appears free, or logs a
+/// warning if eviction couldn't complete (the subsequent bind() will then
+/// surface the EADDRINUSE error to the user).
+#[cfg(unix)]
+async fn evict_existing_agent_if_present(addr: SocketAddr) {
+    use std::time::Duration;
+
+    if !port_in_use(addr) {
+        return;
+    }
+
+    // Confirm it's our agent before signalling. We accept self-signed
+    // because that's exactly what our agent serves.
+    let client = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Could not build probe client: {}", e);
+            return;
+        }
+    };
+    let probe_url = format!("https://{}/api/health", addr);
+    let is_ours = matches!(
+        client.get(&probe_url).send().await,
+        Ok(r) if r.status().is_success()
+    );
+    if !is_ours {
+        tracing::warn!(
+            "Port {} is held by a non-NetStacks process — refusing to evict. Bind will fail.",
+            addr.port()
+        );
+        return;
+    }
+
+    let pids = pids_listening_on(addr.port());
+    if pids.is_empty() {
+        tracing::warn!("Could not identify holder of port {} via lsof", addr.port());
+        return;
+    }
+
+    for pid in &pids {
+        tracing::warn!("Evicting orphaned netstacks-agent PID {}", pid);
+        unsafe { libc::kill(*pid, libc::SIGTERM); }
+    }
+
+    // Poll for up to 2s for the port to free.
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !port_in_use(addr) {
+            tracing::info!("Port {} freed", addr.port());
+            return;
+        }
+    }
+
+    tracing::warn!("SIGTERM didn't free port {} — escalating to SIGKILL", addr.port());
+    for pid in &pids {
+        unsafe { libc::kill(*pid, libc::SIGKILL); }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+#[cfg(not(unix))]
+async fn evict_existing_agent_if_present(_addr: SocketAddr) {
+    // TODO: Windows eviction (TerminateProcess via OpenProcess).
+}
+
+#[cfg(unix)]
+fn port_in_use(addr: SocketAddr) -> bool {
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok()
+}
+
+#[cfg(unix)]
+fn pids_listening_on(port: u16) -> Vec<i32> {
+    // lsof is available on macOS by default and standard on Linux.
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{}", port), "-sTCP:LISTEN", "-t"])
+        .output();
+    match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Tauri spawns this agent as a sidecar but doesn't always cleanly kill it
+/// on parent death (Ctrl+C, SIGKILL, crash all skip RunEvent::Exit). When
+/// the parent dies, the kernel reparents us to PID 1 (launchd / init) and
+/// `getppid()` changes. Watch for that and self-terminate so we never
+/// outlive the user-visible app.
+#[cfg(unix)]
+fn spawn_parent_death_watcher() {
+    let original_ppid = unsafe { libc::getppid() };
+    if original_ppid <= 1 {
+        // Already orphaned (running from CLI without a Tauri parent, or
+        // launched by launchd directly). Nothing to watch — stay alive.
+        tracing::info!("No supervising parent (ppid={}); skipping death watcher", original_ppid);
+        return;
+    }
+    tracing::info!("Parent-PID watcher armed for ppid={}", original_ppid);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let now = unsafe { libc::getppid() };
+            if now != original_ppid {
+                tracing::warn!(
+                    "Parent process {} died (now reparented to {}); exiting to avoid orphaned agent",
+                    original_ppid, now
+                );
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_parent_death_watcher() {
+    // TODO: Windows equivalent via Job Objects (CreateJobObject +
+    // SetInformationJobObject with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE).
+}
+
 fn main() {
     // Install aws-lc-rs as the rustls crypto provider before any TLS code runs.
     // tokio-rustls disables rustls default features so no provider is auto-selected
@@ -374,10 +504,24 @@ async fn async_main() {
     // Start HTTPS server on localhost only
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     assert!(addr.ip().is_loopback(), "Security: sidecar must bind to loopback address only");
+
+    // Single-instance enforcement (Layer 2): if another netstacks-agent is
+    // already bound to 8080 — usually an orphan from a previous Tauri session
+    // whose parent died ungracefully — confirm it's actually one of ours via
+    // /api/health, then SIGTERM (escalate to SIGKILL after 2s) and reclaim
+    // the port. Foreign processes are left alone and we fail loudly.
+    evict_existing_agent_if_present(addr).await;
+
     tracing::info!("NetStacks Agent starting on https://{}", addr);
 
     let acceptor = TlsAcceptor::from(local_tls.server_config);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+
+    // Layer 1: parent-PID watcher. Tauri's RunEvent::Exit cleanup is
+    // unreliable (Ctrl+C, SIGKILL, crash all skip it), so the agent
+    // self-terminates as soon as it notices the parent died and we got
+    // reparented. Belt-and-suspenders with the eviction above.
+    spawn_parent_death_watcher();
 
     loop {
         let (tcp, _remote_addr) = match listener.accept().await {

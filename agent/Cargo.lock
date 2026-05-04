@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "netstacks-agent"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2014,6 +2014,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "lettre",
+ "libc",
  "minijinja",
  "netstacks-credential-vault",
  "objc2",
