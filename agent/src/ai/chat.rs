@@ -491,6 +491,40 @@ pub async fn load_ai_config_from_provider(
         return Some(AiProviderConfig::LiteLLM { model, base_url: url, api_key });
     }
 
+    // Custom provider: API key is optional (supports OAuth2, ADC, or no-auth endpoints)
+    if provider_name == "custom" {
+        let api_key = data_provider.get_api_key("ai.custom").await.ok().flatten().unwrap_or_default();
+        let oauth2_config = settings_config.as_ref().and_then(|s| {
+            if s.auth_mode.as_deref() == Some("oauth2") {
+                match (s.oauth2_token_url.as_ref(), s.oauth2_client_id.as_ref()) {
+                    (Some(token_url), Some(client_id)) if !token_url.is_empty() && !client_id.is_empty() => {
+                        Some(super::oauth2::OAuth2Config {
+                            token_url: token_url.clone(),
+                            client_id: client_id.clone(),
+                            client_secret: api_key.clone(),
+                            custom_headers: s.custom_headers.clone().unwrap_or_default(),
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        });
+        let api_format = settings_config.as_ref().and_then(|s| s.api_format.clone());
+        let effective_model = settings_config.as_ref()
+            .map(|s| s.model.clone())
+            .filter(|m| !m.is_empty())
+            .unwrap_or(model);
+        return Some(AiProviderConfig::Custom {
+            api_key,
+            model: effective_model,
+            base_url: base_url.unwrap_or_default(),
+            oauth2: oauth2_config,
+            api_format,
+        });
+    }
+
     // Get API key from vault
     let key_type = format!("ai.{}", provider_name);
     let api_key = match data_provider.get_api_key(&key_type).await {
@@ -505,39 +539,6 @@ pub async fn load_ai_config_from_provider(
         "anthropic" => Some(AiProviderConfig::Anthropic { api_key, model, base_url: base_url.clone() }),
         "openai" => Some(AiProviderConfig::OpenAI { api_key, model, base_url }),
         "openrouter" => Some(AiProviderConfig::OpenRouter { api_key, model }),
-        "custom" => {
-            // Build OAuth2 config from settings if auth_mode is oauth2
-            let oauth2_config = settings_config.as_ref().and_then(|s| {
-                if s.auth_mode.as_deref() == Some("oauth2") {
-                    match (s.oauth2_token_url.as_ref(), s.oauth2_client_id.as_ref()) {
-                        (Some(token_url), Some(client_id)) if !token_url.is_empty() && !client_id.is_empty() => {
-                            Some(super::oauth2::OAuth2Config {
-                                token_url: token_url.clone(),
-                                client_id: client_id.clone(),
-                                client_secret: api_key.clone(),
-                                custom_headers: s.custom_headers.clone().unwrap_or_default(),
-                            })
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            });
-            let api_format = settings_config.as_ref().and_then(|s| s.api_format.clone());
-            // For custom provider, prefer the saved model over overrides (provider-specific names)
-            let effective_model = settings_config.as_ref()
-                .map(|s| s.model.clone())
-                .filter(|m| !m.is_empty())
-                .unwrap_or(model);
-            Some(AiProviderConfig::Custom {
-                api_key,
-                model: effective_model,
-                base_url: base_url.unwrap_or_default(),
-                oauth2: oauth2_config,
-                api_format,
-            })
-        }
         _ => {
             tracing::warn!("Unknown AI provider: {}", provider_name);
             None
@@ -1155,17 +1156,42 @@ async fn load_ai_config_with_prompt(state: &AppState) -> (Option<AiProviderConfi
     // Handle LiteLLM separately - it may not need an API key (depends on proxy config)
     if settings.provider == "litellm" {
         let base_url = settings.base_url.unwrap_or_else(|| "http://localhost:4000".to_string());
-        // Try to get API key from vault, but it's optional for LiteLLM
-        let key_type = "ai.litellm";
-        let api_key = match state.provider.get_api_key(key_type).await {
-            Ok(Some(key)) => Some(key),
-            _ => None,
-        };
+        let api_key = state.provider.get_api_key("ai.litellm").await.ok().flatten();
         return (
             Some(AiProviderConfig::LiteLLM {
                 model: settings.model,
                 base_url,
                 api_key,
+            }),
+            custom_prompt,
+        );
+    }
+
+    // Custom provider: API key is optional (supports OAuth2, ADC, or no-auth endpoints)
+    if settings.provider == "custom" {
+        let api_key = state.provider.get_api_key("ai.custom").await.ok().flatten().unwrap_or_default();
+        let oauth2_config = if settings.auth_mode.as_deref() == Some("oauth2") {
+            match (settings.oauth2_token_url, settings.oauth2_client_id) {
+                (Some(token_url), Some(client_id)) if !token_url.is_empty() && !client_id.is_empty() => {
+                    Some(super::oauth2::OAuth2Config {
+                        token_url,
+                        client_id,
+                        client_secret: api_key.clone(),
+                        custom_headers: settings.custom_headers.unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        return (
+            Some(AiProviderConfig::Custom {
+                api_key,
+                model: settings.model,
+                base_url: settings.base_url.unwrap_or_default(),
+                oauth2: oauth2_config,
+                api_format: settings.api_format,
             }),
             custom_prompt,
         );
@@ -1288,6 +1314,33 @@ async fn load_ai_config_or_error(state: &AppState) -> Result<AiProviderConfig, S
         return Ok(AiProviderConfig::LiteLLM { model: settings.model, base_url, api_key });
     }
 
+    // Custom provider: API key is optional (supports OAuth2, ADC, or no-auth endpoints)
+    if settings.provider == "custom" {
+        let api_key = state.provider.get_api_key("ai.custom").await.ok().flatten().unwrap_or_default();
+        let oauth2_config = if settings.auth_mode.as_deref() == Some("oauth2") {
+            match (settings.oauth2_token_url, settings.oauth2_client_id) {
+                (Some(token_url), Some(client_id)) if !token_url.is_empty() && !client_id.is_empty() => {
+                    Some(super::oauth2::OAuth2Config {
+                        token_url,
+                        client_id,
+                        client_secret: api_key.clone(),
+                        custom_headers: settings.custom_headers.unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        return Ok(AiProviderConfig::Custom {
+            api_key,
+            model: settings.model,
+            base_url: settings.base_url.unwrap_or_default(),
+            oauth2: oauth2_config,
+            api_format: settings.api_format,
+        });
+    }
+
     // Step 3: Check vault is unlocked
     if !state.provider.is_unlocked() {
         return Err("Vault is locked. Unlock the vault to access AI API keys.".into());
@@ -1307,30 +1360,6 @@ async fn load_ai_config_or_error(state: &AppState) -> Result<AiProviderConfig, S
         "anthropic" => Ok(AiProviderConfig::Anthropic { api_key, model: settings.model, base_url: settings.base_url.clone() }),
         "openai" => Ok(AiProviderConfig::OpenAI { api_key, model: settings.model, base_url: settings.base_url }),
         "openrouter" => Ok(AiProviderConfig::OpenRouter { api_key, model: settings.model }),
-        "custom" => {
-            let oauth2_config = if settings.auth_mode.as_deref() == Some("oauth2") {
-                match (settings.oauth2_token_url, settings.oauth2_client_id) {
-                    (Some(token_url), Some(client_id)) if !token_url.is_empty() && !client_id.is_empty() => {
-                        Some(super::oauth2::OAuth2Config {
-                            token_url,
-                            client_id,
-                            client_secret: api_key.clone(),
-                            custom_headers: settings.custom_headers.unwrap_or_default(),
-                        })
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            Ok(AiProviderConfig::Custom {
-                api_key,
-                model: settings.model,
-                base_url: settings.base_url.unwrap_or_default(),
-                oauth2: oauth2_config,
-                api_format: settings.api_format,
-            })
-        }
         other => Err(format!("Unknown AI provider: {}", other)),
     }
 }
@@ -1396,18 +1425,49 @@ async fn load_ai_config_with_overrides(
 
     // Handle LiteLLM separately - it doesn't need an API key
     if provider == "litellm" {
-        // Try to get base_url from existing config or use default
         let base_url = match &base_config {
             Some(AiProviderConfig::LiteLLM { base_url, .. }) => base_url.clone(),
             _ => "http://localhost:4000".to_string(),
         };
-        // LiteLLM may optionally have an API key
         let api_key = match &base_config {
             Some(AiProviderConfig::LiteLLM { api_key, .. }) => api_key.clone(),
             _ => None,
         };
         return (
             Some(AiProviderConfig::LiteLLM { model, base_url, api_key }),
+            custom_prompt,
+        );
+    }
+
+    // Custom provider: API key is optional (supports OAuth2, ADC, or no-auth endpoints)
+    if provider == "custom" {
+        let base_url = match &base_config {
+            Some(AiProviderConfig::Custom { base_url, .. }) => base_url.clone(),
+            _ => String::new(),
+        };
+        let oauth2 = match &base_config {
+            Some(AiProviderConfig::Custom { oauth2, .. }) => oauth2.clone(),
+            _ => None,
+        };
+        let api_format = match &base_config {
+            Some(AiProviderConfig::Custom { api_format, .. }) => api_format.clone(),
+            _ => None,
+        };
+        let api_key = match &base_config {
+            Some(AiProviderConfig::Custom { api_key, .. }) => api_key.clone(),
+            _ => state.provider.get_api_key("ai.custom").await.ok().flatten().unwrap_or_default(),
+        };
+        let base_model = match &base_config {
+            Some(AiProviderConfig::Custom { model: m, .. }) if !m.is_empty() => m.clone(),
+            _ => model.clone(),
+        };
+        let effective_model = if model_override.is_some() && !model.is_empty() {
+            model
+        } else {
+            base_model
+        };
+        return (
+            Some(AiProviderConfig::Custom { api_key, model: effective_model, base_url, oauth2, api_format }),
             custom_prompt,
         );
     }
@@ -1443,40 +1503,12 @@ async fn load_ai_config_with_overrides(
             Some(AiProviderConfig::OpenAI { api_key, model, base_url })
         }
         "openrouter" => {
-            // OpenRouter requires provider prefix (e.g., anthropic/claude-3-5-haiku)
-            // If the model doesn't have a prefix and looks like a Claude model, add anthropic/
             let model = if !model.contains('/') && (model.starts_with("claude") || model.contains("claude")) {
                 format!("anthropic/{}", model)
             } else {
                 model
             };
             Some(AiProviderConfig::OpenRouter { api_key, model })
-        }
-        "custom" => {
-            // For custom providers, always use the base config's model/base_url/oauth2/format
-            // since these are provider-specific (e.g., Gemini model names won't work on OpenAI)
-            let base_model = match &base_config {
-                Some(AiProviderConfig::Custom { model: m, .. }) if !m.is_empty() => m.clone(),
-                _ => model.clone(),
-            };
-            let effective_model = if model_override.is_some() && !model.is_empty() {
-                model // Explicit model override takes priority
-            } else {
-                base_model // Otherwise use base config model
-            };
-            let base_url = match &base_config {
-                Some(AiProviderConfig::Custom { base_url, .. }) => base_url.clone(),
-                _ => String::new(),
-            };
-            let oauth2 = match &base_config {
-                Some(AiProviderConfig::Custom { oauth2, .. }) => oauth2.clone(),
-                _ => None,
-            };
-            let api_format = match &base_config {
-                Some(AiProviderConfig::Custom { api_format, .. }) => api_format.clone(),
-                _ => None,
-            };
-            Some(AiProviderConfig::Custom { api_key, model: effective_model, base_url, oauth2, api_format })
         }
         _ => {
             tracing::warn!("Unknown AI provider: {}", provider);
@@ -1538,22 +1570,23 @@ pub async fn analyze_highlights(
         ChatMessage {
             role: "user".to_string(),
             content: format!(
-                "Flag any problems in this CLI output. Return ONLY a JSON array, nothing else.\n\n{}",
+                "Flag any problems in this CLI output. Return ONLY a valid JSON array, no other text.\n\n{}",
                 output
             ),
-        },
-        // Assistant prefill to force the model to start with a JSON array
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: "[".to_string(),
         },
     ];
 
     // Make the request
     let response = provider.chat_completion(messages, None).await?;
 
-    // Prepend the "[" we used as prefill since the model continues from there
-    let full_response = format!("[{}", response);
+    // Strip markdown fences if the model wrapped the JSON despite instructions
+    let full_response = response
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
     let highlights = parse_ai_response(&full_response, output);
 
     Ok(Json(AnalyzeHighlightsResponse {
