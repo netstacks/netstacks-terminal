@@ -102,9 +102,21 @@ export const useAuthStore = create<AuthState>()(
           const apiMessage = (error as { response?: { data?: { error?: string } } })
             ?.response?.data?.error;
 
+          // Detect TLS/network errors and provide an actionable message
+          const code = (error as { code?: string })?.code || '';
+          const isTlsNetworkError = !apiMessage && (
+            code === 'ERR_NETWORK' || code === 'ERR_CERT_AUTHORITY_INVALID' ||
+            code === 'ERR_CERT_COMMON_NAME_INVALID' || code === 'ECONNREFUSED' ||
+            message.includes('Network Error')
+          );
+
+          const displayError = isTlsNetworkError
+            ? 'Cannot connect — the Controller has an untrusted TLS certificate. Go to Settings → Enterprise to trust it.'
+            : (apiMessage || message);
+
           set({
             isLoading: false,
-            error: apiMessage || message,
+            error: displayError,
           });
 
           throw error;
@@ -228,7 +240,6 @@ export const useAuthStore = create<AuthState>()(
             });
           }
         } catch (error) {
-          // Auth check failed - clear state (including error so login screen starts clean)
           console.warn('[authStore] Auth check failed:', error);
           set({
             accessToken: null,
@@ -239,6 +250,16 @@ export const useAuthStore = create<AuthState>()(
             isLoading: false,
             error: null,
           });
+          // Rethrow network/TLS errors so AuthProvider can show the
+          // "Cannot Connect" page with the cert trust dialog instead
+          // of silently falling through to the login screen.
+          const isNetworkError = error instanceof Error &&
+            (error.message.includes('Network Error') ||
+             error.message.includes('ECONNREFUSED') ||
+             (error as { code?: string }).code?.startsWith('ERR_'));
+          if (isNetworkError) {
+            throw error;
+          }
         }
       },
 

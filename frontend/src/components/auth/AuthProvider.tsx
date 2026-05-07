@@ -66,6 +66,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setTrustStatus(null);
     hasCheckedAuth.current = false;
     try {
+      // Probe the controller health endpoint first to detect TLS errors
+      // before attempting auth. This catches the case where there's no
+      // saved refresh token (first connection) — checkAuth returns early
+      // without making a network call, so TLS errors go undetected.
+      if (controllerUrl) {
+        const { default: axios } = await import('axios');
+        await axios.get(`${controllerUrl}/health`, { timeout: 10000 });
+      }
       await useAuthStore.getState().checkAuth();
       setConnectionError(null);
     } catch (error) {
@@ -84,7 +92,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } finally {
       setIsChecking(false);
     }
-  }, []);
+  }, [controllerUrl]);
 
   // Stage 1: fetch the cert (TLS verification disabled — bootstrap only)
   // and surface its SHA-256 fingerprint for review. Does NOT install.
@@ -150,14 +158,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
         pemContent: pendingCert.pem,
         filename: 'netstacks-controller-ca.pem',
       });
-      setTrustStatus(result || 'Certificate installed. Retrying connection...');
+      setTrustStatus(result || 'Certificate installed. Reloading...');
       setPendingCert(null);
       setExpectedFingerprint('');
+      // The webview caches its TLS state — a simple retry won't pick up
+      // the newly trusted cert. Reload the page to force the webview to
+      // re-read the OS trust store.
       setTimeout(() => {
-        setConnectionError(null);
-        setTrustStatus(null);
-        hasCheckedAuth.current = false;
-        setIsChecking(true);
+        window.location.reload();
       }, 1500);
     } catch (err) {
       setTrustStatus(`Failed: ${err instanceof Error ? err.message : String(err)}`);

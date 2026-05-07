@@ -1,3 +1,26 @@
+### The SSH Terminal that thinks with you.
+
+SSH, Telnet, and SFTP with an encrypted credential vault, network-aware AI, and topology visualization.
+Built for network engineers. Open source under Apache 2.0.
+
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/netstacks/netstacks-terminal/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://netstacks.net/download)
+[![Built with Tauri](https://img.shields.io/badge/Built_with-Tauri_%2B_Rust-orange.svg)](https://tauri.app)
+
+[Download](https://netstacks.net/download) &nbsp;&bull;&nbsp; [Documentation](https://www.netstacks.net/docs) &nbsp;&bull;&nbsp; [Blog](https://netstacks.hashnode.dev)
+
+</div>
+
+---
+
+<div align="center">
+
+<img src="CoPilotDemo.gif" alt="NetStacks AI CoPilot Demo" width="800" />
+
+</div>
+
+---
+
 # NetStacks Terminal
 
 NetStacks is a desktop terminal for network engineers — SSH/Telnet/SFTP, an

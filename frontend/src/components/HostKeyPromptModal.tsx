@@ -17,6 +17,7 @@ import {
   type HostKeyPrompt,
 } from '../api/hostKeys';
 import { useMode } from '../hooks/useMode';
+import { useAuthStore } from '../stores/authStore';
 
 /** Server-side prompt timeout (matches `approvals::PROMPT_TIMEOUT`). */
 const PROMPT_TIMEOUT_SECS = 120;
@@ -29,12 +30,18 @@ export default function HostKeyPromptModal() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const { isEnterprise } = useMode();
+  const isAuthenticated = useAuthStore(state => state.isAuthenticated);
   const lastPromptIdRef = useRef<string | null>(null);
 
-  // Poll for pending prompts. Skip in enterprise mode — host-key prompts
-  // are a sidecar (standalone) feature; the controller has its own flow.
+  // In enterprise mode, wait until authenticated before polling —
+  // the controller requires a valid JWT for /api/host-keys/prompts.
+  const shouldPoll = isEnterprise ? isAuthenticated : true;
+
+  // Poll for pending host-key prompts. In standalone mode this hits the
+  // local sidecar; in enterprise mode it hits the controller — both expose
+  // the same /api/host-keys/prompts surface via getClient().
   useEffect(() => {
-    if (isEnterprise) return;
+    if (!shouldPoll) return;
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -62,7 +69,7 @@ export default function HostKeyPromptModal() {
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [isEnterprise]);
+  }, [shouldPoll]);
 
   // Tick a 1 s clock so the countdown updates without prop-drilling.
   useEffect(() => {

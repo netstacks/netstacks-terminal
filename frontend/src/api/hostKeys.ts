@@ -29,7 +29,9 @@ export interface HostKeyPrompt {
 /** GET /api/host-keys/prompts — list currently-pending prompts. */
 export async function listHostKeyPrompts(): Promise<HostKeyPrompt[]> {
   const { data } = await getClient().http.get('/host-keys/prompts');
-  return Array.isArray(data) ? data : [];
+  // Controller wraps in { prompts: [...] }, sidecar returns raw array
+  const list = data?.prompts ?? data;
+  return Array.isArray(list) ? list : [];
 }
 
 /** Approve a prompt — the SSH handshake will proceed and the key is

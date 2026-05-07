@@ -59,6 +59,12 @@ export function LoginScreen() {
               <span>{displayError}</span>
             </div>
           )}
+          {displayError?.includes('untrusted TLS certificate') && (
+            <p style={{ fontSize: '12px', color: '#9ca3af', marginBottom: '12px', textAlign: 'center' }}>
+              Open <strong>Settings → Enterprise</strong> to trust the controller's certificate,
+              or check the connection tab in the bottom panel.
+            </p>
+          )}
 
           <div className="form-field">
             <label htmlFor="email">Username</label>
