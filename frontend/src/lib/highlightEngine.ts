@@ -98,6 +98,9 @@ export class HighlightEngine {
   private throttleLastFired: number = 0
   private pendingScanType: 'full' | 'incremental' | 'viewport' | null = null
 
+  // Line content cache to skip unchanged lines during rescans
+  private lineContentCache: Map<number, string> = new Map()
+
   constructor(
     terminal: Terminal,
     sessionId?: string,
@@ -193,16 +196,14 @@ export class HighlightEngine {
   }
 
   /**
-   * Scroll-optimized scan. Scans only newly-visible lines via rAF.
+   * Scroll-optimized scan. Throttled to avoid blocking rapid scrolling.
    */
   scanViewport(): void {
     if (this.destroyed) return
     const hasRules = this.rules.length > 0 || this.detectionRules.length > 0
     if (!hasRules) return
 
-    requestAnimationFrame(() => {
-      if (!this.destroyed) this.performViewportScan()
-    })
+    this.scheduleThrottledScan('viewport')
   }
 
   /**
@@ -299,11 +300,9 @@ export class HighlightEngine {
       return
     }
 
-    // When new data arrives, existing lines in the viewport may have been
-    // updated (overwritten by terminal output) even if the buffer length
-    // didn't grow. Always do a full viewport scan with diff — the cache
-    // ensures decorations that haven't changed are untouched.
-    const newMatchMap = this.buildMatchMap(viewportY, rows, allRules)
+    // Rescan full viewport with diff — skipUnchanged avoids re-running
+    // regex on lines whose text content hasn't changed since last scan.
+    const newMatchMap = this.buildMatchMap(viewportY, rows, allRules, true)
     this.purgeOffViewportDecorations(viewportY, rows)
     this.applyDiff(newMatchMap, false)
 
@@ -318,15 +317,17 @@ export class HighlightEngine {
     const buffer = this.terminal.buffer.active
     const viewportY = buffer.viewportY
     const rows = this.terminal.rows
-    const allRules = [...this.rules, ...this.detectionRules]
 
+    // Skip if viewport hasn't moved
+    if (viewportY === this.lastViewportY && rows === this.lastViewportRows) {
+      return
+    }
+
+    const allRules = [...this.rules, ...this.detectionRules]
     const oldViewportY = this.lastViewportY
     const oldRows = this.lastViewportRows
 
-    this.purgeOffViewportDecorations(viewportY, rows)
-
     if (oldViewportY < 0) {
-      // First scan — full viewport
       const newMatches = this.buildMatchMap(viewportY, rows, allRules)
       this.applyDiff(newMatches, false)
     } else {
@@ -337,15 +338,12 @@ export class HighlightEngine {
       let scanRows: number
 
       if (viewportY >= oldEnd || newEnd <= oldViewportY) {
-        // No overlap — scan entire new viewport
         scanStart = viewportY
         scanRows = rows
       } else if (viewportY < oldViewportY) {
-        // Scrolled up — new lines at the top
         scanStart = viewportY
         scanRows = oldViewportY - viewportY
       } else {
-        // Scrolled down — new lines at the bottom
         scanStart = oldEnd
         scanRows = newEnd - oldEnd
       }
@@ -353,6 +351,12 @@ export class HighlightEngine {
       if (scanRows > 0) {
         const newMatches = this.buildMatchMap(scanStart, Math.min(scanRows, rows), allRules)
         this.applyDiff(newMatches, true)
+      }
+
+      // Lazy purge: only clean up off-viewport decorations when we've scrolled
+      // far enough that the cache could be growing large (> 2x viewport)
+      if (this.decorationCache.size > rows * 2) {
+        this.purgeOffViewportDecorations(viewportY, rows)
       }
     }
 
@@ -366,7 +370,8 @@ export class HighlightEngine {
   private buildMatchMap(
     startLine: number,
     numLines: number,
-    allRules: HighlightRule[]
+    allRules: HighlightRule[],
+    skipUnchanged: boolean = false
   ): Map<string, DecorationEntry> {
     const matchMap = new Map<string, DecorationEntry>()
     const buffer = this.terminal.buffer.active
@@ -379,6 +384,25 @@ export class HighlightEngine {
 
       const text = line.translateToString(true)
       if (!text.trim()) continue
+
+      // Skip regex matching for lines whose content hasn't changed
+      if (skipUnchanged && this.lineContentCache.get(lineIndex) === text) {
+        // Re-add existing cache entries for this line to preserve them in diff
+        for (const [key, cached] of this.decorationCache) {
+          if (cached.absoluteLine === lineIndex) {
+            matchMap.set(`${lineIndex}:${cached.startColumn}:${cached.endColumn}`, {
+              highlightRule: cached.highlightRuleId ? allRules.find(r => r.id === cached.highlightRuleId) || null : null,
+              detectionRule: cached.detectionRuleId ? allRules.find(r => r.id === cached.detectionRuleId) || null : null,
+              absoluteLine: lineIndex,
+              startColumn: cached.startColumn,
+              endColumn: cached.endColumn,
+            })
+          }
+        }
+        continue
+      }
+
+      this.lineContentCache.set(lineIndex, text)
 
       for (const rule of allRules) {
         const lineMatches = this.matchPattern(text, rule)
@@ -531,6 +555,7 @@ export class HighlightEngine {
       try { cached.decoration.dispose() } catch { /* ignore */ }
     }
     this.decorationCache.clear()
+    this.lineContentCache.clear()
     this.clearAdHocDecorations()
   }
 
