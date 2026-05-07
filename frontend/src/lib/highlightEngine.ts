@@ -1,89 +1,102 @@
 /**
- * HighlightEngine - Real-time keyword highlighting for xterm.js terminals
+ * HighlightEngine - High-performance keyword highlighting for xterm.js terminals
  *
- * This engine manages highlight rules and applies decorations to matching text
- * in the terminal buffer. It uses xterm.js decoration API and dynamic CSS injection.
+ * Uses a diff-based decoration cache to avoid destroy-and-recreate overhead.
+ * Three scan paths optimize for different triggers:
+ *   - Full scan (rules change): diff all viewport matches against cache
+ *   - Incremental scan (new data): scan only new lines, keep existing decorations
+ *   - Viewport scan (scroll): scan only newly-visible lines
  *
- * Also handles detection-style decorations (underline + hover + data-attributes)
- * for network identifiers, merging them with user highlight rules into single
- * decorations per text range.
+ * A 50ms trailing-edge throttle ensures highlights appear DURING output,
+ * not just after it stops.
  */
 
-import type { Terminal, IDecoration } from '@xterm/xterm'
+import type { Terminal, IDecoration, IMarker } from '@xterm/xterm'
 import type { HighlightRule } from '../api/highlightRules'
 import { getEffectiveHighlightRules, listHighlightRules } from '../api/highlightRules'
 
-/**
- * Represents a match found in the terminal buffer
- */
 export interface Match {
   rule: HighlightRule
-  line: number           // Absolute buffer line
-  viewportRow: number    // Row index within visible viewport (0-based)
+  line: number
+  viewportRow: number
   startColumn: number
   endColumn: number
 }
 
-/**
- * Result from pattern matching within a line
- */
 interface MatchResult {
   start: number
   end: number
 }
 
-/**
- * Extra properties for detection-style rules (underline, hover, data attributes)
- */
 export interface DetectionRuleExtras {
-  detectionType: string    // 'ipv4', 'mac', etc.
-  borderStyle: string      // '1px dotted rgba(100,180,255,0.8)'
-  cursor: string           // 'context-menu'
-  tooltipPrefix: string    // 'Right-click for {type} options'
+  detectionType: string
+  borderStyle: string
+  cursor: string
+  tooltipPrefix: string
 }
 
-/**
- * Options for the HighlightEngine
- */
 export interface HighlightEngineOptions {
-  /** Debounce interval for scanning in milliseconds */
-  scanDebounceMs?: number
-  /** Maximum matches per scan to avoid performance issues */
   maxMatchesPerScan?: number
-  /** Use requestIdleCallback for non-blocking scans (default: true) */
-  useIdleCallback?: boolean
 }
 
 const DEFAULT_OPTIONS: Required<HighlightEngineOptions> = {
-  scanDebounceMs: 100,
   maxMatchesPerScan: 500,
-  useIdleCallback: true,
 }
 
-/**
- * HighlightEngine manages highlight rules and applies decorations
- * to matching text in an xterm.js terminal
- */
+// Throttle interval — highlights appear within this many ms of data arriving
+const THROTTLE_MS = 50
+
+interface DecorationEntry {
+  highlightRule: HighlightRule | null
+  detectionRule: HighlightRule | null
+  absoluteLine: number
+  startColumn: number
+  endColumn: number
+}
+
+interface CachedDecoration {
+  decoration: IDecoration
+  marker: IMarker
+  absoluteLine: number
+  startColumn: number
+  endColumn: number
+  highlightRuleId: string | null
+  detectionRuleId: string | null
+}
+
 export class HighlightEngine {
   private terminal: Terminal
   private sessionId: string | undefined
   private rules: HighlightRule[] = []
-  private decorations: IDecoration[] = []
   private adHocDecorations: IDecoration[] = []
   private styleElement: HTMLStyleElement | null = null
   private options: Required<HighlightEngineOptions>
-  private scanDebounceTimer: number | null = null
-  private idleCallbackId: number | null = null
   private destroyed = false
 
-  // Cache compiled regex patterns for performance
   private compiledPatterns: Map<string, RegExp> = new Map()
 
-  // Detection rule extras — keyed by rule ID
   private detectionExtras: Map<string, DetectionRuleExtras> = new Map()
-  // Detection rules stored separately (merged into scan alongside user rules)
   private detectionRules: HighlightRule[] = []
   private detectionEnabled = false
+
+  // Decoration cache — single source of truth for active decorations
+  private decorationCache: Map<string, CachedDecoration> = new Map()
+
+  // Viewport tracking for scroll-delta optimization
+  private lastViewportY: number = -1
+  private lastViewportRows: number = 0
+
+  // Buffer length tracking for incremental scanning
+  private lastScannedBufferLength: number = 0
+
+  // Rules versioning — forces full rescan when rules change
+  private rulesVersion: number = 0
+  private lastScannedRulesVersion: number = -1
+
+  // Trailing-edge throttle state
+  private throttleTimer: number | null = null
+  private throttleLastFired: number = 0
+  private pendingScanType: 'full' | 'incremental' | 'viewport' | null = null
 
   constructor(
     terminal: Terminal,
@@ -95,9 +108,6 @@ export class HighlightEngine {
     this.options = { ...DEFAULT_OPTIONS, ...options }
   }
 
-  /**
-   * Load rules from API (effective rules for session or global rules)
-   */
   async loadRules(): Promise<void> {
     if (this.destroyed) return
 
@@ -105,32 +115,23 @@ export class HighlightEngine {
       if (this.sessionId) {
         this.rules = await getEffectiveHighlightRules(this.sessionId)
       } else {
-        // For local terminal, just get global rules
         this.rules = (await listHighlightRules()).filter(
           r => r.session_id === null && r.enabled
         )
       }
-      // Filter to only enabled rules and sort by priority
       this.rules = this.rules
         .filter(r => r.enabled)
         .sort((a, b) => a.priority - b.priority)
 
-      // Pre-compile patterns
       this.compilePatterns()
-
-      // Inject CSS styles for rules
       this.injectStyles()
-
-      // Scan visible buffer with new rules
-      this.scanBuffer()
+      this.rulesVersion++
+      this.scanBuffer(true)
     } catch (err) {
       console.error('Failed to load highlight rules:', err)
     }
   }
 
-  /**
-   * Set rules directly (for live updates without API fetch)
-   */
   setRules(rules: HighlightRule[]): void {
     if (this.destroyed) return
 
@@ -140,16 +141,10 @@ export class HighlightEngine {
 
     this.compilePatterns()
     this.injectStyles()
-    this.scanBuffer()
+    this.rulesVersion++
+    this.scanBuffer(true)
   }
 
-  /**
-   * Set detection rules with their interactive extras.
-   * Detection rules produce underline + hover + data-attribute styling
-   * in addition to any color from their HighlightRule definition.
-   * When both a user highlight rule and a detection rule match the same
-   * text range, they are merged into a single decoration.
-   */
   setDetectionRules(rules: HighlightRule[], extras: Map<string, DetectionRuleExtras>): void {
     if (this.destroyed) return
 
@@ -159,15 +154,12 @@ export class HighlightEngine {
     this.detectionExtras = extras
     this.detectionEnabled = true
 
-    // Recompile all patterns (user + detection)
     this.compilePatterns()
     this.injectStyles()
-    this.scanBuffer()
+    this.rulesVersion++
+    this.scanBuffer(true)
   }
 
-  /**
-   * Disable detection rules (removes underlines but keeps user highlight colors)
-   */
   clearDetectionRules(): void {
     this.detectionRules = []
     this.detectionExtras.clear()
@@ -175,88 +167,219 @@ export class HighlightEngine {
 
     this.compilePatterns()
     this.injectStyles()
-    this.scanBuffer()
+    this.rulesVersion++
+    this.scanBuffer(true)
   }
 
-  /**
-   * Scan visible buffer lines for matches and apply decorations
-   */
-  scanBuffer(): void {
-    if (this.destroyed) return
+  // === Public scan API ===
 
-    // If no rules remain, just clear existing decorations and return
+  /**
+   * General scan entry point. Routes to the right scan path internally.
+   * Pass force=true when rules changed to trigger a full rescan with diff.
+   */
+  scanBuffer(force: boolean = false): void {
+    if (this.destroyed) return
     const hasRules = this.rules.length > 0 || this.detectionRules.length > 0
     if (!hasRules) {
-      this.clearRuleDecorations()
+      this.disposeAllDecorations()
       return
     }
 
-    // Cancel any pending scans
-    if (this.scanDebounceTimer !== null) {
-      window.clearTimeout(this.scanDebounceTimer)
-      this.scanDebounceTimer = null
+    if (force || this.rulesVersion !== this.lastScannedRulesVersion) {
+      this.scheduleThrottledScan('full')
+    } else {
+      this.scheduleThrottledScan('incremental')
     }
-    if (this.idleCallbackId !== null && 'cancelIdleCallback' in window) {
-      window.cancelIdleCallback(this.idleCallbackId)
-      this.idleCallbackId = null
-    }
-
-    // Debounce scanning
-    this.scanDebounceTimer = window.setTimeout(() => {
-      this.scanDebounceTimer = null
-      // Use requestIdleCallback for non-blocking scans if available and enabled
-      if (this.options.useIdleCallback && 'requestIdleCallback' in window) {
-        this.idleCallbackId = window.requestIdleCallback(
-          () => {
-            this.idleCallbackId = null
-            this.performScan()
-          },
-          { timeout: 200 } // Max wait time before forcing scan
-        )
-      } else {
-        this.performScan()
-      }
-    }, this.options.scanDebounceMs)
   }
 
   /**
-   * Actually perform the buffer scan
+   * Scroll-optimized scan. Scans only newly-visible lines via rAF.
    */
-  private performScan(): void {
+  scanViewport(): void {
+    if (this.destroyed) return
+    const hasRules = this.rules.length > 0 || this.detectionRules.length > 0
+    if (!hasRules) return
+
+    requestAnimationFrame(() => {
+      if (!this.destroyed) this.performViewportScan()
+    })
+  }
+
+  /**
+   * Called from onWriteParsed — triggers incremental scan via throttle.
+   */
+  notifyDataWritten(): void {
+    if (this.destroyed) return
+    const hasRules = this.rules.length > 0 || this.detectionRules.length > 0
+    if (!hasRules) return
+
+    this.scheduleThrottledScan('incremental')
+  }
+
+  // === Throttle ===
+
+  private scheduleThrottledScan(type: 'full' | 'incremental' | 'viewport'): void {
+    // Promote pending scan type: full > incremental > viewport
+    if (
+      this.pendingScanType === null ||
+      type === 'full' ||
+      (type === 'incremental' && this.pendingScanType === 'viewport')
+    ) {
+      this.pendingScanType = type
+    }
+
+    if (this.throttleTimer !== null) {
+      // Timer already pending — scan type may have been promoted above
+      return
+    }
+
+    const now = performance.now()
+    const elapsed = now - this.throttleLastFired
+    const delay = Math.max(0, THROTTLE_MS - elapsed)
+
+    this.throttleTimer = window.setTimeout(() => {
+      this.throttleTimer = null
+      this.throttleLastFired = performance.now()
+      const scanType = this.pendingScanType || 'incremental'
+      this.pendingScanType = null
+      this.executeScan(scanType)
+    }, delay)
+  }
+
+  private executeScan(type: 'full' | 'incremental' | 'viewport'): void {
     if (this.destroyed) return
 
-    // Clear existing decorations first (but not ad-hoc)
-    this.clearRuleDecorations()
+    if (type === 'full' || this.rulesVersion !== this.lastScannedRulesVersion) {
+      this.performFullScan()
+    } else if (type === 'viewport') {
+      this.performViewportScan()
+    } else {
+      this.performIncrementalScan()
+    }
+  }
+
+  // === Scan implementations ===
+
+  private performFullScan(): void {
+    if (this.destroyed) return
+
+    this.lastScannedRulesVersion = this.rulesVersion
 
     const buffer = this.terminal.buffer.active
     const viewportY = buffer.viewportY
     const rows = this.terminal.rows
-
-    // All rules to scan: user rules + detection rules
     const allRules = [...this.rules, ...this.detectionRules]
 
-    // Collect all matches, keyed by "line:start:end" for merging
-    const matchMap = new Map<string, {
-      highlightRule: HighlightRule | null  // User highlight rule (color source)
-      detectionRule: HighlightRule | null  // Detection rule (underline source)
-      line: number
-      viewportRow: number
-      startColumn: number
-      endColumn: number
-    }>()
+    const newMatchMap = this.buildMatchMap(viewportY, rows, allRules)
+    this.applyDiff(newMatchMap, false)
 
+    this.lastViewportY = viewportY
+    this.lastViewportRows = rows
+    this.lastScannedBufferLength = buffer.length
+  }
+
+  private performIncrementalScan(): void {
+    if (this.destroyed) return
+
+    const buffer = this.terminal.buffer.active
+    const viewportY = buffer.viewportY
+    const rows = this.terminal.rows
+    const currentBufferLength = buffer.length
+    const allRules = [...this.rules, ...this.detectionRules]
+
+    // If viewport scrolled since last scan, use viewport scan instead
+    if (this.lastViewportY >= 0 && viewportY !== this.lastViewportY) {
+      this.performViewportScan()
+      return
+    }
+
+    // First scan ever — do a full scan
+    if (this.lastViewportY < 0) {
+      this.performFullScan()
+      return
+    }
+
+    // When new data arrives, existing lines in the viewport may have been
+    // updated (overwritten by terminal output) even if the buffer length
+    // didn't grow. Always do a full viewport scan with diff — the cache
+    // ensures decorations that haven't changed are untouched.
+    const newMatchMap = this.buildMatchMap(viewportY, rows, allRules)
+    this.purgeOffViewportDecorations(viewportY, rows)
+    this.applyDiff(newMatchMap, false)
+
+    this.lastScannedBufferLength = currentBufferLength
+    this.lastViewportY = viewportY
+    this.lastViewportRows = rows
+  }
+
+  private performViewportScan(): void {
+    if (this.destroyed) return
+
+    const buffer = this.terminal.buffer.active
+    const viewportY = buffer.viewportY
+    const rows = this.terminal.rows
+    const allRules = [...this.rules, ...this.detectionRules]
+
+    const oldViewportY = this.lastViewportY
+    const oldRows = this.lastViewportRows
+
+    this.purgeOffViewportDecorations(viewportY, rows)
+
+    if (oldViewportY < 0) {
+      // First scan — full viewport
+      const newMatches = this.buildMatchMap(viewportY, rows, allRules)
+      this.applyDiff(newMatches, false)
+    } else {
+      const oldEnd = oldViewportY + oldRows
+      const newEnd = viewportY + rows
+
+      let scanStart: number
+      let scanRows: number
+
+      if (viewportY >= oldEnd || newEnd <= oldViewportY) {
+        // No overlap — scan entire new viewport
+        scanStart = viewportY
+        scanRows = rows
+      } else if (viewportY < oldViewportY) {
+        // Scrolled up — new lines at the top
+        scanStart = viewportY
+        scanRows = oldViewportY - viewportY
+      } else {
+        // Scrolled down — new lines at the bottom
+        scanStart = oldEnd
+        scanRows = newEnd - oldEnd
+      }
+
+      if (scanRows > 0) {
+        const newMatches = this.buildMatchMap(scanStart, Math.min(scanRows, rows), allRules)
+        this.applyDiff(newMatches, true)
+      }
+    }
+
+    this.lastViewportY = viewportY
+    this.lastViewportRows = rows
+    this.lastScannedBufferLength = buffer.length
+  }
+
+  // === Match building ===
+
+  private buildMatchMap(
+    startLine: number,
+    numLines: number,
+    allRules: HighlightRule[]
+  ): Map<string, DecorationEntry> {
+    const matchMap = new Map<string, DecorationEntry>()
+    const buffer = this.terminal.buffer.active
     let totalMatches = 0
 
-    // Scan visible viewport lines
-    for (let i = 0; i < rows && totalMatches < this.options.maxMatchesPerScan; i++) {
-      const lineIndex = viewportY + i
+    for (let i = 0; i < numLines && totalMatches < this.options.maxMatchesPerScan; i++) {
+      const lineIndex = startLine + i
       const line = buffer.getLine(lineIndex)
       if (!line) continue
 
       const text = line.translateToString(true)
       if (!text.trim()) continue
 
-      // Check each rule against the line
       for (const rule of allRules) {
         const lineMatches = this.matchPattern(text, rule)
         const isDetectionRule = this.detectionExtras.has(rule.id)
@@ -264,22 +387,20 @@ export class HighlightEngine {
         for (const match of lineMatches) {
           if (totalMatches >= this.options.maxMatchesPerScan) break
 
-          const key = `${lineIndex}:${match.start}:${match.end}`
-          const existing = matchMap.get(key)
+          const posKey = `${lineIndex}:${match.start}:${match.end}`
+          const existing = matchMap.get(posKey)
 
           if (existing) {
-            // Merge: if this is a detection rule, add detection; if highlight, add highlight
             if (isDetectionRule && !existing.detectionRule) {
               existing.detectionRule = rule
             } else if (!isDetectionRule && !existing.highlightRule) {
               existing.highlightRule = rule
             }
           } else {
-            matchMap.set(key, {
+            matchMap.set(posKey, {
               highlightRule: isDetectionRule ? null : rule,
               detectionRule: isDetectionRule ? rule : null,
-              line: lineIndex,
-              viewportRow: i,
+              absoluteLine: lineIndex,
               startColumn: match.start,
               endColumn: match.end,
             })
@@ -289,21 +410,137 @@ export class HighlightEngine {
       }
     }
 
-    // Apply merged decorations
-    this.applyMergedDecorations(matchMap)
+    return matchMap
   }
 
-  /**
-   * Match a pattern against text and return all match positions
-   */
+  // === Diff and decoration management ===
+
+  private makeCacheKey(entry: DecorationEntry): string {
+    const hlId = entry.highlightRule?.id || ''
+    const detId = entry.detectionRule?.id || ''
+    return `${entry.absoluteLine}:${entry.startColumn}:${entry.endColumn}:${hlId}:${detId}`
+  }
+
+  private applyDiff(
+    newMatches: Map<string, DecorationEntry>,
+    mergeMode: boolean
+  ): void {
+    if (this.destroyed) return
+
+    const newCacheKeys = new Set<string>()
+
+    for (const [, entry] of newMatches) {
+      const cacheKey = this.makeCacheKey(entry)
+      newCacheKeys.add(cacheKey)
+
+      if (this.decorationCache.has(cacheKey)) {
+        continue
+      }
+
+      this.createDecoration(entry, cacheKey)
+    }
+
+    if (!mergeMode) {
+      for (const [cacheKey, cached] of this.decorationCache) {
+        if (!newCacheKeys.has(cacheKey)) {
+          try { cached.decoration.dispose() } catch { /* ignore */ }
+          this.decorationCache.delete(cacheKey)
+        }
+      }
+    }
+  }
+
+  private purgeOffViewportDecorations(viewportY: number, rows: number): void {
+    const viewportEnd = viewportY + rows
+
+    for (const [cacheKey, cached] of this.decorationCache) {
+      const line = cached.marker.line
+      if (line < 0 || line < viewportY || line >= viewportEnd) {
+        try { cached.decoration.dispose() } catch { /* ignore */ }
+        this.decorationCache.delete(cacheKey)
+      }
+    }
+  }
+
+  private createDecoration(entry: DecorationEntry, cacheKey: string): void {
+    try {
+      const buffer = this.terminal.buffer.active
+      const cursorAbsoluteY = buffer.baseY + buffer.cursorY
+      const markerOffset = entry.absoluteLine - cursorAbsoluteY
+      const marker = this.terminal.registerMarker(markerOffset)
+      if (!marker) return
+
+      const colorRule = entry.highlightRule || entry.detectionRule
+      const decorationOptions: Parameters<typeof this.terminal.registerDecoration>[0] = {
+        marker,
+        x: entry.startColumn,
+        width: entry.endColumn - entry.startColumn,
+      }
+
+      if (colorRule?.foreground) {
+        (decorationOptions as any).foregroundColor = colorRule.foreground
+      }
+      if (colorRule?.background) {
+        (decorationOptions as any).backgroundColor = colorRule.background
+      }
+      if (colorRule?.foreground || colorRule?.background) {
+        (decorationOptions as any).overviewRulerOptions = {
+          color: colorRule.foreground || colorRule.background || '#ffffff',
+        }
+      }
+
+      const decoration = this.terminal.registerDecoration(decorationOptions)
+      if (!decoration) return
+
+      const detectionExtras = entry.detectionRule
+        ? this.detectionExtras.get(entry.detectionRule.id)
+        : null
+
+      if (detectionExtras) {
+        decoration.onRender((element) => {
+          try {
+            element.style.borderBottom = detectionExtras.borderStyle
+            element.style.cursor = detectionExtras.cursor
+            element.style.pointerEvents = 'auto'
+            element.title = detectionExtras.tooltipPrefix
+            element.dataset.detectionType = detectionExtras.detectionType
+          } catch { /* ignore */ }
+        })
+      }
+
+      this.decorationCache.set(cacheKey, {
+        decoration,
+        marker,
+        absoluteLine: entry.absoluteLine,
+        startColumn: entry.startColumn,
+        endColumn: entry.endColumn,
+        highlightRuleId: entry.highlightRule?.id || null,
+        detectionRuleId: entry.detectionRule?.id || null,
+      })
+
+      decoration.onDispose(() => {
+        this.decorationCache.delete(cacheKey)
+      })
+    } catch (err) {
+      console.debug('Failed to create decoration:', err)
+    }
+  }
+
+  private disposeAllDecorations(): void {
+    for (const [, cached] of this.decorationCache) {
+      try { cached.decoration.dispose() } catch { /* ignore */ }
+    }
+    this.decorationCache.clear()
+    this.clearAdHocDecorations()
+  }
+
+  // === Pattern matching ===
+
   private matchPattern(text: string, rule: HighlightRule): MatchResult[] {
     const results: MatchResult[] = []
     const pattern = this.compiledPatterns.get(rule.id)
-    if (!pattern) {
-      return results
-    }
+    if (!pattern) return results
 
-    // Reset lastIndex for global patterns
     pattern.lastIndex = 0
 
     let match
@@ -312,8 +549,6 @@ export class HighlightEngine {
         start: match.index,
         end: match.index + match[0].length,
       })
-
-      // Prevent infinite loops with zero-length matches
       if (match[0].length === 0) {
         pattern.lastIndex++
       }
@@ -322,16 +557,12 @@ export class HighlightEngine {
     return results
   }
 
-  /**
-   * Compile all rule patterns (user + detection) into RegExp objects
-   */
   private compilePatterns(): void {
     this.compiledPatterns.clear()
 
     const allRules = [...this.rules, ...this.detectionRules]
 
     for (const rule of allRules) {
-      // Skip if already compiled (detection rule might duplicate a user rule pattern)
       if (this.compiledPatterns.has(rule.id)) continue
 
       try {
@@ -345,12 +576,9 @@ export class HighlightEngine {
         if (rule.is_regex) {
           pattern = rule.pattern
         } else {
-          // Escape special regex characters for literal matching
           pattern = rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
         }
 
-        // Apply whole word boundary if needed
-        // Note: Skip if pattern already has word boundaries (is_regex + whole_word)
         if (rule.whole_word && !rule.is_regex) {
           pattern = `\\b${pattern}\\b`
         }
@@ -363,153 +591,29 @@ export class HighlightEngine {
     }
   }
 
-  /**
-   * Apply merged decorations (highlight color + detection underline in one element)
-   */
-  private applyMergedDecorations(matchMap: Map<string, {
-    highlightRule: HighlightRule | null
-    detectionRule: HighlightRule | null
-    line: number
-    viewportRow: number
-    startColumn: number
-    endColumn: number
-  }>): void {
-    if (this.destroyed) return
+  // === CSS injection ===
 
-    for (const entry of matchMap.values()) {
-      try {
-        const buffer = this.terminal.buffer.active
-        const markerOffset = entry.viewportRow - buffer.cursorY
-        const marker = this.terminal.registerMarker(markerOffset)
-        if (!marker) continue
-
-        // Determine colors: user highlight rule wins for foreground/background
-        const colorRule = entry.highlightRule || entry.detectionRule
-        const decorationOptions: Parameters<typeof this.terminal.registerDecoration>[0] = {
-          marker,
-          x: entry.startColumn,
-          width: entry.endColumn - entry.startColumn,
-          overviewRulerOptions: {
-            color: colorRule?.foreground || colorRule?.background || '#ffffff',
-          },
-        }
-
-        // Add foreground/background from the color source rule
-        if (colorRule?.foreground) {
-          (decorationOptions as any).foregroundColor = colorRule.foreground
-        }
-        if (colorRule?.background) {
-          (decorationOptions as any).backgroundColor = colorRule.background
-        }
-
-        const decoration = this.terminal.registerDecoration(decorationOptions)
-
-        if (decoration) {
-          // If there's a detection rule, apply interactive styling via onRender
-          const detectionExtras = entry.detectionRule
-            ? this.detectionExtras.get(entry.detectionRule.id)
-            : null
-
-          if (detectionExtras) {
-            decoration.onRender((element) => {
-              try {
-                element.style.borderBottom = detectionExtras.borderStyle
-                element.style.cursor = detectionExtras.cursor
-                element.style.pointerEvents = 'auto'
-                element.title = detectionExtras.tooltipPrefix
-                element.dataset.detectionType = detectionExtras.detectionType
-              } catch {
-                // xterm.js may throw "invalid characters" for some decoration renders
-              }
-            })
-          }
-
-          this.decorations.push(decoration)
-        }
-      } catch (err) {
-        console.debug('Failed to apply decoration:', err)
-      }
-    }
-  }
-
-  /**
-   * Clear rule-based decorations (not ad-hoc)
-   */
-  private clearRuleDecorations(): void {
-    for (const decoration of this.decorations) {
-      try {
-        decoration.dispose()
-      } catch {
-        // Ignore disposal errors
-      }
-    }
-    this.decorations = []
-  }
-
-  /**
-   * Clear all existing decorations (rule-based + ad-hoc)
-   */
-  clearDecorations(): void {
-    this.clearRuleDecorations()
-    this.clearAdHocDecorations()
-  }
-
-  /**
-   * Clear ad-hoc (AI) decorations only
-   */
-  private clearAdHocDecorations(): void {
-    for (const decoration of this.adHocDecorations) {
-      try {
-        decoration.dispose()
-      } catch {
-        // Ignore disposal errors
-      }
-    }
-    this.adHocDecorations = []
-  }
-
-  /**
-   * Generate CSS rule for a highlight rule
-   * Uses !important to override xterm.js theme colors
-   */
   private generateCssRule(rule: HighlightRule): string {
     const styleId = generateStyleId(rule)
     const styles: string[] = []
 
-    if (rule.bold) {
-      styles.push('font-weight: bold !important')
-    }
-    if (rule.italic) {
-      styles.push('font-style: italic !important')
-    }
-    if (rule.underline) {
-      styles.push('text-decoration: underline !important')
-    }
-    // Background and foreground with !important to override terminal theme
-    if (rule.background) {
-      styles.push(`background-color: ${rule.background} !important`)
-    }
-    if (rule.foreground) {
-      styles.push(`color: ${rule.foreground} !important`)
-    }
+    if (rule.bold) styles.push('font-weight: bold !important')
+    if (rule.italic) styles.push('font-style: italic !important')
+    if (rule.underline) styles.push('text-decoration: underline !important')
+    if (rule.background) styles.push(`background-color: ${rule.background} !important`)
+    if (rule.foreground) styles.push(`color: ${rule.foreground} !important`)
 
     if (styles.length === 0) return ''
 
-    // Use high-specificity selector to override xterm styles
     return `.xterm .xterm-decoration-container .highlight-decoration.${styleId} { ${styles.join('; ')} }`
   }
 
-  /**
-   * Inject styles for all rules into document (includes detection hover styles)
-   */
   private injectStyles(): void {
-    // Clean up existing style element
     this.cleanupStyles()
 
     const hasRules = this.rules.length > 0 || this.detectionRules.length > 0
     if (!hasRules) return
 
-    // Create new style element
     this.styleElement = document.createElement('style')
     this.styleElement.setAttribute('data-highlight-engine', 'true')
 
@@ -517,7 +621,6 @@ export class HighlightEngine {
       .map(rule => this.generateCssRule(rule))
       .filter(css => css.length > 0)
 
-    // Add detection hover styles if detection is enabled
     if (this.detectionEnabled) {
       cssRules.push(
         `.xterm .xterm-decoration-container [data-detection-type]:hover {
@@ -532,9 +635,6 @@ export class HighlightEngine {
     document.head.appendChild(this.styleElement)
   }
 
-  /**
-   * Clean up injected styles
-   */
   private cleanupStyles(): void {
     if (this.styleElement && this.styleElement.parentNode) {
       this.styleElement.parentNode.removeChild(this.styleElement)
@@ -542,69 +642,24 @@ export class HighlightEngine {
     }
   }
 
-  /**
-   * Clean up all resources
-   */
-  destroy(): void {
-    this.destroyed = true
+  // === Ad-hoc highlights (AI) ===
 
-    if (this.scanDebounceTimer !== null) {
-      window.clearTimeout(this.scanDebounceTimer)
-      this.scanDebounceTimer = null
-    }
-
-    if (this.idleCallbackId !== null && 'cancelIdleCallback' in window) {
-      window.cancelIdleCallback(this.idleCallbackId)
-      this.idleCallbackId = null
-    }
-
-    this.clearDecorations()
-    this.cleanupStyles()
-    this.rules = []
-    this.detectionRules = []
-    this.detectionExtras.clear()
-    this.compiledPatterns.clear()
-  }
-
-  /**
-   * Get current rules
-   */
-  getRules(): HighlightRule[] {
-    return [...this.rules]
-  }
-
-  /**
-   * Check if engine is active
-   */
-  isActive(): boolean {
-    return !this.destroyed && (this.rules.length > 0 || this.detectionRules.length > 0)
-  }
-
-  /**
-   * Apply ad-hoc highlights (e.g., from AI analysis)
-   * These are not based on rules but direct line/column positions.
-   * Disposes previous ad-hoc decorations before applying new ones to prevent stacking.
-   */
   applyAdHocHighlights(highlights: AdHocHighlight[]): void {
     if (this.destroyed || highlights.length === 0) return
 
-    // Clear previous ad-hoc decorations to prevent stacking
     this.clearAdHocDecorations()
 
     const buffer = this.terminal.buffer.active
     const viewportY = buffer.viewportY
     const rows = this.terminal.rows
-    // registerMarker takes cursor-relative offsets
     const cursorAbsoluteY = buffer.baseY + buffer.cursorY
 
     for (const highlight of highlights) {
-      // Only apply highlights visible in viewport
       if (highlight.line < viewportY || highlight.line >= viewportY + rows) {
         continue
       }
 
       try {
-        // Apply inline highlight decoration (skip if no valid range)
         const highlightWidth = highlight.end - highlight.start
         if (highlightWidth <= 0) continue
 
@@ -623,7 +678,7 @@ export class HighlightEngine {
         })
 
         if (decoration) {
-          const hl = highlight // Capture for closure
+          const hl = highlight
           decoration.onRender(element => {
             try {
               element.classList.add('highlight-decoration', 'ai-highlight')
@@ -641,9 +696,7 @@ export class HighlightEngine {
               if (hl.tooltip) {
                 element.dataset.copilotTooltip = hl.tooltip
               }
-            } catch {
-              // xterm.js may throw "invalid characters" for some decoration renders
-            }
+            } catch { /* ignore */ }
           })
           this.adHocDecorations.push(decoration)
         }
@@ -652,11 +705,45 @@ export class HighlightEngine {
       }
     }
   }
+
+  private clearAdHocDecorations(): void {
+    for (const decoration of this.adHocDecorations) {
+      try { decoration.dispose() } catch { /* ignore */ }
+    }
+    this.adHocDecorations = []
+  }
+
+  // === Lifecycle ===
+
+  clearDecorations(): void {
+    this.disposeAllDecorations()
+  }
+
+  destroy(): void {
+    this.destroyed = true
+
+    if (this.throttleTimer !== null) {
+      window.clearTimeout(this.throttleTimer)
+      this.throttleTimer = null
+    }
+
+    this.disposeAllDecorations()
+    this.cleanupStyles()
+    this.rules = []
+    this.detectionRules = []
+    this.detectionExtras.clear()
+    this.compiledPatterns.clear()
+  }
+
+  getRules(): HighlightRule[] {
+    return [...this.rules]
+  }
+
+  isActive(): boolean {
+    return !this.destroyed && (this.rules.length > 0 || this.detectionRules.length > 0)
+  }
 }
 
-/**
- * Represents an ad-hoc highlight (e.g., from AI analysis)
- */
 export interface AdHocHighlight {
   line: number
   start: number
@@ -665,25 +752,15 @@ export interface AdHocHighlight {
   background?: string
   className?: string
   tooltip?: string
-  /** Emoji/icon to show as a gutter annotation at the start of the line */
   gutterIcon?: string
-  /** Click handler for the highlight decoration */
   onClick?: (highlight: AdHocHighlight) => void
 }
 
-/**
- * Generate a CSS-safe style ID from a rule
- */
 export function generateStyleId(rule: HighlightRule): string {
-  // Create a stable ID based on rule id
   return `hl-${rule.id.replace(/[^a-zA-Z0-9]/g, '')}`
 }
 
-/**
- * Convert hex color to rgba with specified alpha
- */
 function hexToRgba(hex: string, alpha: number): string {
-  // Handle shorthand hex (#rgb)
   let fullHex = hex.replace('#', '')
   if (fullHex.length === 3) {
     fullHex = fullHex.split('').map(c => c + c).join('')
@@ -694,16 +771,12 @@ function hexToRgba(hex: string, alpha: number): string {
   const b = parseInt(fullHex.substring(4, 6), 16)
 
   if (isNaN(r) || isNaN(g) || isNaN(b)) {
-    // Fallback for invalid hex
     return `rgba(128, 128, 128, ${alpha})`
   }
 
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
-/**
- * Match pattern against text (exported for testing)
- */
 export function matchPattern(
   text: string,
   rule: HighlightRule

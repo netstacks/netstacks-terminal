@@ -680,8 +680,6 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
         logOutputRef.current?.(data)
         // Feed output to terminal watcher for AI context
         terminalWatcherRef.current.addOutput(data)
-        // Trigger highlight scan on new output
-        highlightEngineRef.current?.scanBuffer()
         // Feed output to AI highlighting only after user pressed Enter
         if (aiCommandSentRef.current) {
           addAIOutputRef.current?.(data)
@@ -764,7 +762,6 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
         terminalRef.current.write(data)
         logOutputRef.current?.(data)
         terminalWatcherRef.current.addOutput(data)
-        highlightEngineRef.current?.scanBuffer()
         if (aiCommandSentRef.current) {
           addAIOutputRef.current?.(data)
         }
@@ -1069,8 +1066,6 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
                   msg.data
                 )
               }
-              // Trigger highlight scan on new output
-              highlightEngineRef.current?.scanBuffer()
               // Feed output to AI highlighting only after user pressed Enter
               if (aiCommandSentRef.current) {
                 addAIOutputRef.current?.(msg.data)
@@ -2250,9 +2245,12 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
       highlightEngineRef.current = new HighlightEngine(terminal, sessionId)
     }
 
-    // Update rules when they change
+    // Update rules — use hook-provided rules when available, otherwise
+    // let the engine fetch its own (covers race where hook hasn't loaded yet)
     if (highlightRules.length > 0) {
       highlightEngineRef.current.setRules(highlightRules)
+    } else if (highlightEngineRef.current.getRules().length === 0) {
+      highlightEngineRef.current.loadRules()
     }
 
     // Wire detection rules into the highlight engine for unified decorations
@@ -2360,12 +2358,21 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
     const terminal = terminalRef.current
     if (!terminal || !highlightingEnabled) return
 
+    // Scroll: scan only newly-visible lines (no debounce — data already in buffer)
     const scrollDisposable = terminal.onScroll(() => {
-      highlightEngineRef.current?.scanBuffer()
+      highlightEngineRef.current?.scanViewport()
+    })
+
+    // New data: scan incrementally after xterm processes each write batch.
+    // onWriteParsed fires at most once per animation frame — much better
+    // than onData which fires on every SSH data chunk.
+    const writeDisposable = terminal.onWriteParsed(() => {
+      highlightEngineRef.current?.notifyDataWritten()
     })
 
     return () => {
       scrollDisposable.dispose()
+      writeDisposable.dispose()
     }
   }, [highlightingEnabled])
 
@@ -2426,21 +2433,22 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
     const terminal = terminalRef.current
     if (!terminal) return
 
-    // Resolve AI highlight positions against the actual xterm buffer.
-    // The AI's line numbers are relative to the output buffer sent for analysis,
-    // which doesn't match the terminal's buffer (which includes login banners, etc.).
-    // We search the xterm buffer for the highlight text to find the correct line.
+    // Resolve AI highlight positions against the xterm buffer.
+    // Search a bounded range (viewport ± margin) rather than the entire buffer.
     const buffer = terminal.buffer.active
     const adHocHighlights: AdHocHighlight[] = []
     const resolvedHighlights: Array<{ line: number; start: number; end: number; tooltip?: string; reason?: string; text?: string; highlightType?: string }> = []
 
+    const searchMargin = 100
+    const searchEnd = Math.min(buffer.length, buffer.viewportY + terminal.rows + searchMargin)
+    const searchStart = Math.max(0, buffer.viewportY - searchMargin)
+
     for (const h of aiHighlights) {
       if (!h.text || h.text.trim().length === 0) continue
 
-      // Search xterm buffer for the highlight text (search from bottom up for most recent match)
       let foundLine = -1
       let foundStart = -1
-      for (let i = buffer.length - 1; i >= 0; i--) {
+      for (let i = searchEnd - 1; i >= searchStart; i--) {
         const line = buffer.getLine(i)
         if (!line) continue
         const lineText = line.translateToString(true)
@@ -2452,7 +2460,7 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
         }
       }
 
-      if (foundLine === -1) continue // Text not found in terminal buffer
+      if (foundLine === -1) continue
 
       const color = getHighlightTypeColor(h.type)
       const tooltipText = `${h.type.toUpperCase()}: ${h.reason} (${Math.round(h.confidence * 100)}% confidence)`
