@@ -27,7 +27,7 @@ export type { AgentMessage }
 interface AISidePanelProps {
   isOpen: boolean
   onClose: () => void
-  /** Increment to trigger expand (for Cmd+Shift+I when collapsed) */
+  /** Increment to trigger expand (for Cmd+I when collapsed) */
   expandTrigger?: number
   /** Available sessions for the AI agent - includes connection status */
   availableSessions?: Array<{
@@ -1108,7 +1108,7 @@ const AISidePanel = ({
           <button
             className="ai-side-panel-btn"
             onClick={onClose}
-            title="Close (Cmd+Shift+I)"
+            title="Close (Cmd+I)"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="14" height="14">
               <line x1="18" y1="6" x2="6" y2="18" />

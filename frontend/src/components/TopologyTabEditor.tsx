@@ -516,35 +516,42 @@ export default function TopologyTabEditor({
 
   /**
    * Build live SNMP targets from topology data.
-   * Only includes devices with primaryIp and interfaces from connections.
+   * Includes all devices with primaryIp — connection interface names are
+   * added when available but not required (backend polls all interfaces
+   * when the list is empty).
    */
   const liveTargets = useMemo((): TopologyLiveTarget[] => {
     if (!topology || !snmpProfileId) return [];
 
-    // Group interfaces by device host (primaryIp)
-    const hostMap = new Map<string, Set<string>>();
+    // Seed every device that has a primary IP (uses device-specific profile
+    // when available so jump-host config is honoured, falls back to global).
+    const hostMap = new Map<string, { profileId: string; interfaces: Set<string> }>();
+    for (const d of topology.devices) {
+      if (d.primaryIp) {
+        hostMap.set(d.primaryIp, {
+          profileId: d.snmpProfileId || d.profileId || snmpProfileId,
+          interfaces: new Set<string>(),
+        });
+      }
+    }
 
+    // Enrich with specific interface names from connections when available
     for (const conn of topology.connections) {
       const sourceDevice = topology.devices.find(d => d.id === conn.sourceDeviceId);
       const targetDevice = topology.devices.find(d => d.id === conn.targetDeviceId);
 
       if (sourceDevice?.primaryIp && conn.sourceInterface) {
-        const existing = hostMap.get(sourceDevice.primaryIp) || new Set<string>();
-        existing.add(conn.sourceInterface);
-        hostMap.set(sourceDevice.primaryIp, existing);
+        hostMap.get(sourceDevice.primaryIp)?.interfaces.add(conn.sourceInterface);
       }
-
       if (targetDevice?.primaryIp && conn.targetInterface) {
-        const existing = hostMap.get(targetDevice.primaryIp) || new Set<string>();
-        existing.add(conn.targetInterface);
-        hostMap.set(targetDevice.primaryIp, existing);
+        hostMap.get(targetDevice.primaryIp)?.interfaces.add(conn.targetInterface);
       }
     }
 
-    return Array.from(hostMap.entries()).map(([host, interfaces]) => ({
+    return Array.from(hostMap.entries()).map(([host, entry]) => ({
       host,
-      profileId: snmpProfileId,
-      interfaces: Array.from(interfaces),
+      profileId: entry.profileId,
+      interfaces: Array.from(entry.interfaces),
     }));
   }, [topology, snmpProfileId]);
 

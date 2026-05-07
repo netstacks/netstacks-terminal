@@ -222,7 +222,7 @@ const AIInlineChat = ({
               <path d="M2 12l10 5 10-5" />
             </svg>
             <span>AI Assistant</span>
-            <kbd>Cmd+Shift+I</kbd>
+            <kbd>Cmd+I</kbd>
           </div>
           <div className="ai-inline-chat-actions">
             {messages.length > 0 && (

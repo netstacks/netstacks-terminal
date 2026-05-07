@@ -862,28 +862,37 @@ pub async fn snmp_bulk_interface_stats(
     community: &str,
     interface_names: &[String],
 ) -> Result<Vec<InterfaceStats>, SnmpError> {
-    if interface_names.is_empty() {
-        return Ok(Vec::new());
-    }
-
     // Step 1: ONE ifDescr walk to build index map for the whole device
     let if_descr_oid = "1.3.6.1.2.1.2.2.1.2";
     let walk_results = snmp_walk(dest, community, if_descr_oid).await?;
 
-    // Step 2: Match all requested interface_names against the walk results
-    let mut matched: Vec<(u64, String)> = Vec::new(); // (ifIndex, requested_name)
-    for iface_name in interface_names {
+    // Step 2: Match interface_names against the walk results.
+    // When interface_names is empty, poll ALL discovered interfaces.
+    let mut matched: Vec<(u64, String)> = Vec::new(); // (ifIndex, name)
+    if interface_names.is_empty() {
         for (oid, value) in &walk_results {
             let descr = snmp_value_to_string(value);
-            if interface_name_matches(&descr, iface_name) {
-                let stripped = oid.strip_prefix('.').unwrap_or(oid);
-                if let Some(last) = stripped.rsplit('.').next() {
-                    if let Ok(idx) = last.parse::<u64>() {
-                        // Avoid duplicates (same ifIndex matched by multiple names)
-                        if !matched.iter().any(|(i, _)| *i == idx) {
-                            matched.push((idx, iface_name.clone()));
+            let stripped = oid.strip_prefix('.').unwrap_or(oid);
+            if let Some(last) = stripped.rsplit('.').next() {
+                if let Ok(idx) = last.parse::<u64>() {
+                    matched.push((idx, descr));
+                }
+            }
+        }
+    } else {
+        for iface_name in interface_names {
+            for (oid, value) in &walk_results {
+                let descr = snmp_value_to_string(value);
+                if interface_name_matches(&descr, iface_name) {
+                    let stripped = oid.strip_prefix('.').unwrap_or(oid);
+                    if let Some(last) = stripped.rsplit('.').next() {
+                        if let Ok(idx) = last.parse::<u64>() {
+                            // Avoid duplicates (same ifIndex matched by multiple names)
+                            if !matched.iter().any(|(i, _)| *i == idx) {
+                                matched.push((idx, iface_name.clone()));
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }

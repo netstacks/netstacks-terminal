@@ -50,7 +50,7 @@ export const DEFAULT_KEYBINDINGS: Record<KeyboardAction, PlatformKeybinding> = {
   quickConnect: { mac: 'Cmd+Shift+Q', windows: 'Ctrl+Shift+Q' },
   commandPalette: { mac: 'Cmd+Shift+P', windows: 'Ctrl+Shift+P' },
   findInTerminal: { mac: 'Cmd+F', windows: 'Ctrl+F' },
-  aiChat: { mac: 'Cmd+Shift+I', windows: 'Ctrl+Shift+I' },
+  aiChat: { mac: 'Cmd+I', windows: 'Ctrl+I' },
   aiGenerateScript: { mac: 'Cmd+Shift+G', windows: 'Ctrl+Shift+G' },
   toggleSidebar: { mac: 'Cmd+B', windows: 'Ctrl+B' },
   nextTab: { mac: 'Cmd+Shift+]', windows: 'Ctrl+Shift+]' },

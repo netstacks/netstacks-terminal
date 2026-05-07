@@ -4455,17 +4455,22 @@ def main(command: str = "show version"):
     }
   }, [tabs, activeTabId, attachTroubleshootingTopology])
 
-  // Callback for terminal components to capture commands/output
+  // Callback for terminal components to capture commands/output.
+  // The caller (Terminal) already gates on the isTroubleshootingActive prop
+  // which was pre-evaluated with isTroubleshootingCapturing(tab.id). We only
+  // re-check isTroubleshootingActive here as a safety guard — we must NOT
+  // re-check isCapturing because Terminal passes its backend sessionId which
+  // differs from the tab.id stored in session.terminalIds.
   const handleTroubleshootingCapture = useCallback((
     terminalId: string,
     terminalName: string,
     type: 'command' | 'output',
     content: string
   ) => {
-    if (isTroubleshootingActive && isTroubleshootingCapturing(terminalId)) {
+    if (isTroubleshootingActive) {
       addTroubleshootingEntry(terminalId, terminalName, type, content)
     }
-  }, [isTroubleshootingActive, isTroubleshootingCapturing, addTroubleshootingEntry])
+  }, [isTroubleshootingActive, addTroubleshootingEntry])
 
   // Callback for AI panel to capture chat messages
   const handleTroubleshootingAICapture = useCallback((
@@ -4545,7 +4550,7 @@ def main(command: str = "show version"):
       id: 'ai-chat',
       label: 'AI: Open Chat',
       category: 'AI',
-      shortcut: 'Cmd+Shift+I',
+      shortcut: 'Cmd+I',
       action: () => setAiChatOpen(true)
     },
     {

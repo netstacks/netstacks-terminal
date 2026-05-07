@@ -3,6 +3,7 @@
 //! Analyzes terminal output to detect errors, warnings, security issues,
 //! and anomalies without explicit regex rules.
 
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 /// AI highlight analysis mode
@@ -204,36 +205,44 @@ pub fn parse_ai_response(response: &str, original_output: &str) -> Vec<AIHighlig
 /// Resolve text positions by searching the original output.
 /// When the AI returns highlights without valid line/start/end positions,
 /// we find the text in the original output and fill in the positions.
+/// If the same text appears on multiple lines, a highlight is created for
+/// each occurrence so that every instance is decorated in the terminal.
 fn resolve_positions(highlights: Vec<AIHighlight>, original_output: &str) -> Vec<AIHighlight> {
     let lines: Vec<&str> = original_output.lines().collect();
+    let mut result = Vec::new();
+    let mut expanded_texts: HashSet<String> = HashSet::new();
 
-    highlights.into_iter().map(|mut h| {
-        // If text is empty or just whitespace, try to extract a keyword from reason
+    for mut h in highlights {
         if h.text.trim().is_empty() || h.text == "\t" {
-            // Try to find a meaningful keyword from the reason
-            // e.g., "BGP neighbor 10.255.0.1 in Connect state" -> "Connect"
             h.text = extract_keyword_from_reason(&h.reason, &lines);
         }
 
-        // If we have text but no valid position (line=0, start=0, end=0), search for it
         if !h.text.is_empty() && h.start == 0 && h.end == 0 {
+            if expanded_texts.contains(&h.text) {
+                continue;
+            }
+            expanded_texts.insert(h.text.clone());
+
             for (i, line) in lines.iter().enumerate() {
                 if let Some(pos) = line.find(&h.text) {
-                    h.line = i;
-                    h.start = pos;
-                    h.end = pos + h.text.len();
-                    break;
+                    let mut cloned = h.clone();
+                    cloned.line = i;
+                    cloned.start = pos;
+                    cloned.end = pos + h.text.len();
+                    result.push(cloned);
                 }
             }
+            continue;
         }
 
-        // Ensure end > start
         if h.end <= h.start && !h.text.is_empty() {
             h.end = h.start + h.text.len();
         }
 
-        h
-    }).filter(|h| !h.text.is_empty() && h.end > h.start).collect()
+        result.push(h);
+    }
+
+    result.into_iter().filter(|h| !h.text.is_empty() && h.end > h.start).collect()
 }
 
 /// Extract a keyword from the AI's reason text that we can search for in the output.
@@ -502,5 +511,24 @@ mod tests {
     fn test_parse_empty_response() {
         assert_eq!(parse_ai_response("[]", SAMPLE_OUTPUT).len(), 0);
         assert_eq!(parse_ai_response("invalid", SAMPLE_OUTPUT).len(), 0);
+    }
+
+    #[test]
+    fn test_resolve_expands_to_all_occurrences() {
+        let output = "Neighbor  AS  State\n10.0.0.1  65001 Connect\n10.0.0.2  65002 Connect\n10.0.0.3  65003 Established\n10.0.0.4  65004 Connect";
+        let response = r#"[{"text":"Connect","type":"error","confidence":0.9,"reason":"BGP neighbors in Connect state"}]"#;
+        let highlights = parse_ai_response(response, output);
+        assert_eq!(highlights.len(), 3);
+        assert_eq!(highlights[0].line, 1);
+        assert_eq!(highlights[1].line, 2);
+        assert_eq!(highlights[2].line, 4);
+    }
+
+    #[test]
+    fn test_resolve_deduplicates_same_text() {
+        let output = "Neighbor  AS  State\n10.0.0.1  65001 Connect\n10.0.0.2  65002 Connect";
+        let response = r#"[{"text":"Connect","type":"error","confidence":0.9,"reason":"reason 1"},{"text":"Connect","type":"error","confidence":0.9,"reason":"reason 2"}]"#;
+        let highlights = parse_ai_response(response, output);
+        assert_eq!(highlights.len(), 2);
     }
 }

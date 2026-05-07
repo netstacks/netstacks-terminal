@@ -86,8 +86,6 @@ export class HighlightEngine {
   private lastViewportY: number = -1
   private lastViewportRows: number = 0
 
-  // Buffer length tracking for incremental scanning
-  private lastScannedBufferLength: number = 0
 
   // Rules versioning — forces full rescan when rules change
   private rulesVersion: number = 0
@@ -276,7 +274,7 @@ export class HighlightEngine {
 
     this.lastViewportY = viewportY
     this.lastViewportRows = rows
-    this.lastScannedBufferLength = buffer.length
+
   }
 
   private performIncrementalScan(): void {
@@ -285,7 +283,6 @@ export class HighlightEngine {
     const buffer = this.terminal.buffer.active
     const viewportY = buffer.viewportY
     const rows = this.terminal.rows
-    const currentBufferLength = buffer.length
     const allRules = [...this.rules, ...this.detectionRules]
 
     // If viewport scrolled since last scan, use viewport scan instead
@@ -306,7 +303,7 @@ export class HighlightEngine {
     this.purgeOffViewportDecorations(viewportY, rows)
     this.applyDiff(newMatchMap, false)
 
-    this.lastScannedBufferLength = currentBufferLength
+
     this.lastViewportY = viewportY
     this.lastViewportRows = rows
   }
@@ -362,7 +359,7 @@ export class HighlightEngine {
 
     this.lastViewportY = viewportY
     this.lastViewportRows = rows
-    this.lastScannedBufferLength = buffer.length
+
   }
 
   // === Match building ===
@@ -388,7 +385,7 @@ export class HighlightEngine {
       // Skip regex matching for lines whose content hasn't changed
       if (skipUnchanged && this.lineContentCache.get(lineIndex) === text) {
         // Re-add existing cache entries for this line to preserve them in diff
-        for (const [key, cached] of this.decorationCache) {
+        for (const [, cached] of this.decorationCache) {
           if (cached.absoluteLine === lineIndex) {
             matchMap.set(`${lineIndex}:${cached.startColumn}:${cached.endColumn}`, {
               highlightRule: cached.highlightRuleId ? allRules.find(r => r.id === cached.highlightRuleId) || null : null,

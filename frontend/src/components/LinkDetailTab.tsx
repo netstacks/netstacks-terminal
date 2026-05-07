@@ -744,11 +744,6 @@ export default function LinkDetailTab({
   const sourceName = sourceDevice?.name || sourceDeviceName;
   const targetName = targetDevice?.name || targetDeviceName;
 
-  // Get collection timestamp
-  const collectedAt = linkEnrichment?.collectedAt
-    ? new Date(linkEnrichment.collectedAt).toLocaleString()
-    : 'N/A';
-
   // SNMP polling state
   const [pollState, setPollState] = useState<PollState>('idle');
   const [pollError, setPollError] = useState<string | null>(null);
@@ -757,6 +752,14 @@ export default function LinkDetailTab({
   const [sourceSnmpStats, setSourceSnmpStats] = useState<SnmpInterfaceStatsResponse | undefined>(undefined);
   const [destSnmpStats, setDestSnmpStats] = useState<SnmpInterfaceStatsResponse | undefined>(undefined);
   const [countdown, setCountdown] = useState(0);
+  const [localCollectedAt, setLocalCollectedAt] = useState<Date | null>(null);
+
+  // Get collection timestamp (prefer live poll time, fall back to enrichment)
+  const collectedAt = localCollectedAt
+    ? localCollectedAt.toLocaleString()
+    : linkEnrichment?.collectedAt
+      ? new Date(linkEnrichment.collectedAt).toLocaleString()
+      : 'N/A';
   const cancelledRef = useRef(false);
   const staleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -932,6 +935,7 @@ export default function LinkDetailTab({
       });
 
       setPollState('complete');
+      setLocalCollectedAt(new Date());
 
       // After 30 seconds, mark data as stale
       staleTimerRef.current = setTimeout(() => {

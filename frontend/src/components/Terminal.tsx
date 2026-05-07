@@ -2442,6 +2442,7 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
     const searchMargin = 100
     const searchEnd = Math.min(buffer.length, buffer.viewportY + terminal.rows + searchMargin)
     const searchStart = Math.max(0, buffer.viewportY - searchMargin)
+    const usedPositions = new Set<string>()
 
     for (const h of aiHighlights) {
       if (!h.text || h.text.trim().length === 0) continue
@@ -2452,15 +2453,23 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
         const line = buffer.getLine(i)
         if (!line) continue
         const lineText = line.translateToString(true)
-        const pos = lineText.indexOf(h.text)
-        if (pos !== -1) {
-          foundLine = i
-          foundStart = pos
-          break
+        let searchFrom = 0
+        while (searchFrom < lineText.length) {
+          const pos = lineText.indexOf(h.text, searchFrom)
+          if (pos === -1) break
+          const key = `${i}:${pos}`
+          if (!usedPositions.has(key)) {
+            foundLine = i
+            foundStart = pos
+            break
+          }
+          searchFrom = pos + 1
         }
+        if (foundLine !== -1) break
       }
 
       if (foundLine === -1) continue
+      usedPositions.add(`${foundLine}:${foundStart}`)
 
       const color = getHighlightTypeColor(h.type)
       const tooltipText = `${h.type.toUpperCase()}: ${h.reason} (${Math.round(h.confidence * 100)}% confidence)`
