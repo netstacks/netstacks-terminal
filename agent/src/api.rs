@@ -326,8 +326,10 @@ pub async fn bulk_delete_sessions(
 /// List all folders
 pub async fn list_folders(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<Folder>>, ApiError> {
-    let folders = state.provider.list_folders().await?;
+    let scope = params.get("scope").map(|s| s.as_str());
+    let folders = state.provider.list_folders(scope).await?;
     Ok(Json(folders))
 }
 
@@ -849,7 +851,7 @@ pub async fn move_folder(
         }
 
         // Check if the target parent is a descendant of this folder
-        let all_folders = state.provider.list_folders().await?;
+        let all_folders = state.provider.list_folders(None).await?;
         let mut descendants = std::collections::HashSet::new();
 
         // Build set of descendant IDs
@@ -4689,6 +4691,8 @@ pub async fn get_topology(
     Ok(Json(TopologyWithDetails {
         id: topology.id,
         name: topology.name,
+        folder_id: topology.folder_id,
+        sort_order: topology.sort_order,
         devices,
         connections,
         created_at: topology.created_at,
@@ -4713,6 +4717,25 @@ pub async fn delete_topology(
 ) -> Result<StatusCode, ApiError> {
     state.provider.delete_topology(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Move a topology to a folder and/or reorder
+pub async fn move_topology(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<MoveTopologyRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.move_topology(&id, req.folder_id, req.sort_order).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Bulk delete multiple topologies
+pub async fn bulk_delete_topologies(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkDeleteTopologiesRequest>,
+) -> Result<Json<BulkDeleteTopologiesResponse>, ApiError> {
+    let (deleted, failed) = state.provider.bulk_delete_topologies(&req.ids).await?;
+    Ok(Json(BulkDeleteTopologiesResponse { deleted, failed }))
 }
 
 /// Add a device to a topology

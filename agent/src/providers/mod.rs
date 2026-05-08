@@ -69,8 +69,8 @@ pub trait DataProvider: Send + Sync {
 
     // === Folders ===
 
-    /// List all folders
-    async fn list_folders(&self) -> Result<Vec<Folder>, ProviderError>;
+    /// List all folders, optionally filtered by scope
+    async fn list_folders(&self, scope: Option<&str>) -> Result<Vec<Folder>, ProviderError>;
 
     /// Get a folder by ID
     async fn get_folder(&self, id: &str) -> Result<Folder, ProviderError>;
@@ -457,6 +457,12 @@ pub trait DataProvider: Send + Sync {
 
     /// Delete a topology (cascades to devices and connections)
     async fn delete_topology(&self, id: &str) -> Result<(), ProviderError>;
+
+    /// Move a topology to a folder and/or reorder
+    async fn move_topology(&self, id: &str, folder_id: Option<String>, sort_order: f64) -> Result<(), ProviderError>;
+
+    /// Bulk delete multiple topologies, returns (deleted, failed) counts
+    async fn bulk_delete_topologies(&self, ids: &[String]) -> Result<(i32, i32), ProviderError>;
 
     /// Get devices for a topology
     async fn get_topology_devices(&self, topology_id: &str) -> Result<Vec<TopologyDevice>, ProviderError>;

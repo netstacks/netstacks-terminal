@@ -627,6 +627,17 @@ export default function TopologyTabEditor({
     }
   }, [topologyLive, topologyLiveHttp, liveTargets, enterpriseLiveTargets, isEnterprise]);
 
+  // Stable serialization of targets — only changes when IPs/profiles/interfaces
+  // actually differ, NOT on position-only topology updates (drag-and-drop).
+  const liveTargetsKey = useMemo(() =>
+    JSON.stringify(liveTargets.map(t => ({ h: t.host, p: t.profileId, i: t.interfaces.sort() }))),
+    [liveTargets]
+  );
+  const enterpriseTargetsKey = useMemo(() =>
+    JSON.stringify(enterpriseLiveTargets.map(t => ({ d: t.deviceId, h: t.host, i: t.interfaces.sort() }))),
+    [enterpriseLiveTargets]
+  );
+
   // Re-subscribe when targets change (for active live polling)
   useEffect(() => {
     if (isEnterprise) {
@@ -638,9 +649,9 @@ export default function TopologyTabEditor({
         topologyLive.start(liveTargets, 30);
       }
     }
-    // Only re-run when targets identity changes, not on every isLive toggle
+    // Only re-run when the serialized target content changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEnterprise ? enterpriseLiveTargets : liveTargets]);
+  }, [isEnterprise ? enterpriseTargetsKey : liveTargetsKey]);
 
   // Select the appropriate live state based on mode
   const activeLiveStats = isEnterprise ? topologyLiveHttp.liveStats : topologyLive.liveStats;

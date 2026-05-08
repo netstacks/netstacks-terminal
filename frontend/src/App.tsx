@@ -673,6 +673,7 @@ function AppContent() {
   const [discoveryModalOpen, setDiscoveryModalOpen] = useState(false)
   const [discoveryGroupName, setDiscoveryGroupName] = useState('')
   const [discoveryDevices, setDiscoveryDevices] = useState<{ name: string; tabId: string; ip?: string; profileId?: string; snmpProfileId?: string; cliFlavor?: string; credentialId?: string; snmpCredentialId?: string }[]>([])
+  const [discoveryTargetTopologyId, setDiscoveryTargetTopologyId] = useState<string | null>(null)
 
   // Discovery toast state
   const [discoveryToast, setDiscoveryToast] = useState<{
@@ -2437,32 +2438,37 @@ def main(command: str = "show version"):
   }, [splitTabs, splitLayout, tabGroups.length, closeSplitContextMenu])
 
   // Create a group from split tabs and run topology discovery
-  const handleCreateGroupAndDiscover = useCallback(() => {
+  const handleCreateGroupAndDiscover = useCallback(async () => {
     if (splitTabs.length < 2) return
 
-    // Get connected terminal tabs from split
     const connectedTabs = splitTabs
       .map(id => tabs.find(t => t.id === id))
       .filter((t): t is Tab => t !== undefined && t.type === 'terminal' && t.status === 'connected')
 
     if (connectedTabs.length === 0) {
-      console.warn('No connected terminals in split view')
+      alert('No connected terminals in split view.\n\nMake sure your sessions are connected (green dot in tab).')
       closeSplitContextMenu()
       return
     }
 
-    // Create the group first
     const groupName = `Discovery ${tabGroups.length + 1}`
     handleCreateGroupFromSplit(groupName)
 
-    // Open discovery modal with split tabs
-    const devices = connectedTabs.map(t => ({
-      name: t.title,
-      tabId: t.id
-    }))
+    const allSessions = await listSessions()
 
     setDiscoveryGroupName(groupName)
-    setDiscoveryDevices(devices)
+    setDiscoveryDevices(connectedTabs.map(t => {
+      const session = allSessions.find(s => s.id === t.sessionId)
+      return {
+        name: t.title,
+        tabId: t.id,
+        ip: session?.host,
+        profileId: session?.profile_id,
+        snmpProfileId: session?.profile_id,
+        cliFlavor: session?.cli_flavor,
+      }
+    }))
+    setDiscoveryTargetTopologyId(null)
     setDiscoveryModalOpen(true)
   }, [splitTabs, tabs, tabGroups.length, handleCreateGroupFromSplit, closeSplitContextMenu])
 
@@ -3124,6 +3130,7 @@ def main(command: str = "show version"):
           cliFlavor: session?.cli_flavor,
         };
       }));
+      setDiscoveryTargetTopologyId(null);
       setDiscoveryModalOpen(true);
     },
     [tabs]
@@ -3698,6 +3705,7 @@ def main(command: str = "show version"):
         cliFlavor: session?.cli_flavor,
       }
     }))
+    setDiscoveryTargetTopologyId(null)
     setDiscoveryModalOpen(true)
     closeContextMenu()
   }, [contextMenuTabId, tabGroups, tabs, closeContextMenu])
@@ -3747,9 +3755,15 @@ def main(command: str = "show version"):
     }
 
     try {
-      // Step 1: Create topology in database
-      const topologyName = `${discoveryGroupName} Topology`
-      const savedTopology = await createTopology(topologyName, [])
+      // Step 1: Create or reuse topology
+      let savedTopology: Topology
+      const isAddToExisting = !!discoveryTargetTopologyId
+      if (discoveryTargetTopologyId) {
+        savedTopology = await getTopology(discoveryTargetTopologyId)
+      } else {
+        const topologyName = `${discoveryGroupName} Topology`
+        savedTopology = await createTopology(topologyName, [])
+      }
 
       // Step 2: Add primary devices from discovery results
       const deviceIdMap = new Map<string, string>() // Map device name to new backend ID
@@ -3786,15 +3800,35 @@ def main(command: str = "show version"):
           }
         }
 
-        const deviceResult = await addNeighborDevice(savedTopology.id, {
-          name: displayNameFor(result),
-          host: result.ip,
-          device_type: deviceType,
-          x: 300 + (deviceIdMap.size % 3) * 200,
-          y: 200 + Math.floor(deviceIdMap.size / 3) * 150,
-          profile_id: result.profileId,
-          snmp_profile_id: result.snmpProfileId,
-        })
+        // When adding to existing topology, check if device is already present
+        // (e.g. a neighbor stub being promoted to a fully discovered device)
+        const existingDevice = isAddToExisting
+          ? savedTopology.devices.find(d =>
+              d.name.toLowerCase() === result.device.toLowerCase() ||
+              (result.ip && d.primaryIp === result.ip))
+          : undefined
+
+        let deviceResult: { id: string }
+        if (existingDevice) {
+          // Promote the existing neighbor stub — update its type, set profile, clear neighbor status
+          await updateDevice(savedTopology.id, existingDevice.id, {
+            device_type: deviceType !== 'unknown' ? deviceType : undefined,
+            notes: '',
+            profile_id: result.profileId,
+            snmp_profile_id: result.snmpProfileId,
+          })
+          deviceResult = existingDevice
+        } else {
+          deviceResult = await addNeighborDevice(savedTopology.id, {
+            name: displayNameFor(result),
+            host: result.ip,
+            device_type: deviceType,
+            x: 300 + (deviceIdMap.size % 3) * 200,
+            y: 200 + Math.floor(deviceIdMap.size / 3) * 150,
+            profile_id: result.profileId,
+            snmp_profile_id: result.snmpProfileId,
+          })
+        }
 
         // Store enrichment data from SNMP sysDescr (platform, vendor, version)
         const enrichment: Record<string, string> = {}
@@ -3840,6 +3874,15 @@ def main(command: str = "show version"):
         const key = alias.toLowerCase().trim()
         if (key && !aliasToDeviceId.has(key)) {
           aliasToDeviceId.set(key, deviceId)
+        }
+      }
+
+      // When adding to an existing topology, register all existing devices
+      // so neighbor resolution links to them instead of creating duplicates.
+      if (isAddToExisting) {
+        for (const d of savedTopology.devices) {
+          registerAlias(d.name, d.id)
+          registerAlias(d.primaryIp, d.id)
         }
       }
 
@@ -4006,30 +4049,42 @@ def main(command: str = "show version"):
         }
       }
 
-      // Step 6: Open as a saved topology tab
-      const newTabId = `topology-${completeTopology.id}-${Date.now()}`
-      const newTab: Tab = {
-        id: newTabId,
-        type: 'topology',
-        title: completeTopology.name,
-        topologyId: completeTopology.id,
-        topologyName: completeTopology.name,
-        status: 'ready',
+      // Step 6: Open or refresh topology tab
+      if (isAddToExisting) {
+        // Refresh existing topology tab
+        setTopologyRefreshKeys(prev => ({
+          ...prev,
+          [savedTopology.id]: (prev[savedTopology.id] || 0) + 1
+        }))
+        // Switch to the existing topology tab
+        const existingTab = tabs.find(t => t.type === 'topology' && t.topologyId === savedTopology.id)
+        if (existingTab) setActiveTabId(existingTab.id)
+      } else {
+        const newTabId = `topology-${completeTopology.id}-${Date.now()}`
+        const newTab: Tab = {
+          id: newTabId,
+          type: 'topology',
+          title: completeTopology.name,
+          topologyId: completeTopology.id,
+          topologyName: completeTopology.name,
+          status: 'ready',
+        }
+        setTabs(prev => [...prev, newTab])
+        setActiveTabId(newTabId)
       }
-      setTabs(prev => [...prev, newTab])
-      setActiveTabId(newTabId)
+      setDiscoveryTargetTopologyId(null)
       setDiscoveryModalOpen(false)
     } catch (err) {
       console.error('Failed to save topology:', err)
       alert(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
-  }, [discoveryGroupName, discoveryDevices, tabs, chipSessionsById, deviceEnrichments, setDeviceEnrichment])
+  }, [discoveryGroupName, discoveryDevices, discoveryTargetTopologyId, tabs, chipSessionsById, deviceEnrichments, setDeviceEnrichment])
 
   // Discovery toast handlers
   const handleToastRunDiscovery = useCallback(() => {
     if (!discoveryToast) return
     setDiscoveryToast(null)
-    // Trigger discovery modal open for the group
+    setDiscoveryTargetTopologyId(null)
     setDiscoveryModalOpen(true)
   }, [discoveryToast])
 
@@ -4057,6 +4112,7 @@ def main(command: str = "show version"):
 
     setDiscoveryGroupName(name)
     setDiscoveryDevices(devices)
+    setDiscoveryTargetTopologyId(null)
     setDiscoveryModalOpen(true)
   }, [tabs])
 
@@ -5851,11 +5907,6 @@ def main(command: str = "show version"):
                       tabIndex={0}
                       data-tab-id={tab.id}
                       className={`tab tab-type-${tab.type} tab-status-${tab.status} ${activeTabId === tab.id ? 'active' : ''} ${isTabSelected(tab.id) ? 'tab-selected' : ''} ${draggingTabId === tab.id ? 'dragging' : ''} ${tabReorderDropTarget?.tabId === tab.id ? `tab-reorder-${tabReorderDropTarget.side}` : ''} ${tab.sessionId && sharedSessions.has(tab.sessionId) ? 'tab-sharing' : ''}`}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData('application/x-tab-id', tab.id);
-                        e.dataTransfer.effectAllowed = 'copyMove';
-                      }}
                       onClick={(e) => {
                         // Don't trigger click if we were dragging
                         if (draggingTabId) return
@@ -6705,16 +6756,6 @@ def main(command: str = "show version"):
               <span className="context-menu-icon">🗑</span>
               Close Tab
             </button>
-            <button
-              className="context-menu-item"
-              onClick={() => {
-                toggleMultiSend(splitContextMenuTabId)
-                closeSplitContextMenu()
-              }}
-            >
-              <span className="context-menu-icon">{isMultiSendEnabled(splitContextMenuTabId) ? '🔗' : '⛓'}</span>
-              {isMultiSendEnabled(splitContextMenuTabId) ? 'Disable Multi-Send' : 'Enable Multi-Send'}
-            </button>
           </div>
           <div className="context-menu-divider" />
           <div className="context-menu-section">
@@ -6768,17 +6809,19 @@ def main(command: str = "show version"):
             <button
               className="context-menu-item"
               onClick={() => {
-                // Enable multi-send on all split tabs
+                const allEnabled = splitTabs.every(id => isMultiSendEnabled(id))
                 splitTabs.forEach(id => {
-                  if (!isMultiSendEnabled(id)) {
-                    toggleMultiSend(id)
+                  if (allEnabled) {
+                    if (isMultiSendEnabled(id)) toggleMultiSend(id)
+                  } else {
+                    if (!isMultiSendEnabled(id)) toggleMultiSend(id)
                   }
                 })
                 closeSplitContextMenu()
               }}
             >
-              <span className="context-menu-icon">🔗</span>
-              Enable Multi-Send on All
+              <span className="context-menu-icon">{splitTabs.every(id => isMultiSendEnabled(id)) ? '🔗' : '⛓'}</span>
+              {splitTabs.every(id => isMultiSendEnabled(id)) ? 'Disable Multi-Send on All' : 'Enable Multi-Send on All'}
             </button>
             <button
               className="context-menu-item context-menu-item-danger"
@@ -6918,7 +6961,37 @@ def main(command: str = "show version"):
           () => {
             if (deviceContextMenu.device) handleOpenDeviceTerminal(deviceContextMenu.device)
             closeDeviceContextMenu()
-          }
+          },
+          // Add to Discovery (only for neighbor devices)
+          deviceContextMenu.device?.isNeighbor ? async () => {
+            const device = deviceContextMenu.device
+            if (!device) return
+            closeDeviceContextMenu()
+
+            const allSessions = await listSessions()
+            const matchedSession = allSessions.find(s =>
+              (device.primaryIp && s.host === device.primaryIp) ||
+              s.name.toLowerCase() === device.name.toLowerCase()
+            )
+
+            if (!matchedSession) {
+              alert(`"${device.name}" is not a managed device.\n\nNo saved session found matching this device by IP or name. Add it as a session first, then try again.`)
+              return
+            }
+
+            const topoTab = tabs.find(t => t.type === 'topology' && t.topologyId === deviceContextMenu.topologyId)
+            setDiscoveryGroupName(topoTab?.topologyName || topoTab?.title || 'Discovery')
+            setDiscoveryTargetTopologyId(deviceContextMenu.topologyId || null)
+            setDiscoveryDevices([{
+              name: device.name,
+              tabId: '',
+              ip: matchedSession.host || device.primaryIp,
+              profileId: matchedSession.profile_id,
+              snmpProfileId: matchedSession.profile_id,
+              cliFlavor: matchedSession.cli_flavor,
+            }])
+            setDiscoveryModalOpen(true)
+          } : undefined
         ) : []}
         onClose={closeDeviceContextMenu}
       />

@@ -834,12 +834,14 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/lookup/asn/:asn", get(api::lookup_asn))
         // Saved Topologies (Phase 20.1)
         .route("/topologies", get(api::list_topologies).post(api::create_topology))
+        .route("/topologies/bulk-delete", post(api::bulk_delete_topologies))
         .route(
             "/topologies/:id",
             get(api::get_topology)
                 .put(api::update_topology)
                 .delete(api::delete_topology),
         )
+        .route("/topologies/:id/move", put(api::move_topology))
         .route("/topologies/:id/devices", post(api::add_topology_device))
         .route("/topologies/:id/devices/:device_id/position", put(api::update_topology_device_position))
         .route("/topologies/:id/devices/:device_id/type", put(api::update_topology_device_type))

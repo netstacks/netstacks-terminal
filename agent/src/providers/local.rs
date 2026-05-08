@@ -298,6 +298,7 @@ struct FolderRow {
     id: String,
     name: String,
     parent_id: Option<String>,
+    scope: String,
     sort_order: i32,
     created_at: String,
     updated_at: String,
@@ -309,6 +310,7 @@ impl FolderRow {
             id: self.id,
             name: self.name,
             parent_id: self.parent_id,
+            scope: self.scope,
             sort_order: self.sort_order,
             created_at: parse_datetime(&self.created_at)?,
             updated_at: parse_datetime(&self.updated_at)?,
@@ -640,6 +642,8 @@ impl SessionContextRow {
 struct SavedTopologyRow {
     id: String,
     name: String,
+    folder_id: Option<String>,
+    sort_order: f64,
     created_at: String,
     updated_at: String,
 }
@@ -649,6 +653,8 @@ impl SavedTopologyRow {
         Ok(SavedTopology {
             id: self.id,
             name: self.name,
+            folder_id: self.folder_id,
+            sort_order: self.sort_order,
             created_at: parse_datetime(&self.created_at)?,
             updated_at: parse_datetime(&self.updated_at)?,
         })
@@ -1772,9 +1778,11 @@ impl DataProvider for LocalDataProvider {
 
     // === Folders ===
 
-    async fn list_folders(&self) -> Result<Vec<Folder>, ProviderError> {
+    async fn list_folders(&self, scope: Option<&str>) -> Result<Vec<Folder>, ProviderError> {
+        let filter_scope = scope.unwrap_or("session");
         let rows: Vec<FolderRow> =
-            sqlx::query_as("SELECT * FROM folders ORDER BY sort_order, name")
+            sqlx::query_as("SELECT * FROM folders WHERE scope = ? ORDER BY sort_order, name")
+                .bind(filter_scope)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| ProviderError::Database(e.to_string()))?;
@@ -1796,16 +1804,18 @@ impl DataProvider for LocalDataProvider {
     async fn create_folder(&self, folder: NewFolder) -> Result<Folder, ProviderError> {
         let id = Uuid::new_v4().to_string();
         let now = format_datetime(&Utc::now());
+        let scope = folder.scope.as_deref().unwrap_or("session");
 
         sqlx::query(
             r#"
-            INSERT INTO folders (id, name, parent_id, sort_order, created_at, updated_at)
-            VALUES (?, ?, ?, 0, ?, ?)
+            INSERT INTO folders (id, name, parent_id, scope, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?)
             "#,
         )
         .bind(&id)
         .bind(&folder.name)
         .bind(&folder.parent_id)
+        .bind(scope)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -2466,7 +2476,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn export_all(&self) -> Result<ExportData, ProviderError> {
         let sessions = self.list_sessions().await?;
-        let folders = self.list_folders().await?;
+        let folders = self.list_folders(None).await?;
 
         // Build folder name lookup
         let folder_names: std::collections::HashMap<String, String> = folders
@@ -2508,7 +2518,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn export_folder(&self, folder_id: &str) -> Result<ExportData, ProviderError> {
         let _folder = self.get_folder(folder_id).await?;
-        let all_folders = self.list_folders().await?;
+        let all_folders = self.list_folders(None).await?;
         let all_sessions = self.list_sessions().await?;
 
         // Build folder name lookup
@@ -2575,7 +2585,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn export_session(&self, session_id: &str) -> Result<ExportData, ProviderError> {
         let session = self.get_session(session_id).await?;
-        let folders = self.list_folders().await?;
+        let folders = self.list_folders(None).await?;
 
         // Get folder name if session is in a folder
         let folder_name = session.folder_id.as_ref().and_then(|fid| {
@@ -2609,7 +2619,7 @@ impl DataProvider for LocalDataProvider {
         let mut warnings: Vec<String> = Vec::new();
 
         // Build folder name to ID map for existing folders
-        let existing_folders = self.list_folders().await?;
+        let existing_folders = self.list_folders(None).await?;
         let mut folder_name_to_id: std::collections::HashMap<String, String> = existing_folders
             .iter()
             .map(|f| (f.name.clone(), f.id.clone()))
@@ -2621,6 +2631,7 @@ impl DataProvider for LocalDataProvider {
                 let new_folder = NewFolder {
                     name: folder.name.clone(),
                     parent_id: None,
+                    scope: None,
                 };
                 match self.create_folder(new_folder).await {
                     Ok(created) => {
@@ -2641,6 +2652,7 @@ impl DataProvider for LocalDataProvider {
                 let new_folder = NewFolder {
                     name: folder.name.clone(),
                     parent_id,
+                    scope: None,
                 };
                 match self.create_folder(new_folder).await {
                     Ok(created) => {
@@ -4420,7 +4432,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn list_topologies(&self) -> Result<Vec<SavedTopology>, ProviderError> {
         let rows: Vec<SavedTopologyRow> = sqlx::query_as(
-            "SELECT * FROM topologies ORDER BY updated_at DESC"
+            "SELECT id, name, folder_id, sort_order, created_at, updated_at FROM topologies ORDER BY sort_order, name"
         )
             .fetch_all(&self.pool)
             .await
@@ -4431,7 +4443,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn get_topology(&self, id: &str) -> Result<Option<SavedTopology>, ProviderError> {
         let row: Option<SavedTopologyRow> = sqlx::query_as(
-            "SELECT * FROM topologies WHERE id = ?"
+            "SELECT id, name, folder_id, sort_order, created_at, updated_at FROM topologies WHERE id = ?"
         )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -4449,7 +4461,7 @@ impl DataProvider for LocalDataProvider {
         let now = format_datetime(&Utc::now());
 
         sqlx::query(
-            "INSERT INTO topologies (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)"
+            "INSERT INTO topologies (id, name, folder_id, sort_order, created_at, updated_at) VALUES (?, ?, NULL, 0, ?, ?)"
         )
         .bind(&id)
         .bind(name)
@@ -4486,6 +4498,34 @@ impl DataProvider for LocalDataProvider {
 
     async fn delete_topology(&self, id: &str) -> Result<(), ProviderError> {
         self.delete_by_id("topologies", "id", id, "Topology").await
+    }
+
+    async fn move_topology(&self, id: &str, folder_id: Option<String>, sort_order: f64) -> Result<(), ProviderError> {
+        sqlx::query("UPDATE topologies SET folder_id = ?, sort_order = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(&folder_id)
+            .bind(sort_order)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn bulk_delete_topologies(&self, ids: &[String]) -> Result<(i32, i32), ProviderError> {
+        let mut deleted: i32 = 0;
+        let mut failed: i32 = 0;
+
+        for id in ids {
+            match self.delete_topology(id).await {
+                Ok(_) => deleted += 1,
+                Err(e) => {
+                    tracing::warn!("Failed to delete topology {}: {:?}", id, e);
+                    failed += 1;
+                }
+            }
+        }
+
+        Ok((deleted, failed))
     }
 
     async fn get_topology_devices(&self, topology_id: &str) -> Result<Vec<TopologyDevice>, ProviderError> {
@@ -4740,6 +4780,14 @@ impl DataProvider for LocalDataProvider {
         if details.notes.is_some() {
             set_clauses.push("notes = ?");
             params.push(details.notes.clone());
+        }
+        if details.profile_id.is_some() {
+            set_clauses.push("profile_id = ?");
+            params.push(details.profile_id.clone());
+        }
+        if details.snmp_profile_id.is_some() {
+            set_clauses.push("snmp_profile_id = ?");
+            params.push(details.snmp_profile_id.clone());
         }
 
         let query = format!(

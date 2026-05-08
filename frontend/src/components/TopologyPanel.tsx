@@ -1,11 +1,37 @@
-// TopologyPanel - Sidebar panel for saved topologies and device list
-import { useState, useEffect, useCallback } from 'react';
-import { listTopologies, deleteTopology, updateTopologyName, shareTopology, type SavedTopologyListItem } from '../api/topology';
+// TopologyPanel - Sidebar panel for saved topologies with folders, drag-drop, multi-select
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  listTopologies,
+  listTopologyFolders,
+  createTopologyFolder,
+  moveTopology,
+  bulkDeleteTopologies,
+  deleteTopology,
+  updateTopologyName,
+  shareTopology,
+  type SavedTopologyListItem,
+} from '../api/topology';
+import type { Folder } from '../api/sessions';
+import { updateFolder, deleteFolder, moveFolder } from '../api/sessions';
 import { getCurrentMode } from '../api/client';
+import { ItemSelectionProvider, useItemSelection } from '../hooks/useItemSelection';
 import NewTopologyDialog from './NewTopologyDialog';
 import TracerouteDialog from './TracerouteDialog';
 import type { Topology, Device, DeviceStatus } from '../types/topology';
 import './TopologyPanel.css';
+
+// Drag and drop types
+type DragItemType = 'topology' | 'folder';
+interface DragItem {
+  id: string;
+  type: DragItemType;
+}
+interface DropTarget {
+  id: string;
+  position: 'before' | 'after' | 'inside';
+  type: 'topology' | 'folder' | 'root';
+}
 
 interface TopologyPanelProps {
   // Active topology (when a topology tab is open)
@@ -65,9 +91,73 @@ const Icons = {
       <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
   ),
+  folder: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+    </svg>
+  ),
+  folderOpen: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v1" />
+      <path d="M2 10l4 9h14l4-9H6" />
+    </svg>
+  ),
+  folderPlus: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+      <line x1="12" y1="11" x2="12" y2="17" />
+      <line x1="9" y1="14" x2="15" y2="14" />
+    </svg>
+  ),
+  chevronRight: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  ),
+  chevronDown: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  ),
+  edit: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  ),
+  trash: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+    </svg>
+  ),
+  sortAsc: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M3 4h13M3 8h9M3 12h5" />
+      <path d="M17 4v16M14 17l3 3 3-3" />
+    </svg>
+  ),
+  sortDesc: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M3 4h5M3 8h9M3 12h13" />
+      <path d="M17 20V4M14 7l3-3 3 3" />
+    </svg>
+  ),
+  expandAll: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M4 6h16M4 12h16M4 18h16" />
+      <path d="M9 3l3 3 3-3M9 21l3-3 3 3" />
+    </svg>
+  ),
+  collapseAll: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M4 6h16M4 12h16M4 18h16" />
+      <path d="M9 9l3-3 3 3M9 15l3 3 3-3" />
+    </svg>
+  ),
 };
 
-export default function TopologyPanel({
+function TopologyPanelContent({
   activeTopology,
   selectedDeviceId,
   onDeviceSelect,
@@ -79,33 +169,84 @@ export default function TopologyPanel({
 }: TopologyPanelProps) {
   const currentTopology = activeTopology ?? null;
   const isEnterprise = getCurrentMode() === 'enterprise';
+
+  // --- Data State ---
   const [topologies, setTopologies] = useState<SavedTopologyListItem[]>([]);
   const [teamTopologies, setTeamTopologies] = useState<SavedTopologyListItem[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // --- UI State ---
   const [newDialogOpen, setNewDialogOpen] = useState(false);
   const [tracerouteDialogOpen, setTracerouteDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [contextMenu, setContextMenu] = useState<{
-    topology: SavedTopologyListItem;
-    position: { x: number; y: number };
-  } | null>(null);
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [sortOrder, setSortOrder] = useState<'default' | 'reverse'>(() => {
+    return (localStorage.getItem('topology-panel-sort-order') as 'default' | 'reverse') || 'default';
+  });
 
-  // Load topologies list
-  const loadTopologies = useCallback(async () => {
+  // --- Context Menu State ---
+  const [topologyContextMenu, setTopologyContextMenu] = useState<{
+    x: number; y: number; topologyId: string;
+  } | null>(null);
+  const [folderContextMenu, setFolderContextMenu] = useState<{
+    x: number; y: number; folderId: string;
+  } | null>(null);
+
+  // --- Rename State ---
+  const [renamingTopologyId, setRenamingTopologyId] = useState<string | null>(null);
+  const [renameTopologyValue, setRenameTopologyValue] = useState('');
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameFolderValue, setRenameFolderValue] = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameTopologyInputRef = useRef<HTMLInputElement>(null);
+
+  // --- Drag and Drop State ---
+  const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStartPos, setDragStartPos] = useState<{ x: number; y: number } | null>(null);
+  const [autoExpandTimeout, setAutoExpandTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+  const dragPreviewRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // --- Selection Hook ---
+  const {
+    selectedItemIds,
+    toggleItemSelection,
+    rangeItemSelect,
+    clearItemSelection,
+    isItemSelected,
+    itemSelectionCount,
+    selectedFolderIds,
+    toggleFolderSelection,
+    rangeFolderSelect,
+    isFolderSelected,
+    clearAllSelections,
+  } = useItemSelection();
+
+  // ── Data Fetching ──
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      const data = await listTopologies();
-      setTopologies(data);
+      const [topologiesData, foldersData] = await Promise.all([
+        listTopologies(),
+        listTopologyFolders(),
+      ]);
+      setTopologies(topologiesData);
+      setFolders(foldersData);
+
       // In enterprise mode, also load shared team topologies
       if (isEnterprise) {
         const shared = await listTopologies({ shared: true });
-        // Exclude own topologies (they're already in the personal list)
-        const ownIds = new Set(data.map(t => t.id));
+        const ownIds = new Set(topologiesData.map(t => t.id));
         setTeamTopologies(shared.filter(t => !ownIds.has(t.id)));
       }
     } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load topologies');
       console.error('Failed to load topologies:', err);
     } finally {
       setLoading(false);
@@ -113,77 +254,844 @@ export default function TopologyPanel({
   }, [isEnterprise]);
 
   useEffect(() => {
-    loadTopologies();
-  }, [loadTopologies]);
+    fetchData();
+  }, [fetchData]);
 
-  // Filter topologies by search
-  const filteredTopologies = topologies.filter(t =>
-    t.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-  const filteredTeamTopologies = teamTopologies.filter(t =>
-    t.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // ── Focus rename inputs ──
 
-  // Handle context menu
-  const handleContextMenu = (e: React.MouseEvent, topology: SavedTopologyListItem) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({
-      topology,
-      position: { x: e.clientX, y: e.clientY },
+  useEffect(() => {
+    if (renamingFolderId && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renamingFolderId]);
+
+  useEffect(() => {
+    if (renamingTopologyId && renameTopologyInputRef.current) {
+      renameTopologyInputRef.current.focus();
+      renameTopologyInputRef.current.select();
+    }
+  }, [renamingTopologyId]);
+
+  // ── Close context menus on outside click ──
+
+  useEffect(() => {
+    const handleClick = () => {
+      setTopologyContextMenu(null);
+      setFolderContextMenu(null);
+    };
+    if (topologyContextMenu || folderContextMenu) {
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [topologyContextMenu, folderContextMenu]);
+
+  // ── Sort Order Toggle ──
+
+  const toggleSortOrder = useCallback(() => {
+    setSortOrder(prev => {
+      const next = prev === 'default' ? 'reverse' : 'default';
+      localStorage.setItem('topology-panel-sort-order', next);
+      return next;
+    });
+  }, []);
+
+  // ── Folder expand/collapse ──
+
+  const toggleFolder = (folderId: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(folderId)) {
+        next.delete(folderId);
+      } else {
+        next.add(folderId);
+      }
+      return next;
     });
   };
 
-  // Close context menu
-  const closeContextMenu = () => setContextMenu(null);
+  const expandAllFolders = useCallback(() => {
+    setExpandedFolders(new Set(folders.map(f => f.id)));
+  }, [folders]);
 
-  // Handle rename
-  const handleRename = (topology: SavedTopologyListItem) => {
-    setRenaming(topology.id);
-    setRenameValue(topology.name);
-    closeContextMenu();
+  const collapseAllFolders = useCallback(() => {
+    setExpandedFolders(new Set());
+  }, []);
+
+  // ── Memoized Data ──
+
+  // Group topologies by folder_id
+  const topologiesByFolder = useMemo(() => {
+    const map = new Map<string | null, SavedTopologyListItem[]>();
+    topologies.forEach(topo => {
+      const folderId = topo.folder_id;
+      if (!map.has(folderId)) {
+        map.set(folderId, []);
+      }
+      map.get(folderId)!.push(topo);
+    });
+    map.forEach(folderTopos => {
+      folderTopos.sort((a, b) => a.sort_order - b.sort_order);
+    });
+    return map;
+  }, [topologies]);
+
+  // Build folder tree
+  const { rootFolders, childFoldersByParent } = useMemo(() => {
+    const roots = folders.filter(f => f.parent_id === null).sort((a, b) => a.sort_order - b.sort_order);
+    const childMap = new Map<string, Folder[]>();
+    folders.forEach(f => {
+      if (f.parent_id) {
+        if (!childMap.has(f.parent_id)) {
+          childMap.set(f.parent_id, []);
+        }
+        childMap.get(f.parent_id)!.push(f);
+      }
+    });
+    childMap.forEach(children => {
+      children.sort((a, b) => a.sort_order - b.sort_order);
+    });
+    return { rootFolders: roots, childFoldersByParent: childMap };
+  }, [folders]);
+
+  // Filter topologies by search query
+  const searchLower = searchQuery.toLowerCase().trim();
+
+  const filteredTopologies = useMemo(() => {
+    if (!searchLower) return topologies;
+    return topologies.filter(t =>
+      t.name.toLowerCase().includes(searchLower)
+    );
+  }, [topologies, searchLower]);
+
+  const filteredTeamTopologies = useMemo(() => {
+    if (!searchLower) return teamTopologies;
+    return teamTopologies.filter(t =>
+      t.name.toLowerCase().includes(searchLower)
+    );
+  }, [teamTopologies, searchLower]);
+
+  // Set of filtered topology IDs for O(1) lookup
+  const filteredTopologyIds = useMemo(() => {
+    return new Set(filteredTopologies.map(t => t.id));
+  }, [filteredTopologies]);
+
+  // Check if topology matches search
+  const topologyMatchesSearch = useCallback((topo: SavedTopologyListItem) => {
+    if (!searchLower) return true;
+    return filteredTopologyIds.has(topo.id);
+  }, [searchLower, filteredTopologyIds]);
+
+  // Get folder IDs that contain matching topologies
+  const foldersWithMatches = useMemo(() => {
+    if (!searchLower) return new Set<string>();
+    const ids = new Set<string>();
+    filteredTopologies.forEach(t => {
+      if (t.folder_id) ids.add(t.folder_id);
+    });
+    // Also include parent folders
+    const addParents = (folderId: string) => {
+      const folder = folders.find(f => f.id === folderId);
+      if (folder?.parent_id) {
+        ids.add(folder.parent_id);
+        addParents(folder.parent_id);
+      }
+    };
+    [...ids].forEach(addParents);
+    return ids;
+  }, [filteredTopologies, folders, searchLower]);
+
+  // Folder match counts for search badges
+  const folderMatchCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (!searchLower) return counts;
+    folders.forEach(folder => {
+      const folderTopos = topologiesByFolder.get(folder.id) || [];
+      counts.set(folder.id, folderTopos.filter(t => filteredTopologyIds.has(t.id)).length);
+    });
+    return counts;
+  }, [folders, topologiesByFolder, filteredTopologyIds, searchLower]);
+
+  // Build flat list for virtualization
+  type FlatItem =
+    | { type: 'folder'; folder: Folder; depth: number }
+    | { type: 'topology'; topology: SavedTopologyListItem; depth: number };
+
+  const flatItems = useMemo(() => {
+    const items: FlatItem[] = [];
+
+    const addFolder = (folder: Folder, depth: number) => {
+      // Skip folder if searching and no matching topologies in this subtree
+      if (searchLower && !foldersWithMatches.has(folder.id)) return;
+
+      items.push({ type: 'folder', folder, depth });
+
+      const isExpanded = expandedFolders.has(folder.id) || !!searchLower;
+      if (isExpanded) {
+        const childFolders = childFoldersByParent.get(folder.id) || [];
+        childFolders.forEach(child => addFolder(child, depth + 1));
+
+        const folderTopos = topologiesByFolder.get(folder.id) || [];
+        folderTopos.forEach(topo => {
+          if (topologyMatchesSearch(topo)) {
+            items.push({ type: 'topology', topology: topo, depth: depth + 1 });
+          }
+        });
+      }
+    };
+
+    const addRootTopologies = () => {
+      const rootTopos = topologiesByFolder.get(null) || [];
+      rootTopos.forEach(topo => {
+        if (topologyMatchesSearch(topo)) {
+          items.push({ type: 'topology', topology: topo, depth: 0 });
+        }
+      });
+    };
+
+    if (sortOrder === 'default') {
+      rootFolders.forEach(f => addFolder(f, 0));
+      addRootTopologies();
+    } else {
+      addRootTopologies();
+      rootFolders.forEach(f => addFolder(f, 0));
+    }
+
+    return items;
+  }, [topologies, folders, expandedFolders, searchLower, sortOrder, topologiesByFolder, rootFolders, childFoldersByParent, foldersWithMatches, topologyMatchesSearch]);
+
+  // Build flat ID lists for range selection
+  const allTopologyIds = useMemo(() => {
+    const ids: string[] = [];
+    const collectFolderTopos = (folderId: string | null) => {
+      const folderTopos = topologiesByFolder.get(folderId) || [];
+      folderTopos.forEach(t => ids.push(t.id));
+    };
+    const processFolder = (folder: Folder) => {
+      collectFolderTopos(folder.id);
+      const children = childFoldersByParent.get(folder.id) || [];
+      children.forEach(processFolder);
+    };
+    rootFolders.forEach(processFolder);
+    collectFolderTopos(null);
+    return ids;
+  }, [topologies, folders]);
+
+  const allFolderIds = useMemo(() => {
+    const ids: string[] = [];
+    const processFolder = (folder: Folder) => {
+      ids.push(folder.id);
+      const children = childFoldersByParent.get(folder.id) || [];
+      children.forEach(processFolder);
+    };
+    rootFolders.forEach(processFolder);
+    return ids;
+  }, [folders]);
+
+  // ── Virtualizer ──
+
+  const virtualizer = useVirtualizer({
+    count: flatItems.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 32,
+    overscan: 20,
+  });
+
+  // ── Selection Handlers ──
+
+  const handleTopologyClick = useCallback((e: React.MouseEvent, topologyId: string) => {
+    const isCtrlCmd = e.metaKey || e.ctrlKey;
+    const isShift = e.shiftKey;
+
+    if (isShift) {
+      rangeItemSelect(topologyId, allTopologyIds);
+    } else {
+      toggleItemSelection(topologyId, isCtrlCmd);
+    }
+  }, [rangeItemSelect, toggleItemSelection, allTopologyIds]);
+
+  // ── Context Menu Handlers ──
+
+  const handleTopologyContextMenu = (e: React.MouseEvent, topologyId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setFolderContextMenu(null);
+    setTopologyContextMenu({ x: e.clientX, y: e.clientY, topologyId });
   };
 
-  const submitRename = async (id: string) => {
-    if (!renameValue.trim()) return;
+  const handleFolderContextMenu = (e: React.MouseEvent, folderId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTopologyContextMenu(null);
+    setFolderContextMenu({ x: e.clientX, y: e.clientY, folderId });
+  };
+
+  // ── Topology Actions ──
+
+  const handleRenameTopology = (topo: SavedTopologyListItem) => {
+    setRenamingTopologyId(topo.id);
+    setRenameTopologyValue(topo.name);
+    setTopologyContextMenu(null);
+  };
+
+  const submitRenameTopology = async (id: string) => {
+    if (!renameTopologyValue.trim()) {
+      setRenamingTopologyId(null);
+      return;
+    }
     try {
-      await updateTopologyName(id, renameValue.trim());
+      await updateTopologyName(id, renameTopologyValue.trim());
       setTopologies(prev =>
-        prev.map(t => t.id === id ? { ...t, name: renameValue.trim() } : t)
+        prev.map(t => t.id === id ? { ...t, name: renameTopologyValue.trim() } : t)
       );
     } catch (err) {
       console.error('Failed to rename topology:', err);
     }
-    setRenaming(null);
+    setRenamingTopologyId(null);
   };
 
-  // Handle delete
-  const handleDelete = async (topology: SavedTopologyListItem) => {
-    closeContextMenu();
+  const handleDeleteTopology = async (topologyId: string) => {
+    setTopologyContextMenu(null);
     try {
-      await deleteTopology(topology.id);
-      setTopologies(prev => prev.filter(t => t.id !== topology.id));
+      await deleteTopology(topologyId);
+      setTopologies(prev => prev.filter(t => t.id !== topologyId));
     } catch (err) {
       console.error('Failed to delete topology:', err);
     }
   };
 
-  // Handle share/unshare (enterprise mode)
-  const handleShare = async (topology: SavedTopologyListItem) => {
-    closeContextMenu();
-    const newShared = !topology.shared;
+  const handleBulkDelete = async () => {
+    setTopologyContextMenu(null);
     try {
-      await shareTopology(topology.id, newShared);
+      const ids = Array.from(selectedItemIds);
+      const result = await bulkDeleteTopologies(ids);
+      setTopologies(prev => prev.filter(t => !selectedItemIds.has(t.id)));
+      clearItemSelection();
+
+      if (result.failed > 0) {
+        setError(`Deleted ${result.deleted} topologies, ${result.failed} failed`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete topologies');
+    }
+  };
+
+  const handleShareTopology = async (topo: SavedTopologyListItem) => {
+    setTopologyContextMenu(null);
+    const newShared = !topo.shared;
+    try {
+      await shareTopology(topo.id, newShared);
       setTopologies(prev =>
-        prev.map(t => t.id === topology.id ? { ...t, shared: newShared } : t)
+        prev.map(t => t.id === topo.id ? { ...t, shared: newShared } : t)
       );
     } catch (err) {
       console.error('Failed to share topology:', err);
     }
   };
 
+  // ── Folder Actions ──
+
+  const handleNewFolder = async () => {
+    try {
+      const newFolder = await createTopologyFolder('New Folder');
+      setFolders(prev => [...prev, newFolder]);
+      setRenamingFolderId(newFolder.id);
+      setRenameFolderValue(newFolder.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create folder');
+    }
+  };
+
+  const handleNewSubfolder = async (parentId: string) => {
+    try {
+      const newFolder = await createTopologyFolder('New Folder', parentId);
+      setFolders(prev => [...prev, newFolder]);
+      setExpandedFolders(prev => new Set([...prev, parentId]));
+      setRenamingFolderId(newFolder.id);
+      setRenameFolderValue(newFolder.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create folder');
+    }
+    setFolderContextMenu(null);
+  };
+
+  const handleRenameFolder = (folderId: string) => {
+    const folder = folders.find(f => f.id === folderId);
+    if (folder) {
+      setRenamingFolderId(folderId);
+      setRenameFolderValue(folder.name);
+    }
+    setFolderContextMenu(null);
+  };
+
+  const handleRenameFolderSubmit = async () => {
+    if (!renamingFolderId || !renameFolderValue.trim()) {
+      setRenamingFolderId(null);
+      return;
+    }
+    try {
+      const updated = await updateFolder(renamingFolderId, { name: renameFolderValue.trim() });
+      setFolders(prev => prev.map(f => f.id === updated.id ? updated : f));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rename folder');
+    }
+    setRenamingFolderId(null);
+  };
+
+  const handleDeleteFolder = async (folderId: string) => {
+    try {
+      await deleteFolder(folderId);
+      setFolders(prev => prev.filter(f => f.id !== folderId));
+      // Topologies in the folder will have folder_id set to null by the backend
+      await fetchData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete folder');
+    }
+    setFolderContextMenu(null);
+  };
+
+  // ── Drag and Drop ──
+
+  // Calculate all descendant folder IDs for cycle prevention
+  const getDescendantFolderIds = useCallback((folderId: string): Set<string> => {
+    const descendants = new Set<string>();
+    const collectDescendants = (parentId: string) => {
+      const children = childFoldersByParent.get(parentId) || [];
+      children.forEach(child => {
+        descendants.add(child.id);
+        collectDescendants(child.id);
+      });
+    };
+    collectDescendants(folderId);
+    return descendants;
+  }, [childFoldersByParent]);
+
+  // Pointer-based drag start (Tauri compatible)
+  const handlePointerDown = useCallback((e: React.PointerEvent, item: DragItem) => {
+    if (e.button !== 0) return;
+    setDragStartPos({ x: e.clientX, y: e.clientY });
+    setDraggedItem(item);
+  }, []);
+
+  // Handle drag end / cleanup
+  const handleDragEnd = useCallback(() => {
+    setDraggedItem(null);
+    setDropTarget(null);
+    setIsDragging(false);
+    setDragStartPos(null);
+    document.body.style.cursor = '';
+    document.body.removeAttribute('data-dragging');
+    if (autoExpandTimeout) {
+      clearTimeout(autoExpandTimeout);
+      setAutoExpandTimeout(null);
+    }
+  }, [autoExpandTimeout]);
+
+  // Find drop target from pointer position
+  const findDropTarget = useCallback((clientX: number, clientY: number): DropTarget | null => {
+    if (!listRef.current || !draggedItem) return null;
+
+    const folderHeaders = listRef.current.querySelectorAll('[data-folder-id]');
+    const topologyItems = listRef.current.querySelectorAll('[data-topology-id]');
+
+    // Check folders first
+    for (const el of folderHeaders) {
+      const rect = el.getBoundingClientRect();
+      if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+        const folderId = el.getAttribute('data-folder-id')!;
+
+        // Can't drop folder on itself or its descendants
+        if (draggedItem.type === 'folder') {
+          if (draggedItem.id === folderId) return null;
+          const descendants = getDescendantFolderIds(draggedItem.id);
+          if (descendants.has(folderId)) return null;
+        }
+
+        const relativeY = clientY - rect.top;
+        const height = rect.height;
+        let position: 'before' | 'after' | 'inside';
+        if (relativeY < height * 0.25) {
+          position = 'before';
+        } else if (relativeY > height * 0.75) {
+          position = 'after';
+        } else {
+          position = 'inside';
+        }
+
+        return { id: folderId, position, type: 'folder' };
+      }
+    }
+
+    // Check topologies
+    for (const el of topologyItems) {
+      const rect = el.getBoundingClientRect();
+      if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+        const topologyId = el.getAttribute('data-topology-id')!;
+
+        // Can't drop on itself
+        if (draggedItem.type === 'topology' && draggedItem.id === topologyId) return null;
+
+        const midY = rect.top + rect.height / 2;
+        const position = clientY < midY ? 'before' : 'after';
+
+        return { id: topologyId, position, type: 'topology' };
+      }
+    }
+
+    // Check if over root area
+    const listRect = listRef.current.getBoundingClientRect();
+    if (clientX >= listRect.left && clientX <= listRect.right && clientY >= listRect.top && clientY <= listRect.bottom) {
+      return { id: 'root', position: 'inside', type: 'root' };
+    }
+
+    return null;
+  }, [draggedItem, getDescendantFolderIds]);
+
+  // Handle pointer move during drag
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!draggedItem || !dragStartPos) return;
+
+    const dx = e.clientX - dragStartPos.x;
+    const dy = e.clientY - dragStartPos.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (!isDragging && distance > 5) {
+      setIsDragging(true);
+      document.body.style.cursor = 'grabbing';
+      document.body.setAttribute('data-dragging', 'true');
+    }
+
+    if (isDragging) {
+      // Update drag preview position
+      if (dragPreviewRef.current) {
+        dragPreviewRef.current.style.left = `${e.clientX + 10}px`;
+        dragPreviewRef.current.style.top = `${e.clientY + 10}px`;
+      }
+
+      // Find and set drop target
+      const target = findDropTarget(e.clientX, e.clientY);
+      setDropTarget(target);
+
+      // Auto-expand folders on hover
+      if (target?.type === 'folder' && target.position === 'inside') {
+        const folder = folders.find(f => f.id === target.id);
+        if (folder && !expandedFolders.has(target.id)) {
+          if (!autoExpandTimeout) {
+            const timeout = setTimeout(() => {
+              setExpandedFolders(prev => new Set([...prev, target.id]));
+              setAutoExpandTimeout(null);
+            }, 500);
+            setAutoExpandTimeout(timeout);
+          }
+        }
+      } else if (autoExpandTimeout) {
+        clearTimeout(autoExpandTimeout);
+        setAutoExpandTimeout(null);
+      }
+    }
+  }, [draggedItem, dragStartPos, isDragging, findDropTarget, folders, expandedFolders, autoExpandTimeout]);
+
+  // Calculate new sort order for dropped item
+  const calculateNewSortOrder = useCallback((
+    siblings: { sort_order: number }[],
+    targetIndex: number,
+    position: 'before' | 'after' | 'inside'
+  ): number => {
+    if (siblings.length === 0) return 1000;
+
+    if (position === 'inside') {
+      const maxOrder = Math.max(...siblings.map(s => s.sort_order));
+      return maxOrder + 1000;
+    }
+
+    const actualIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+
+    if (actualIndex === 0) {
+      return siblings[0].sort_order / 2;
+    } else if (actualIndex >= siblings.length) {
+      return siblings[siblings.length - 1].sort_order + 1000;
+    } else {
+      const before = siblings[actualIndex - 1].sort_order;
+      const after = siblings[actualIndex].sort_order;
+      return (before + after) / 2;
+    }
+  }, []);
+
+  // Execute the actual drop operation
+  const executeDrop = useCallback(async () => {
+    if (!draggedItem || !dropTarget) return;
+
+    try {
+      if (draggedItem.type === 'topology') {
+        // Check if dragged topology is part of multi-selection
+        const toposToMove = selectedItemIds.has(draggedItem.id) && selectedItemIds.size > 1
+          ? Array.from(selectedItemIds)
+          : [draggedItem.id];
+
+        let newFolderId: string | null = null;
+        let baseSortOrder: number;
+
+        if (dropTarget.type === 'folder') {
+          if (dropTarget.position === 'inside') {
+            newFolderId = dropTarget.id;
+            const folderTopos = topologies
+              .filter(t => t.folder_id === dropTarget.id)
+              .sort((a, b) => a.sort_order - b.sort_order);
+            baseSortOrder = calculateNewSortOrder(folderTopos, 0, 'inside');
+          } else {
+            const targetFolder = folders.find(f => f.id === dropTarget.id);
+            newFolderId = targetFolder?.parent_id || null;
+            const siblingFolders = folders
+              .filter(f => f.parent_id === newFolderId)
+              .sort((a, b) => a.sort_order - b.sort_order);
+            const targetIndex = siblingFolders.findIndex(f => f.id === dropTarget.id);
+            baseSortOrder = calculateNewSortOrder(siblingFolders, targetIndex, dropTarget.position);
+          }
+        } else if (dropTarget.type === 'topology') {
+          const targetTopo = topologies.find(t => t.id === dropTarget.id);
+          newFolderId = targetTopo?.folder_id || null;
+          const siblingsTopos = topologies
+            .filter(t => t.folder_id === newFolderId)
+            .sort((a, b) => a.sort_order - b.sort_order);
+          const targetIndex = siblingsTopos.findIndex(t => t.id === dropTarget.id);
+          baseSortOrder = calculateNewSortOrder(siblingsTopos, targetIndex, dropTarget.position);
+        } else {
+          newFolderId = null;
+          const rootTopos = topologies
+            .filter(t => t.folder_id === null)
+            .sort((a, b) => a.sort_order - b.sort_order);
+          baseSortOrder = calculateNewSortOrder(rootTopos, 0, 'inside');
+        }
+
+        // Move all selected topologies
+        for (let i = 0; i < toposToMove.length; i++) {
+          const topoId = toposToMove[i];
+          const newSortOrder = baseSortOrder + (i * 10);
+
+          setTopologies(prev => prev.map(t =>
+            t.id === topoId
+              ? { ...t, folder_id: newFolderId, sort_order: newSortOrder }
+              : t
+          ));
+          await moveTopology(topoId, { folder_id: newFolderId, sort_order: newSortOrder });
+        }
+
+      } else if (draggedItem.type === 'folder') {
+        // Check if dragged folder is part of multi-selection
+        const foldersToMove = selectedFolderIds.has(draggedItem.id) && selectedFolderIds.size > 1
+          ? Array.from(selectedFolderIds)
+          : [draggedItem.id];
+
+        let newParentId: string | null = null;
+        let baseSortOrder: number;
+
+        if (dropTarget.type === 'folder') {
+          if (dropTarget.position === 'inside') {
+            newParentId = dropTarget.id;
+            const childFolders = folders
+              .filter(f => f.parent_id === dropTarget.id)
+              .sort((a, b) => a.sort_order - b.sort_order);
+            baseSortOrder = calculateNewSortOrder(childFolders, 0, 'inside');
+          } else {
+            const targetFolder = folders.find(f => f.id === dropTarget.id);
+            newParentId = targetFolder?.parent_id || null;
+            const siblingFolders = folders
+              .filter(f => f.parent_id === newParentId && !foldersToMove.includes(f.id))
+              .sort((a, b) => a.sort_order - b.sort_order);
+            const targetIndex = siblingFolders.findIndex(f => f.id === dropTarget.id);
+            baseSortOrder = calculateNewSortOrder(siblingFolders, targetIndex, dropTarget.position);
+          }
+        } else {
+          newParentId = null;
+          const rootFoldersFiltered = folders
+            .filter(f => f.parent_id === null && !foldersToMove.includes(f.id))
+            .sort((a, b) => a.sort_order - b.sort_order);
+          baseSortOrder = calculateNewSortOrder(rootFoldersFiltered, 0, 'inside');
+        }
+
+        // Filter out any folders that would create circular references
+        const validFoldersToMove = foldersToMove.filter(folderId => {
+          if (folderId === newParentId) return false;
+          if (newParentId && getDescendantFolderIds(folderId).has(newParentId)) return false;
+          return true;
+        });
+
+        // Move all valid selected folders
+        for (let i = 0; i < validFoldersToMove.length; i++) {
+          const folderId = validFoldersToMove[i];
+          const newSortOrder = baseSortOrder + (i * 10);
+
+          setFolders(prev => prev.map(f =>
+            f.id === folderId
+              ? { ...f, parent_id: newParentId, sort_order: newSortOrder }
+              : f
+          ));
+          await moveFolder(folderId, { parent_id: newParentId, sort_order: newSortOrder });
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to move item');
+      await fetchData();
+    }
+  }, [draggedItem, dropTarget, topologies, folders, selectedItemIds, selectedFolderIds, calculateNewSortOrder, getDescendantFolderIds, fetchData]);
+
+  // Handle pointer up - execute drop
+  const handlePointerUp = useCallback(async () => {
+    if (!isDragging) {
+      setDragStartPos(null);
+      setDraggedItem(null);
+      return;
+    }
+
+    if (dropTarget) {
+      await executeDrop();
+    }
+
+    handleDragEnd();
+  }, [isDragging, dropTarget, handleDragEnd, executeDrop]);
+
+  // ── Render Helpers ──
+
+  const renderTopologyItem = (topo: SavedTopologyListItem, depth: number) => {
+    const selected = isItemSelected(topo.id);
+    const isBeingDragged = draggedItem?.type === 'topology' && draggedItem.id === topo.id;
+    const isDropTargetBefore = dropTarget?.type === 'topology' && dropTarget.id === topo.id && dropTarget.position === 'before';
+    const isDropTargetAfter = dropTarget?.type === 'topology' && dropTarget.id === topo.id && dropTarget.position === 'after';
+    const isRenaming = renamingTopologyId === topo.id;
+    const isActive = currentTopology?.id === topo.id;
+
+    return (
+      <div
+        data-topology-id={topo.id}
+        className={`topology-item ${selected ? 'topology-item-selected' : ''} ${isActive ? 'active' : ''} ${isBeingDragged ? 'topology-dragging' : ''} ${isDropTargetBefore ? 'topology-drag-over-top' : ''} ${isDropTargetAfter ? 'topology-drag-over-bottom' : ''}`}
+        onPointerDown={(e) => !isRenaming && handlePointerDown(e, { id: topo.id, type: 'topology' })}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onClick={(e) => {
+          if (isRenaming) return;
+          handleTopologyClick(e, topo.id);
+        }}
+        onDoubleClick={() => onOpenTopology?.(topo.id, topo.name)}
+        onContextMenu={e => handleTopologyContextMenu(e, topo.id)}
+        style={{ touchAction: 'none', paddingLeft: depth > 0 ? `${depth * 16 + 8}px` : undefined }}
+      >
+        <span className="topology-icon">&#128208;</span>
+        {isRenaming ? (
+          <input
+            ref={renameTopologyInputRef}
+            className="rename-input"
+            value={renameTopologyValue}
+            onChange={e => setRenameTopologyValue(e.target.value)}
+            onBlur={() => submitRenameTopology(topo.id)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') submitRenameTopology(topo.id);
+              if (e.key === 'Escape') setRenamingTopologyId(null);
+            }}
+            onClick={e => e.stopPropagation()}
+          />
+        ) : (
+          <>
+            <span className="topology-name">{topo.name}</span>
+            {isEnterprise && topo.shared && (
+              <span className="topology-shared-badge" title="Published to team">shared</span>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderFolderItem = (folder: Folder, depth: number) => {
+    const isExpanded = expandedFolders.has(folder.id) || !!searchLower;
+    const folderTopos = topologiesByFolder.get(folder.id) || [];
+    const childFolders = childFoldersByParent.get(folder.id) || [];
+    const isRenaming = renamingFolderId === folder.id;
+
+    const matchingCount = searchLower
+      ? (folderMatchCounts.get(folder.id) || 0)
+      : folderTopos.length + childFolders.length;
+
+    const isBeingDragged = draggedItem?.type === 'folder' && draggedItem.id === folder.id;
+    const isDropTargetBefore = dropTarget?.type === 'folder' && dropTarget.id === folder.id && dropTarget.position === 'before';
+    const isDropTargetAfter = dropTarget?.type === 'folder' && dropTarget.id === folder.id && dropTarget.position === 'after';
+    const isDropTargetInside = dropTarget?.type === 'folder' && dropTarget.id === folder.id && dropTarget.position === 'inside';
+    const isInvalidDropTarget = draggedItem?.type === 'folder' && (
+      draggedItem.id === folder.id ||
+      getDescendantFolderIds(draggedItem.id).has(folder.id)
+    );
+    const folderSelected = isFolderSelected(folder.id);
+
+    return (
+      <div
+        data-folder-id={folder.id}
+        className={`topology-folder-header ${folderSelected ? 'topology-folder-selected' : ''} ${isBeingDragged ? 'topology-dragging' : ''} ${isDropTargetBefore ? 'topology-drag-over-top' : ''} ${isDropTargetAfter ? 'topology-drag-over-bottom' : ''} ${isDropTargetInside ? 'topology-drag-over-inside' : ''} ${isInvalidDropTarget && draggedItem ? 'drop-invalid' : ''}`}
+        onPointerDown={(e) => !isRenaming && handlePointerDown(e, { id: folder.id, type: 'folder' })}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        style={{ touchAction: 'none', paddingLeft: depth > 0 ? `${depth * 16}px` : undefined }}
+        onClick={(e) => {
+          if (isRenaming) return;
+          const isCtrlCmd = e.metaKey || e.ctrlKey;
+          const isShift = e.shiftKey;
+
+          e.preventDefault();
+
+          if (isShift) {
+            rangeFolderSelect(folder.id, allFolderIds);
+          } else if (isCtrlCmd) {
+            toggleFolderSelection(folder.id, true);
+          } else {
+            toggleFolderSelection(folder.id, false);
+          }
+        }}
+        onDoubleClick={() => {
+          toggleFolder(folder.id);
+        }}
+        onContextMenu={(e) => handleFolderContextMenu(e, folder.id)}
+      >
+        <span
+          className="topology-folder-chevron"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFolder(folder.id);
+          }}
+        >
+          {isExpanded ? Icons.chevronDown : Icons.chevronRight}
+        </span>
+        <span
+          className="topology-folder-icon"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFolder(folder.id);
+          }}
+        >
+          {isExpanded ? Icons.folderOpen : Icons.folder}
+        </span>
+        {isRenaming ? (
+          <input
+            ref={renameInputRef}
+            className="topology-folder-rename-input"
+            value={renameFolderValue}
+            onChange={(e) => setRenameFolderValue(e.target.value)}
+            onBlur={handleRenameFolderSubmit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleRenameFolderSubmit();
+              if (e.key === 'Escape') setRenamingFolderId(null);
+            }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <span className="topology-folder-name">{folder.name}</span>
+        )}
+        <span className="topology-folder-count">{matchingCount}</span>
+      </div>
+    );
+  };
+
+  // ── Render ──
+
   return (
-    <div className="topology-panel" data-testid="topology-panel" onClick={closeContextMenu}>
+    <div className="topology-panel" data-testid="topology-panel">
       {/* Toolbar */}
       <div className="topology-panel-toolbar">
         <button
@@ -202,16 +1110,30 @@ export default function TopologyPanel({
         </button>
         <button
           className="topology-panel-btn icon-only"
-          onClick={loadTopologies}
+          onClick={handleNewFolder}
+          title="New Folder"
+        >
+          {Icons.folderPlus}
+        </button>
+        <button
+          className="topology-panel-btn icon-only"
+          onClick={fetchData}
           title="Refresh"
           disabled={loading}
         >
           {Icons.refresh}
         </button>
+        <button
+          className={`topology-panel-btn icon-only ${sortOrder === 'reverse' ? 'active' : ''}`}
+          onClick={toggleSortOrder}
+          title={sortOrder === 'default' ? 'Sort: Folders first (click to show topologies first)' : 'Sort: Topologies first (click to show folders first)'}
+        >
+          {sortOrder === 'default' ? Icons.sortAsc : Icons.sortDesc}
+        </button>
       </div>
 
       {/* Search */}
-      <div className="topology-search">
+      <div className="topology-panel-search">
         <span className="topology-search-icon">{Icons.search}</span>
         <input
           type="text"
@@ -231,55 +1153,81 @@ export default function TopologyPanel({
         )}
       </div>
 
-      {/* Topology List */}
-      <div className="topology-list">
-        {loading ? (
-          <div className="topology-panel-status">Loading...</div>
-        ) : filteredTopologies.length === 0 ? (
-          <div className="topology-panel-empty">
-            {searchQuery ? `No topologies match "${searchQuery}"` : 'No saved topologies'}
-          </div>
-        ) : (
-          filteredTopologies.map(topo => (
-            <div
-              key={topo.id}
-              className={`topology-item ${currentTopology?.id === topo.id ? 'active' : ''}`}
-              onClick={() => onOpenTopology?.(topo.id, topo.name)}
-              onContextMenu={e => handleContextMenu(e, topo)}
-            >
-              <span className="topology-icon">&#128208;</span>
-              {renaming === topo.id ? (
-                <input
-                  className="rename-input"
-                  value={renameValue}
-                  onChange={e => setRenameValue(e.target.value)}
-                  onBlur={() => submitRename(topo.id)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') submitRename(topo.id);
-                    if (e.key === 'Escape') setRenaming(null);
-                  }}
-                  autoFocus
-                  onClick={e => e.stopPropagation()}
-                />
-              ) : (
-                <>
-                  <span className="topology-name">{topo.name}</span>
-                  {isEnterprise && topo.shared && (
-                    <span className="topology-shared-badge" title="Published to team">shared</span>
-                  )}
-                </>
-              )}
-            </div>
-          ))
-        )}
+      {/* Loading / Error States */}
+      {loading && (
+        <div className="topology-panel-status">Loading...</div>
+      )}
 
-        {/* Search results count */}
-        {searchQuery && filteredTopologies.length > 0 && (
-          <div className="topology-search-results">
-            {filteredTopologies.length} topology{filteredTopologies.length !== 1 ? 'ies' : ''} found
-          </div>
-        )}
-      </div>
+      {error && (
+        <div className="topology-panel-error">
+          {error}
+          <button onClick={fetchData}>Retry</button>
+        </div>
+      )}
+
+      {/* Topology List (Virtualized) */}
+      {!loading && !error && (
+        <div
+          ref={listRef}
+          className={`topology-list-container ${dropTarget?.type === 'root' ? 'topology-drag-over-inside' : ''}`}
+        >
+          {flatItems.length > 0 && (
+            <div
+              style={{
+                height: `${virtualizer.getTotalSize()}px`,
+                width: '100%',
+                position: 'relative',
+              }}
+            >
+              {virtualizer.getVirtualItems().map(virtualRow => {
+                const item = flatItems[virtualRow.index];
+                return (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      transform: `translateY(${virtualRow.start}px)`,
+                    }}
+                  >
+                    {item.type === 'folder'
+                      ? renderFolderItem(item.folder, item.depth)
+                      : renderTopologyItem(item.topology, item.depth)
+                    }
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Search results info */}
+          {searchLower && filteredTopologies.length > 0 && (
+            <div className="topology-search-results">
+              {filteredTopologies.length} topology{filteredTopologies.length !== 1 ? 'ies' : ''} found
+            </div>
+          )}
+
+          {/* No search results */}
+          {searchLower && filteredTopologies.length === 0 && (
+            <div className="topology-panel-empty">
+              No topologies match "{searchQuery}"
+            </div>
+          )}
+
+          {/* Empty state */}
+          {!searchLower && topologies.length === 0 && folders.length === 0 && (
+            <div className="topology-panel-empty">
+              No saved topologies.
+              <br />
+              Click + to create one.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Team Topologies (enterprise mode) */}
       {isEnterprise && filteredTeamTopologies.length > 0 && (
@@ -331,27 +1279,109 @@ export default function TopologyPanel({
         </div>
       )}
 
-      {/* Context Menu */}
-      {contextMenu && (
+      {/* Topology Context Menu */}
+      {topologyContextMenu && (() => {
+        const topo = topologies.find(t => t.id === topologyContextMenu.topologyId);
+        if (!topo) return null;
+        return (
+          <div
+            className="topology-context-menu"
+            style={{ left: topologyContextMenu.x, top: topologyContextMenu.y }}
+          >
+            {/* Bulk actions when multiple topologies selected */}
+            {itemSelectionCount > 1 && (
+              <>
+                <button
+                  className="topology-context-menu-item topology-context-menu-danger"
+                  onClick={handleBulkDelete}
+                >
+                  {Icons.trash}
+                  <span>Delete Selected ({itemSelectionCount})</span>
+                </button>
+                <div className="topology-context-menu-divider" />
+              </>
+            )}
+            <button
+              className="topology-context-menu-item"
+              onClick={() => handleRenameTopology(topo)}
+            >
+              {Icons.edit}
+              <span>Rename</span>
+            </button>
+            {isEnterprise && (
+              <button
+                className="topology-context-menu-item"
+                onClick={() => handleShareTopology(topo)}
+              >
+                <span>{topo.shared ? 'Unpublish' : 'Publish to Team'}</span>
+              </button>
+            )}
+            <div className="topology-context-menu-divider" />
+            <button
+              className="topology-context-menu-item topology-context-menu-danger"
+              onClick={() => handleDeleteTopology(topo.id)}
+            >
+              {Icons.trash}
+              <span>Delete</span>
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* Folder Context Menu */}
+      {folderContextMenu && (
         <div
-          className="context-menu"
-          style={{ top: contextMenu.position.y, left: contextMenu.position.x }}
+          className="topology-context-menu"
+          style={{ left: folderContextMenu.x, top: folderContextMenu.y }}
         >
-          <div className="context-menu-item" onClick={() => handleRename(contextMenu.topology)}>
-            Rename
-          </div>
-          {isEnterprise && (
-            <div className="context-menu-item" onClick={() => handleShare(contextMenu.topology)}>
-              {contextMenu.topology.shared ? 'Unpublish' : 'Publish to Team'}
-            </div>
-          )}
-          <div className="context-menu-item danger" onClick={() => handleDelete(contextMenu.topology)}>
-            Delete
-          </div>
+          <button
+            className="topology-context-menu-item"
+            onClick={() => handleNewSubfolder(folderContextMenu.folderId)}
+          >
+            {Icons.folderPlus}
+            <span>New Subfolder</span>
+          </button>
+          <div className="topology-context-menu-divider" />
+          <button
+            className="topology-context-menu-item"
+            onClick={() => handleRenameFolder(folderContextMenu.folderId)}
+          >
+            {Icons.edit}
+            <span>Rename Folder</span>
+          </button>
+          <div className="topology-context-menu-divider" />
+          <button
+            className="topology-context-menu-item"
+            onClick={() => {
+              expandAllFolders();
+              setFolderContextMenu(null);
+            }}
+          >
+            {Icons.expandAll}
+            <span>Expand All Folders</span>
+          </button>
+          <button
+            className="topology-context-menu-item"
+            onClick={() => {
+              collapseAllFolders();
+              setFolderContextMenu(null);
+            }}
+          >
+            {Icons.collapseAll}
+            <span>Collapse All Folders</span>
+          </button>
+          <div className="topology-context-menu-divider" />
+          <button
+            className="topology-context-menu-item topology-context-menu-danger"
+            onClick={() => handleDeleteFolder(folderContextMenu.folderId)}
+          >
+            {Icons.trash}
+            <span>Delete Folder</span>
+          </button>
         </div>
       )}
 
-      {/* New Topology Dialog — picks sessions then opens discovery */}
+      {/* New Topology Dialog -- picks sessions then opens discovery */}
       <NewTopologyDialog
         isOpen={newDialogOpen}
         onClose={() => setNewDialogOpen(false)}
@@ -371,6 +1401,39 @@ export default function TopologyPanel({
           setTracerouteDialogOpen(false);
         }}
       />
+
+      {/* Drag Preview */}
+      {isDragging && draggedItem && (
+        <div
+          ref={dragPreviewRef}
+          className="topology-drag-preview"
+          style={{
+            position: 'fixed',
+            pointerEvents: 'none',
+            zIndex: 9999,
+          }}
+        >
+          {draggedItem.type === 'folder' ? (
+            <div className="drag-preview-folder">
+              {Icons.folder}
+              <span>{folders.find(f => f.id === draggedItem.id)?.name || 'Folder'}</span>
+            </div>
+          ) : (
+            <div className="drag-preview-topology">
+              <span>&#128208; {topologies.find(t => t.id === draggedItem.id)?.name || 'Topology'}</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+// Wrapper component that provides the ItemSelectionProvider context
+export default function TopologyPanel(props: TopologyPanelProps) {
+  return (
+    <ItemSelectionProvider>
+      <TopologyPanelContent {...props} />
+    </ItemSelectionProvider>
   );
 }

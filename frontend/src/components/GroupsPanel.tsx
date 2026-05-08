@@ -177,6 +177,7 @@ export default function GroupsPanel(props: GroupsPanelProps) {
             return (
               <div
                 key={group.id}
+                data-group-id={group.id}
                 className={`groups-row ${isLive ? 'live' : ''} ${isDropTarget ? 'drop-target' : ''}`}
                 onClick={() => onLaunchGroup(group)}
                 onContextMenu={(e) => openContextMenu(e, group)}

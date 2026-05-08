@@ -1,12 +1,13 @@
 -- NetStacks Database Schema
 -- Version: 1
 
--- Folders for session organization
+-- Folders for organizing items (sessions, topologies, etc.)
 CREATE TABLE IF NOT EXISTS folders (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     parent_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
     sort_order INTEGER DEFAULT 0,
+    scope TEXT NOT NULL DEFAULT 'session',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -338,6 +339,8 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_change_id ON snapshots(change_id);
 CREATE TABLE IF NOT EXISTS topologies (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
+    sort_order REAL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

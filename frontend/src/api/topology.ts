@@ -11,6 +11,8 @@ export interface SavedTopologyListItem {
   name: string;
   shared?: boolean;
   owner_id?: string;
+  folder_id: string | null;
+  sort_order: number;
   created_at: string;
   updated_at: string;
 }
@@ -214,6 +216,7 @@ export async function updateDevice(
   updates: Partial<{
     name: string;
     type: string;
+    device_type: string;
     status: string;
     site: string;
     role: string;
@@ -225,6 +228,8 @@ export async function updateDevice(
     uptime: string;
     primary_ip: string;
     notes: string;
+    profile_id: string;
+    snmp_profile_id: string;
   }>
 ): Promise<void> {
   await getClient().http.put(`/topologies/${topologyId}/devices/${deviceId}/details`, updates);
@@ -699,4 +704,31 @@ function mapBackendDeviceType(backendType: string): DeviceType {
     'iot': 'iot',
   };
   return typeMap[backendType] || 'unknown';
+}
+
+// ── Topology Folder Operations ──
+
+import type { Folder } from './sessions';
+
+export async function listTopologyFolders(): Promise<Folder[]> {
+  const { data } = await getClient().http.get('/folders?scope=topology');
+  return data;
+}
+
+export async function createTopologyFolder(name: string, parentId?: string): Promise<Folder> {
+  const { data } = await getClient().http.post('/folders', {
+    name,
+    parent_id: parentId || null,
+    scope: 'topology',
+  });
+  return data;
+}
+
+export async function moveTopology(id: string, update: { folder_id: string | null; sort_order: number }): Promise<void> {
+  await getClient().http.put(`/topologies/${id}/move`, update);
+}
+
+export async function bulkDeleteTopologies(ids: string[]): Promise<{ deleted: number; failed: number }> {
+  const { data } = await getClient().http.post('/topologies/bulk-delete', { ids });
+  return data;
 }

@@ -116,6 +116,7 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), DbError> {
     migrate_scripts_provenance(pool).await?;
     migrate_credential_profile_jump_host(pool).await?;
     migrate_jump_session_id_columns(pool).await?;
+    migrate_topology_folders(pool).await?;
     seed_default_settings(pool).await?;
 
     Ok(())
@@ -174,6 +175,34 @@ async fn migrate_credential_profile_jump_host(pool: &SqlitePool) -> Result<(), D
         .execute(pool)
         .await
         .map_err(|e| DbError::Migration(format!("Failed to add credential_profiles.jump_host_id: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Add `scope` to folders, `folder_id` and `sort_order` to topologies for
+/// folder-based organization (matching sessions panel pattern).
+async fn migrate_topology_folders(pool: &SqlitePool) -> Result<(), DbError> {
+    if !column_exists(pool, "folders", "scope").await? {
+        sqlx::query("ALTER TABLE folders ADD COLUMN scope TEXT NOT NULL DEFAULT 'session'")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to add folders.scope: {}", e)))?;
+    }
+    if !column_exists(pool, "topologies", "folder_id").await? {
+        sqlx::query("ALTER TABLE topologies ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to add topologies.folder_id: {}", e)))?;
+    }
+    if !column_exists(pool, "topologies", "sort_order").await? {
+        sqlx::query("ALTER TABLE topologies ADD COLUMN sort_order REAL DEFAULT 0")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to add topologies.sort_order: {}", e)))?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_topologies_folder ON topologies(folder_id)")
+            .execute(pool)
+            .await
+            .map_err(|e| DbError::Migration(format!("Failed to create idx_topologies_folder: {}", e)))?;
     }
     Ok(())
 }

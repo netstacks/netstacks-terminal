@@ -42,12 +42,18 @@ impl Default for ConnectionMode {
     }
 }
 
+fn default_folder_scope() -> String {
+    "session".to_string()
+}
+
 /// Folder for organizing sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Folder {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
+    #[serde(default = "default_folder_scope")]
+    pub scope: String,
     pub sort_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -315,6 +321,7 @@ pub struct UpdateSession {
 pub struct NewFolder {
     pub name: String,
     pub parent_id: Option<String>,
+    pub scope: Option<String>,
 }
 
 /// Request to update a folder
@@ -1638,8 +1645,30 @@ impl Snapshot {
 pub struct SavedTopology {
     pub id: String,
     pub name: String,
+    pub folder_id: Option<String>,
+    pub sort_order: f64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Request to move a topology to a folder and/or reorder
+#[derive(Debug, Deserialize)]
+pub struct MoveTopologyRequest {
+    pub folder_id: Option<String>,
+    pub sort_order: f64,
+}
+
+/// Request to bulk delete topologies
+#[derive(Debug, Deserialize)]
+pub struct BulkDeleteTopologiesRequest {
+    pub ids: Vec<String>,
+}
+
+/// Response from bulk delete topologies
+#[derive(Debug, Serialize)]
+pub struct BulkDeleteTopologiesResponse {
+    pub deleted: i32,
+    pub failed: i32,
 }
 
 /// Request to create a new topology
@@ -1843,6 +1872,10 @@ pub struct UpdateTopologyDeviceDetails {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snmp_profile_id: Option<String>,
 }
 
 /// Full topology response with devices and connections
@@ -1850,6 +1883,8 @@ pub struct UpdateTopologyDeviceDetails {
 pub struct TopologyWithDetails {
     pub id: String,
     pub name: String,
+    pub folder_id: Option<String>,
+    pub sort_order: f64,
     pub devices: Vec<TopologyDevice>,
     pub connections: Vec<TopologyConnection>,
     pub created_at: DateTime<Utc>,
