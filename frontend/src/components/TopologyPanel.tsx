@@ -223,7 +223,6 @@ function TopologyPanelContent({
     toggleFolderSelection,
     rangeFolderSelect,
     isFolderSelected,
-    clearAllSelections,
   } = useItemSelection();
 
   // ── Data Fetching ──
