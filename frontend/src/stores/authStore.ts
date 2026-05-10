@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 import type { AuthState, User } from '../types/auth';
 import * as authApi from '../api/auth';
 import { setAuthStateGetter } from '../api/controllerClient';
@@ -10,11 +9,10 @@ import { useCapabilitiesStore } from './capabilitiesStore';
  * Auth store for Enterprise mode authentication.
  * Manages JWT tokens, user info, and auth state.
  *
- * Uses Zustand persist middleware to save refresh token to localStorage.
- * Access token is kept in memory only (more secure).
+ * All tokens are kept in memory only — user must re-authenticate
+ * when the application stops or reloads.
  */
 export const useAuthStore = create<AuthState>()(
-  persist(
     (set, get) => ({
       // Initial state
       accessToken: null,
@@ -280,16 +278,7 @@ export const useAuthStore = create<AuthState>()(
       setCertInfo: (certInfo) => {
         set({ certInfo });
       },
-    }),
-    {
-      name: 'netstacks-terminal-auth',
-      // Only persist refresh token to localStorage
-      // Access token stays in memory for security
-      partialize: (state) => ({
-        refreshToken: state.refreshToken,
-      }),
-    }
-  )
+    })
 );
 
 /**
