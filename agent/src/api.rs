@@ -4647,6 +4647,103 @@ pub struct AddDeviceRequest {
     pub snmp_profile_id: Option<String>,
 }
 
+// === Topology Folder Endpoints ===
+
+/// List topology folders
+pub async fn list_topology_folders(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Folder>>, ApiError> {
+    let folders = state.provider.list_folders(Some("topology")).await?;
+    Ok(Json(folders))
+}
+
+/// Get a single topology folder
+pub async fn get_topology_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Folder>, ApiError> {
+    let folder = state.provider.get_folder(&id).await?;
+    Ok(Json(folder))
+}
+
+/// Create a new topology folder
+pub async fn create_topology_folder(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<NewFolder>,
+) -> Result<(StatusCode, Json<Folder>), ApiError> {
+    let folder = state.provider.create_folder(NewFolder {
+        name: req.name,
+        parent_id: req.parent_id,
+        scope: Some("topology".into()),
+    }).await?;
+    Ok((StatusCode::CREATED, Json(folder)))
+}
+
+/// Update a topology folder
+pub async fn update_topology_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateFolder>,
+) -> Result<Json<Folder>, ApiError> {
+    let folder = state.provider.update_folder(&id, update).await?;
+    Ok(Json(folder))
+}
+
+/// Delete a topology folder
+pub async fn delete_topology_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.delete_folder(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Move a topology folder (change parent and/or sort order)
+pub async fn move_topology_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<MoveFolderRequest>,
+) -> Result<Json<Folder>, ApiError> {
+    if let Some(ref parent_id) = req.parent_id {
+        if parent_id == &id {
+            return Err(ApiError {
+                error: "Cannot move folder into itself".to_string(),
+                code: "VALIDATION".to_string(),
+            });
+        }
+
+        let all_folders = state.provider.list_folders(Some("topology")).await?;
+        let mut descendants = std::collections::HashSet::new();
+        fn collect_descendants(
+            folder_id: &str,
+            folders: &[Folder],
+            descendants: &mut std::collections::HashSet<String>,
+        ) {
+            for folder in folders {
+                if folder.parent_id.as_ref().map(|p| p.as_str()) == Some(folder_id) {
+                    descendants.insert(folder.id.clone());
+                    collect_descendants(&folder.id, folders, descendants);
+                }
+            }
+        }
+        collect_descendants(&id, &all_folders, &mut descendants);
+        if descendants.contains(parent_id) {
+            return Err(ApiError {
+                error: "Cannot move folder into its own descendant".to_string(),
+                code: "VALIDATION".to_string(),
+            });
+        }
+    }
+
+    let update = UpdateFolder {
+        parent_id: Some(req.parent_id),
+        sort_order: Some(req.sort_order as i32),
+        ..Default::default()
+    };
+    let folder = state.provider.update_folder(&id, update).await?;
+    Ok(Json(folder))
+}
+
 /// List all topologies
 pub async fn list_topologies(
     State(state): State<Arc<AppState>>,

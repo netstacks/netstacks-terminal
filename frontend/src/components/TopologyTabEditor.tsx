@@ -1100,7 +1100,7 @@ export default function TopologyTabEditor({
     try {
       await saveTopologyToDocs(topologyId, annotations);
       // Show success feedback
-      alert(`Topology "${topology.name}" saved to Docs (Backups)`);
+      alert(`Topology "${topology.name}" exported to Docs (Backups)`);
     } catch (err) {
       console.error('Failed to save topology to Docs:', err);
       alert(`Failed to save to Docs: ${err instanceof Error ? err.message : 'Unknown error'}`);

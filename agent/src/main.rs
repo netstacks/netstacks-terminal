@@ -835,6 +835,14 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         // Saved Topologies (Phase 20.1)
         .route("/topologies", get(api::list_topologies).post(api::create_topology))
         .route("/topologies/bulk-delete", post(api::bulk_delete_topologies))
+        .route("/topologies/folders", get(api::list_topology_folders).post(api::create_topology_folder))
+        .route(
+            "/topologies/folders/:id",
+            get(api::get_topology_folder)
+                .put(api::update_topology_folder)
+                .delete(api::delete_topology_folder),
+        )
+        .route("/topologies/folders/:id/move", put(api::move_topology_folder))
         .route(
             "/topologies/:id",
             get(api::get_topology)

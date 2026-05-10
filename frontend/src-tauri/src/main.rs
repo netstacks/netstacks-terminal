@@ -47,6 +47,292 @@ fn lan_prompt_flag_path() -> std::path::PathBuf {
     std::path::PathBuf::from(base).join("lan_prompt_shown.txt")
 }
 
+// ---------------------------------------------------------------------------
+// Controller TLS certificate trust (enterprise mode)
+// ---------------------------------------------------------------------------
+
+fn app_data_dir() -> std::path::PathBuf {
+    const APP_ID: &str = "com.netstacks.terminal";
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME")
+        .map(|h| format!("{}/Library/Application Support/{}", h, APP_ID))
+        .unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let base = std::env::var("HOME")
+        .map(|h| format!("{}/.local/share/{}", h, APP_ID))
+        .unwrap_or_default();
+    #[cfg(target_os = "windows")]
+    let base = std::env::var("APPDATA")
+        .map(|a| format!("{}\\{}", a, APP_ID))
+        .unwrap_or_default();
+    std::path::PathBuf::from(base)
+}
+
+fn read_controller_url() -> Option<String> {
+    let path = app_data_dir().join("app-config.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("controllerUrl")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_end_matches('/').to_string())
+}
+
+fn cert_pin_path() -> std::path::PathBuf {
+    app_data_dir().join("controller-cert.json")
+}
+
+/// Strip SHA256: prefix, remove colons, uppercase — canonical form for comparison.
+fn normalize_fingerprint(fp: &str) -> String {
+    let s = fp.trim();
+    let s = s.strip_prefix("SHA256:").or_else(|| s.strip_prefix("sha256:")).unwrap_or(s);
+    s.replace(':', "").to_uppercase()
+}
+
+fn read_cert_pin(controller_url: &str) -> Option<String> {
+    let content = std::fs::read_to_string(cert_pin_path()).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get(controller_url)
+        .and_then(|v| v.get("fingerprint"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn save_cert_pin(controller_url: &str, raw_fingerprint: &str) {
+    let normalized = normalize_fingerprint(raw_fingerprint);
+    let mut json = std::fs::read_to_string(cert_pin_path())
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    json[controller_url] = serde_json::json!({ "fingerprint": normalized });
+    if let Some(parent) = cert_pin_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        cert_pin_path(),
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
+}
+
+/// Extract cert + fingerprint from a TLS handshake via the openssl CLI.
+/// Returns (pem, raw_fingerprint) where fingerprint is "AA:BB:CC:..." (no prefix).
+fn extract_cert_via_openssl(host: &str, port: u16) -> Result<(String, String), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let connect_arg = format!("{}:{}", host, port);
+    let output = Command::new("openssl")
+        .args(["s_client", "-showcerts", "-connect", &connect_arg, "-servername", host])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("openssl not available: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let begin = "-----BEGIN CERTIFICATE-----";
+    let end_marker = "-----END CERTIFICATE-----";
+
+    // Take the LAST cert in the chain (root CA).
+    let mut last_pem: Option<&str> = None;
+    let mut pos = 0usize;
+    while let Some(start) = stdout[pos..].find(begin) {
+        let abs_start = pos + start;
+        if let Some(end) = stdout[abs_start..].find(end_marker) {
+            let abs_end = abs_start + end + end_marker.len();
+            last_pem = Some(&stdout[abs_start..abs_end]);
+            pos = abs_end;
+        } else {
+            break;
+        }
+    }
+    let pem = last_pem
+        .ok_or("Could not extract certificate from TLS handshake")?;
+
+    // Compute SHA-256 fingerprint
+    let mut fp_cmd = Command::new("openssl")
+        .args(["x509", "-fingerprint", "-sha256", "-noout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("openssl fingerprint failed: {}", e))?;
+    fp_cmd.stdin.as_mut()
+        .ok_or("pipe error")?
+        .write_all(pem.as_bytes())
+        .map_err(|e| format!("write error: {}", e))?;
+    drop(fp_cmd.stdin.take());
+    let fp_output = fp_cmd.wait_with_output()
+        .map_err(|e| format!("openssl wait error: {}", e))?;
+
+    // Output is "SHA256 Fingerprint=AA:BB:CC:...\n" — extract after '='
+    let fp_line = String::from_utf8_lossy(&fp_output.stdout);
+    let raw_fp = fp_line.trim()
+        .split('=')
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if raw_fp.is_empty() {
+        return Err("Could not compute certificate fingerprint".into());
+    }
+
+    Ok((pem.to_string(), raw_fp))
+}
+
+fn install_cert_pem_sync(pem: &str) -> Result<(), String> {
+    use std::io::Write;
+    let pem = pem.trim();
+    if !pem.starts_with("-----BEGIN CERTIFICATE-----") {
+        return Err("Not a valid PEM certificate".into());
+    }
+    let dir = std::env::temp_dir().join("netstacks-cacert");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("install.pem");
+    std::fs::File::create(&path)
+        .and_then(|mut f| f.write_all(pem.as_bytes()))
+        .map_err(|e| format!("write error: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    let output = std::process::Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-d",
+            "-r", "trustRoot",
+            "-p", "ssl",
+            "-k", &format!("{}/Library/Keychains/login.keychain-db",
+                std::env::var("HOME").unwrap_or_default()),
+            path.to_str().unwrap_or_default(),
+        ])
+        .output()
+        .map_err(|e| format!("security command failed: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let output = std::process::Command::new("certutil")
+        .args(["-user", "-addstore", "Root", path.to_str().unwrap_or_default()])
+        .output()
+        .map_err(|e| format!("certutil failed: {}", e))?;
+
+    #[cfg(target_os = "linux")]
+    let output = {
+        let ca_dir = format!("{}/.local/share/ca-certificates", std::env::var("HOME").unwrap_or_default());
+        let _ = std::fs::create_dir_all(&ca_dir);
+        let _ = std::fs::copy(&path, format!("{}/netstacks-controller-ca.crt", ca_dir));
+        std::process::Command::new("update-ca-certificates")
+            .output()
+            .unwrap_or_else(|_| std::process::Command::new("true").output().unwrap())
+    };
+
+    let _ = std::fs::remove_file(&path);
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("Install failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+fn check_and_install_controller_cert(app: &tauri::AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let controller_url = match read_controller_url() {
+        Some(url) if url.starts_with("https://") => url,
+        _ => return,
+    };
+
+    let parsed = match reqwest::Url::parse(&controller_url) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let host = match parsed.host_str() {
+        Some(h) => h.to_string(),
+        None => return,
+    };
+    let port = parsed.port().unwrap_or(443);
+
+    // Quick check: is TLS already trusted? (e.g. dev script already installed the cert)
+    let already_trusted = std::process::Command::new("curl")
+        .args(["-sf", "--max-time", "3", &format!("{}/health", controller_url)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if already_trusted {
+        println!("[cert] Controller TLS already trusted");
+        return;
+    }
+
+    let (pem, raw_fp) = match extract_cert_via_openssl(&host, port) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[cert] Cannot reach controller: {}", e);
+            return;
+        }
+    };
+
+    let display_fp = format!("SHA256:{}", raw_fp);
+
+    if let Some(stored) = read_cert_pin(&controller_url) {
+        if normalize_fingerprint(&stored) == normalize_fingerprint(&raw_fp) {
+            println!("[cert] Controller certificate unchanged");
+            return;
+        }
+        eprintln!("[cert] Controller certificate CHANGED");
+        app.dialog()
+            .message(format!(
+                "The Controller's TLS certificate has changed!\n\n\
+                 Controller: {}\n\n\
+                 Previous: {}\n\
+                 Current:  {}\n\n\
+                 This could indicate a security issue.\n\
+                 Contact your administrator.",
+                controller_url,
+                format!("SHA256:{}", stored),
+                display_fp,
+            ))
+            .title("Certificate Changed")
+            .kind(MessageDialogKind::Error)
+            .buttons(MessageDialogButtons::Ok)
+            .blocking_show();
+        return;
+    }
+
+    let accepted = app.dialog()
+        .message(format!(
+            "The Controller at {} uses a self-signed certificate.\n\n\
+             Fingerprint:\n{}\n\n\
+             Verify this matches your Controller's admin settings.\n\
+             Trust this certificate?",
+            controller_url, display_fp,
+        ))
+        .title("Untrusted Controller Certificate")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancel)
+        .blocking_show();
+
+    if !accepted {
+        println!("[cert] User declined certificate");
+        return;
+    }
+
+    match install_cert_pem_sync(&pem) {
+        Ok(()) => {
+            save_cert_pin(&controller_url, &raw_fp);
+            println!("[cert] Certificate installed and pinned");
+        }
+        Err(e) => {
+            eprintln!("[cert] Install failed: {}", e);
+            app.dialog()
+                .message(format!("Failed to install certificate:\n\n{}", e))
+                .title("Certificate Install Failed")
+                .kind(MessageDialogKind::Error)
+                .buttons(MessageDialogButtons::Ok)
+                .blocking_show();
+        }
+    }
+}
+
 /// Holds the sidecar child process so we can kill it when the app exits.
 struct SidecarChild(Mutex<Option<CommandChild>>);
 
@@ -411,6 +697,7 @@ fn main() {
             // trigger the OS prompt. No-op on other platforms and on
             // subsequent launches.
             maybe_prompt_for_lan_access(app.handle());
+            check_and_install_controller_cert(app.handle());
 
             Ok(())
         })

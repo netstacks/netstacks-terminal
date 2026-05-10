@@ -2658,11 +2658,17 @@ def main(command: str = "show version"):
         title: `${tab.title} (copy)`,
         sessionId: tab.sessionId,
         profileId: tab.profileId,
+        protocol: tab.protocol,
         cliFlavor: tab.cliFlavor,
         terminalTheme: tab.terminalTheme,
         fontSize: tab.fontSize,
         fontFamily: tab.fontFamily,
         color: tab.color,
+        isJumpbox: tab.isJumpbox,
+        enterpriseCredentialId: tab.enterpriseCredentialId,
+        enterpriseSessionDefinitionId: tab.enterpriseSessionDefinitionId,
+        enterpriseTargetHost: tab.enterpriseTargetHost,
+        enterpriseTargetPort: tab.enterpriseTargetPort,
         status: 'connecting'
       }
       setTabs(prev => [...prev, newTab])
@@ -3648,14 +3654,16 @@ def main(command: str = "show version"):
       partnerTabId = otherTerminal?.id || null
     }
 
-    // If still no partner, create a new terminal
+    // If still no partner, create a new local terminal
     if (!partnerTabId) {
       const newId = `terminal-${Date.now()}`
+      const localCount = tabs.filter(t => isTerminalTab(t) && !t.sessionId).length
       const newTab: Tab = {
         id: newId,
-        title: 'Terminal',
+        title: localCount === 0 ? 'Local Shell' : `Local Shell ${localCount + 1}`,
         type: 'terminal',
-        status: 'ready'
+        status: 'connecting',
+        isJumpbox: isEnterprise,
       }
       setTabs(prev => [...prev, newTab])
       partnerTabId = newId
@@ -3666,7 +3674,7 @@ def main(command: str = "show version"):
     setSplitLayout(orientation)
     setActiveTabId(contextMenuTabId)
     closeContextMenu()
-  }, [contextMenuTabId, activeTabId, tabs, closeContextMenu])
+  }, [contextMenuTabId, activeTabId, tabs, closeContextMenu, isEnterprise])
 
   // Handle "Discover Topology" from tab context menu
   const handleDiscoverTopologyFromGroup = useCallback(async () => {

@@ -706,22 +706,55 @@ function mapBackendDeviceType(backendType: string): DeviceType {
   return typeMap[backendType] || 'unknown';
 }
 
+// ── Topology Folder Types ──
+
+export interface Folder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpdateFolderData {
+  name?: string;
+  parent_id?: string | null;
+  sort_order?: number;
+}
+
+export interface MoveFolderData {
+  parent_id: string | null;
+  sort_order: number;
+}
+
 // ── Topology Folder Operations ──
 
-import type { Folder } from './sessions';
-
 export async function listTopologyFolders(): Promise<Folder[]> {
-  const { data } = await getClient().http.get('/folders?scope=topology');
+  const { data } = await getClient().http.get('/topologies/folders');
   return data;
 }
 
 export async function createTopologyFolder(name: string, parentId?: string): Promise<Folder> {
-  const { data } = await getClient().http.post('/folders', {
+  const { data } = await getClient().http.post('/topologies/folders', {
     name,
     parent_id: parentId || null,
-    scope: 'topology',
   });
   return data;
+}
+
+export async function updateTopologyFolder(id: string, update: UpdateFolderData): Promise<Folder> {
+  const { data } = await getClient().http.put(`/topologies/folders/${id}`, update);
+  return data;
+}
+
+export async function deleteTopologyFolder(id: string): Promise<void> {
+  await getClient().http.delete(`/topologies/folders/${id}`);
+}
+
+export async function moveTopologyFolder(id: string, data: MoveFolderData): Promise<Folder> {
+  const { data: result } = await getClient().http.put(`/topologies/folders/${id}/move`, data);
+  return result;
 }
 
 export async function moveTopology(id: string, update: { folder_id: string | null; sort_order: number }): Promise<void> {

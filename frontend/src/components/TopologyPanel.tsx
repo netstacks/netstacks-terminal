@@ -12,8 +12,8 @@ import {
   shareTopology,
   type SavedTopologyListItem,
 } from '../api/topology';
-import type { Folder } from '../api/sessions';
-import { updateFolder, deleteFolder, moveFolder } from '../api/sessions';
+import type { Folder } from '../api/topology';
+import { updateTopologyFolder, deleteTopologyFolder, moveTopologyFolder } from '../api/topology';
 import { getCurrentMode } from '../api/client';
 import { ItemSelectionProvider, useItemSelection } from '../hooks/useItemSelection';
 import NewTopologyDialog from './NewTopologyDialog';
@@ -233,7 +233,7 @@ function TopologyPanelContent({
     try {
       const [topologiesData, foldersData] = await Promise.all([
         listTopologies(),
-        listTopologyFolders(),
+        listTopologyFolders().catch(() => [] as Folder[]),
       ]);
       setTopologies(topologiesData);
       setFolders(foldersData);
@@ -629,7 +629,7 @@ function TopologyPanelContent({
       return;
     }
     try {
-      const updated = await updateFolder(renamingFolderId, { name: renameFolderValue.trim() });
+      const updated = await updateTopologyFolder(renamingFolderId, { name: renameFolderValue.trim() });
       setFolders(prev => prev.map(f => f.id === updated.id ? updated : f));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to rename folder');
@@ -639,7 +639,7 @@ function TopologyPanelContent({
 
   const handleDeleteFolder = async (folderId: string) => {
     try {
-      await deleteFolder(folderId);
+      await deleteTopologyFolder(folderId);
       setFolders(prev => prev.filter(f => f.id !== folderId));
       // Topologies in the folder will have folder_id set to null by the backend
       await fetchData();
@@ -925,7 +925,7 @@ function TopologyPanelContent({
               ? { ...f, parent_id: newParentId, sort_order: newSortOrder }
               : f
           ));
-          await moveFolder(folderId, { parent_id: newParentId, sort_order: newSortOrder });
+          await moveTopologyFolder(folderId, { parent_id: newParentId, sort_order: newSortOrder });
         }
       }
     } catch (err) {

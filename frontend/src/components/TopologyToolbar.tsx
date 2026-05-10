@@ -743,13 +743,13 @@ export default function TopologyToolbar({
           </button>
         )}
 
-        {/* Save to Docs Button */}
+        {/* Export to Docs Button */}
         {onSaveToDocs && (
           <button
             className={`toolbar-tool-btn save-docs-btn ${savingToDocs ? 'saving' : ''}`}
             onClick={onSaveToDocs}
             disabled={savingToDocs}
-            title="Save topology snapshot to Docs"
+            title="Export snapshot to Docs"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
               <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
