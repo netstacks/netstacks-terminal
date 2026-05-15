@@ -1,7 +1,7 @@
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use crate::api::ApiError;
-use crate::git::{GitOps, GitError};
+use crate::git::GitOps;
 
 // ── Shared request base ────────────────────────────────────────────────────
 
