@@ -64,6 +64,12 @@ A workspace IS a git repo. Git integration is seamless, complexity is hidden, an
 | `POST /workspace/git/accounts/:id/test` | Test connection |
 | `POST /workspace/git/oauth/start` | Begin OAuth flow |
 | `GET  /workspace/git/oauth/callback` | OAuth callback handler |
+| `POST /workspace/git/rebase/start` | Begin interactive rebase |
+| `POST /workspace/git/rebase/continue` | Continue after conflict resolution |
+| `POST /workspace/git/rebase/abort` | Abort and restore original state |
+| `POST /workspace/git/rebase/plan` | Return commit list for history editor UI |
+| `POST /workspace/git/rebase/apply` | Apply a reordered/squashed/dropped plan |
+| `POST /workspace/git/commit/amend` | Amend message of a specific commit |
 | `POST /workspace/open-file` | Signal workspace to open a file in editor zone |
 
 The AI side panel and AI coding tools in workspace terminals use these same endpoints — no separate AI-only API.
@@ -497,6 +503,7 @@ The existing `LocalGitOps` class (`frontend/src/lib/gitOps.ts`) runs git CLI com
 |---|---|
 | `WorkspaceGitPanel` | `ContextMenu`, `Toast`, existing dialog overlay pattern |
 | `WorkspaceConflictDialog` | Existing dialog overlay (`workspace-new-dialog` pattern) |
+| `WorkspaceHistoryEditor` | Existing dialog overlay pattern, `ContextMenu` for row actions |
 | `WorkspaceGitAccountSettings` | Existing settings panel layout pattern |
 | All workspace context menus | Shared `ContextMenu` component (replacing inline menus) |
 | Commit message textarea | Monaco-lite or plain textarea — no new editor instance |
@@ -506,10 +513,104 @@ The existing `LocalGitOps` class (`frontend/src/lib/gitOps.ts`) runs git CLI com
 
 ---
 
+## Section 9: Commit History Editor ("Clean Up History")
+
+Interactive rebase is powerful but intimidating. NetStacks exposes it as a visual "Clean Up History" flow — the word "rebase" never appears unless the user explicitly looks.
+
+### Three entry points (all plain-English labels):
+
+**1. "Clean Up My Commits" — pre-push commit tidying**
+Triggered from the Git panel Changes tab before pushing, or via Git menu → "Clean Up History...". Shows commits on the current branch that haven't been pushed yet:
+
+```
+┌─ Clean Up Your Commits ───────────────────────────────────────┐
+│  These commits exist only on your machine and haven't         │
+│  been shared yet. You can reorganize them before pushing.     │
+│                                                               │
+│  ☑  a3f9c12  Add workspace git panel                         │
+│  ☑  b7e1d44  Fix context menu positioning          [✎] [⌄] [⌃] [🗑] │
+│  ☑  c2a8f91  WIP                                             │
+│  ☑  d5b3e20  More WIP                                        │
+│  ☑  e9c7a13  Actually fix the thing                          │
+│                                                               │
+│  [Combine Selected into One]   [Edit Message]   [Remove]     │
+│                                                               │
+│  [Cancel]                              [Apply & Push]        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+Actions per commit (via row buttons or right-click):
+- **Edit Message** — inline text edit of the commit message
+- **Move Up / Move Down** — reorder commits (drag also supported)
+- **Remove** — drop the commit entirely (with confirmation: "This will undo the changes in this commit")
+- **Combine Selected** — squash checked commits into one, prompts for the combined message (pre-filled with AI-generated summary)
+
+**2. "Edit This Commit Message" — fix a recent message**
+Right-click any commit in History tab → "Edit Message". If the commit hasn't been pushed, edits it directly. If already pushed, warns: "This commit has been shared. Editing it will require a force push — only do this if no one else is using this branch." Requires confirmation.
+
+**3. "Update Branch from Main" — replace messy merge with clean history**
+In the Branches tab, when the current branch is behind main/master, the sync indicator offers two options:
+```
+┌─ main has 4 new commits ──────────────────────────┐
+│                                                    │
+│  [Bring Changes In]   [Bring In + Keep History Clean]  │
+│                                                    │
+│  "Bring In" adds a merge point to your history.   │
+│  "Keep History Clean" replays your commits on      │
+│  top of the latest changes — cleaner but reorders. │
+│                                                    │
+│  Not sure? Use "Bring Changes In".                 │
+└────────────────────────────────────────────────────┘
+```
+"Bring In" = merge. "Keep History Clean" = rebase. Default is merge — the safer option is first.
+
+### Conflict handling during "Keep History Clean"
+
+If a conflict occurs mid-rebase, the same conflict resolution dialog from Section 6 appears, with one addition:
+```
+│  Conflict while replaying your commit:             │
+│  "Add workspace git panel"                         │
+│  ─────────────────────────────────────────────────│
+│  [Resolve & Continue]   [Skip This Commit]   [Stop] │
+```
+"Stop" = `git rebase --abort`, restoring the branch to its original state.
+
+### Agent endpoints added
+
+| Endpoint | Description |
+|---|---|
+| `POST /workspace/git/rebase/start` | Begin interactive rebase (n commits or onto branch) |
+| `POST /workspace/git/rebase/continue` | Continue after conflict resolution |
+| `POST /workspace/git/rebase/abort` | Abort and restore original state |
+| `POST /workspace/git/rebase/plan` | Return the commit list for the history editor UI |
+| `POST /workspace/git/rebase/apply` | Apply a reordered/squashed/dropped commit plan |
+| `POST /workspace/git/commit/amend` | Amend the message of a specific commit (rebase --onto under the hood) |
+
+### AI access
+
+AI can call all rebase endpoints. Useful for: "clean up my commits before this PR", "squash all my WIP commits", "rebase onto main".
+
+### Menu bar additions (Git menu)
+
+```
+  Clean Up History...
+  Update Branch from Main
+  Edit Last Commit Message
+```
+
+### Settings
+
+| Setting | Default |
+|---|---|
+| Default sync strategy | Merge |
+| Warn before force push | On |
+| Show "Keep History Clean" option | On |
+
+---
+
 ## Out of Scope (this design)
 
 - PR review / inline code comments (create-only per decision)
-- Rebase interactive (`git rebase -i`)
 - Git LFS
 - Submodules
 - Tag management UI (tags visible in history, creation via commit context menu only)
