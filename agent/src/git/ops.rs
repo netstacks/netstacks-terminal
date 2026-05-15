@@ -57,7 +57,7 @@ impl GitOps {
         cmd.current_dir(&self.cwd);
         cmd.args([
             "log",
-            "--format=%H|||%h|||%s|||%an|||%aI|||%D",
+            "--format=%H\x1f%h\x1f%s\x1f%an\x1f%aI\x1f%D",
             "-n",
             &limit_str,
         ]);
@@ -103,7 +103,7 @@ impl GitOps {
     }
 
     pub async fn revert(&self, paths: &[&str]) -> Result<(), GitError> {
-        let mut args = vec!["checkout", "--"];
+        let mut args = vec!["checkout", "HEAD", "--"];
         args.extend_from_slice(paths);
         self.run(&args).await?;
         Ok(())
@@ -331,7 +331,7 @@ fn parse_log_output(output: &str) -> Vec<CommitInfo> {
         .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
-            let parts: Vec<&str> = line.splitn(6, "|||").collect();
+            let parts: Vec<&str> = line.splitn(6, '\x1f').collect();
             let branches = parts
                 .get(5)
                 .map(|r| {
@@ -561,6 +561,23 @@ mod tests {
         ops.revert(&["a.txt"]).await.unwrap();
         let files = ops.status().await.unwrap();
         assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revert_staged_file() {
+        let dir = make_repo();
+        std::fs::write(dir.path().join("a.txt"), "staged change").unwrap();
+        let ops = GitOps::new(dir.path());
+        ops.stage(&["a.txt"]).await.unwrap();
+
+        // Verify file is staged
+        let files = ops.status().await.unwrap();
+        assert!(files[0].staged);
+
+        // Revert should discard staged and working changes
+        ops.revert(&["a.txt"]).await.unwrap();
+        let files = ops.status().await.unwrap();
+        assert!(files.is_empty(), "revert should discard staged changes");
     }
 
     // Task 6 tests
