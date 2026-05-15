@@ -138,6 +138,56 @@ function stateToConfig(state: WorkspaceState): WorkspaceConfig {
   }
 }
 
+async function ensureNetstacksDir(fileOps: FileOps, rootPath: string): Promise<void> {
+  const sep = rootPath.includes('/') ? '/' : '\\'
+  const nsDir = `${rootPath}${sep}.netstacks`
+  try {
+    await fileOps.mkdir(nsDir)
+  } catch {
+    // Directory may already exist
+  }
+}
+
+async function addToGitignore(fileOps: FileOps, rootPath: string): Promise<void> {
+  const sep = rootPath.includes('/') ? '/' : '\\'
+  const gitignorePath = `${rootPath}${sep}.gitignore`
+  try {
+    const content = await fileOps.readFile(gitignorePath)
+    if (content.includes('.netstacks/') || content.includes('.netstacks')) return
+    const newContent = content.endsWith('\n') ? `${content}.netstacks/\n` : `${content}\n.netstacks/\n`
+    await fileOps.writeFile(gitignorePath, newContent)
+  } catch {
+    // No .gitignore or can't read — create one
+    try {
+      await fileOps.writeFile(gitignorePath, '.netstacks/\n')
+    } catch {
+      // Non-writable directory, skip
+    }
+  }
+}
+
+async function saveNetstacksState(fileOps: FileOps, rootPath: string, config: WorkspaceConfig): Promise<void> {
+  const sep = rootPath.includes('/') ? '/' : '\\'
+  const filePath = `${rootPath}${sep}.netstacks${sep}workspace.json`
+  try {
+    const json = JSON.stringify(config, null, 2)
+    await fileOps.writeFile(filePath, json)
+  } catch {
+    // Silent fail — .netstacks may not be writable
+  }
+}
+
+async function loadNetstacksState(fileOps: FileOps, rootPath: string): Promise<Partial<WorkspaceConfig> | null> {
+  const sep = rootPath.includes('/') ? '/' : '\\'
+  const filePath = `${rootPath}${sep}.netstacks${sep}workspace.json`
+  try {
+    const content = await fileOps.readFile(filePath)
+    return JSON.parse(content) as Partial<WorkspaceConfig>
+  } catch {
+    return null
+  }
+}
+
 export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceReturn {
   const [state, setState] = useState<WorkspaceState>(() => createInitialState(config))
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -158,12 +208,41 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     return new AgentGitOps(config.rootPath)
   }, [config.mode, config.sessionId, config.rootPath])
 
+  // Initialize .netstacks directory and load persisted state
+  useEffect(() => {
+    const init = async () => {
+      if (config.mode !== 'local') return
+
+      await ensureNetstacksDir(fileOps, config.rootPath)
+      await addToGitignore(fileOps, config.rootPath)
+
+      const saved = await loadNetstacksState(fileOps, config.rootPath)
+      if (saved) {
+        setState(prev => ({
+          ...prev,
+          zone1Tab: saved.zone1Tab || prev.zone1Tab,
+          gitPanelTab: saved.gitPanelTab || prev.gitPanelTab,
+          fileExplorerWidth: saved.fileExplorerWidth || prev.fileExplorerWidth,
+          terminalPanelHeight: saved.terminalPanelHeight || prev.terminalPanelHeight,
+          terminalPanelCollapsed: saved.terminalPanelCollapsed ?? prev.terminalPanelCollapsed,
+          expandedDirs: saved.expandedDirs ? new Set(saved.expandedDirs) : prev.expandedDirs,
+          selectedPath: saved.selectedPath ?? prev.selectedPath,
+        }))
+      }
+    }
+    init()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Auto-save: debounced 1s after any state change
   useEffect(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
       const cfg = stateToConfig(stateRef.current)
       updateSavedWorkspace(cfg).catch(() => {})
+      if (stateRef.current.mode === 'local') {
+        saveNetstacksState(fileOps, stateRef.current.rootPath, cfg).catch(() => {})
+      }
     }, 1000)
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -180,6 +259,7 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     state.terminalPanelCollapsed,
     state.zone1Tab,
     state.gitPanelTab,
+    fileOps,
   ])
 
   // Save immediately on unmount
@@ -187,7 +267,11 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     return () => {
       const cfg = stateToConfig(stateRef.current)
       updateSavedWorkspace(cfg).catch(() => {})
+      if (stateRef.current.mode === 'local') {
+        saveNetstacksState(fileOps, stateRef.current.rootPath, cfg).catch(() => {})
+      }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const setFileExplorerWidth = useCallback((width: number) => {
