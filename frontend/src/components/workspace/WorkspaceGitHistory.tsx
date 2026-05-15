@@ -32,6 +32,8 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
   const [commits, setCommits] = useState<CommitInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
+  const [newBranchFrom, setNewBranchFrom] = useState<{ hash: string; message: string } | null>(null)
+  const [newBranchName, setNewBranchName] = useState('')
 
   const fetchLog = useCallback(async () => {
     setLoading(true)
@@ -44,6 +46,19 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
       setLoading(false)
     }
   }, [gitOps])
+
+  const handleCreateBranchFromCommit = useCallback(async () => {
+    if (!newBranchFrom || !newBranchName.trim()) return
+    try {
+      await gitOps.createBranch(newBranchName.trim(), newBranchFrom.hash)
+      await gitOps.switchBranch(newBranchName.trim())
+      setNewBranchFrom(null)
+      setNewBranchName('')
+      showToast(`Created and switched to ${newBranchName.trim()}`, 'success')
+    } catch (err) {
+      showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, newBranchFrom, newBranchName])
 
   const handleCommitContextMenu = useCallback((e: React.MouseEvent, commit: CommitInfo) => {
     e.preventDefault()
@@ -64,6 +79,12 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
           navigator.clipboard.writeText(commit.shortHash)
           showToast('Short hash copied', 'info', 1500)
         },
+      },
+      { id: 'divider-1', label: '', divider: true, action: () => {} },
+      {
+        id: 'new-branch',
+        label: 'New Branch from Here',
+        action: () => setNewBranchFrom({ hash: commit.hash, message: commit.message }),
       },
     ]
     setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
@@ -113,6 +134,39 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
         items={contextMenu?.items ?? []}
         onClose={() => setContextMenu(null)}
       />
+      {newBranchFrom && (
+        <div className="workspace-git-dialog-overlay" onClick={() => { setNewBranchFrom(null); setNewBranchName('') }}>
+          <div className="workspace-git-dialog" onClick={e => e.stopPropagation()}>
+            <h3>New Branch from Commit</h3>
+            <p>
+              Create a new branch starting from: <strong>{newBranchFrom.hash.slice(0, 7)}</strong> {newBranchFrom.message}
+            </p>
+            <input
+              className="workspace-git-new-branch-input"
+              placeholder="branch-name"
+              value={newBranchName}
+              onChange={e => setNewBranchName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleCreateBranchFromCommit()
+                if (e.key === 'Escape') { setNewBranchFrom(null); setNewBranchName('') }
+              }}
+              autoFocus
+            />
+            <div className="workspace-git-dialog-actions" style={{ marginTop: 12 }}>
+              <button className="workspace-git-dialog-btn" onClick={() => { setNewBranchFrom(null); setNewBranchName('') }}>
+                Cancel
+              </button>
+              <button
+                className="workspace-git-dialog-btn primary"
+                disabled={!newBranchName.trim()}
+                onClick={handleCreateBranchFromCommit}
+              >
+                Create & Switch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
