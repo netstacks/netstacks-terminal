@@ -281,3 +281,63 @@ pub async fn git_init(
     ops.init().await.map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+// ── Commit Amend ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GitCommitAmendRequest {
+    pub workspace_root: String,
+    pub message: String,
+}
+
+pub async fn git_commit_amend(
+    Json(req): Json<GitCommitAmendRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ops = GitOps::new(&req.workspace_root);
+    let commit = ops.commit_amend(&req.message).await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "commit": commit })))
+}
+
+// ── Rebase Plan ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GitRebasePlanRequest {
+    pub workspace_root: String,
+    pub count: Option<usize>,
+}
+
+pub async fn git_rebase_plan(
+    Json(req): Json<GitRebasePlanRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ops = GitOps::new(&req.workspace_root);
+    let n = req.count.unwrap_or(20);
+    let commits = ops.rebase_plan(n).await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "commits": commits })))
+}
+
+// ── Rebase Apply ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GitRebaseApplyRequest {
+    pub workspace_root: String,
+    pub base_hash: String,
+    pub plan: Vec<crate::git::RebasePlanItem>,
+}
+
+pub async fn git_rebase_apply(
+    Json(req): Json<GitRebaseApplyRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ops = GitOps::new(&req.workspace_root);
+    ops.rebase_apply(&req.base_hash, &req.plan).await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+// ── Rebase Abort ──────────────────────────────────────────────────────────
+
+pub async fn git_rebase_abort(
+    Json(req): Json<WorkspaceRoot>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ops = GitOps::new(&req.workspace_root);
+    ops.rebase_abort().await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}

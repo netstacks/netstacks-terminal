@@ -289,6 +289,70 @@ impl GitOps {
         self.run(&["init"]).await?;
         Ok(())
     }
+
+    // Task 9: Commit Amend and Rebase
+    pub async fn commit_amend(&self, message: &str) -> Result<CommitInfo, GitError> {
+        self.run(&["commit", "--amend", "-m", message]).await?;
+        let output = self.run(&[
+            "log", "-1", "--format=%H\x1f%h\x1f%s\x1f%an\x1f%aI\x1f%D"
+        ]).await?;
+        parse_log_output(&output)
+            .into_iter()
+            .next()
+            .ok_or_else(|| GitError::CommandFailed("No commit after amend".into()))
+    }
+
+    pub async fn rebase_plan(&self, n: usize) -> Result<Vec<CommitInfo>, GitError> {
+        let output = self.run(&[
+            "log", &format!("-{}", n),
+            "--format=%H\x1f%h\x1f%s\x1f%an\x1f%aI\x1f%D",
+            "--reverse"
+        ]).await?;
+        Ok(parse_log_output(&output))
+    }
+
+    pub async fn rebase_apply(&self, base_hash: &str, plan: &[RebasePlanItem]) -> Result<(), GitError> {
+        // Build the todo list for interactive rebase
+        let mut todo = String::new();
+        for item in plan {
+            match item.action.as_str() {
+                "pick" => todo.push_str(&format!("pick {}\n", item.hash)),
+                "squash" => todo.push_str(&format!("squash {}\n", item.hash)),
+                "drop" => todo.push_str(&format!("drop {}\n", item.hash)),
+                _ => return Err(GitError::CommandFailed(format!("Unknown action: {}", item.action))),
+            }
+        }
+
+        // Write todo to a temp file
+        let todo_path = self.cwd.join(".git").join("netstacks-rebase-todo");
+        tokio::fs::write(&todo_path, &todo).await.map_err(GitError::Io)?;
+
+        // Run rebase with GIT_SEQUENCE_EDITOR that replaces the todo
+        let script = format!("cat {} > \"$1\"", todo_path.display());
+        let output = tokio::process::Command::new("git")
+            .args(&["rebase", "-i", base_hash])
+            .current_dir(&self.cwd)
+            .env("GIT_SEQUENCE_EDITOR", format!("sh -c '{}'", script))
+            .output()
+            .await
+            .map_err(GitError::Io)?;
+
+        // Clean up
+        let _ = tokio::fs::remove_file(&todo_path).await;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    pub async fn rebase_abort(&self) -> Result<(), GitError> {
+        self.run(&["rebase", "--abort"]).await?;
+        Ok(())
+    }
 }
 
 fn parse_status_output(output: &str) -> Vec<GitFileStatus> {

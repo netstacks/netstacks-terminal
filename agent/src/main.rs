@@ -1004,6 +1004,10 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/workspace/git/stashes", post(git_api::git_list_stashes))
         .route("/workspace/git/stash", post(git_api::git_stash))
         .route("/workspace/git/init", post(git_api::git_init))
+        .route("/workspace/git/commit/amend", post(git_api::git_commit_amend))
+        .route("/workspace/git/rebase/plan", post(git_api::git_rebase_plan))
+        .route("/workspace/git/rebase/apply", post(git_api::git_rebase_apply))
+        .route("/workspace/git/rebase/abort", post(git_api::git_rebase_abort))
         .with_state(app_state.clone());
 
     // Dev-only route introspection (cfg-gated; absent from release builds).

@@ -56,6 +56,14 @@ pub struct BlameLine {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebasePlanItem {
+    pub hash: String,
+    pub action: String,
+    pub message: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum GitError {
     NotARepo,
