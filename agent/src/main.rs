@@ -53,6 +53,8 @@ mod telnet;
 mod terminal;
 mod tls;
 mod tracked_router;
+mod git;
+mod git_api;
 mod tunnels;
 mod utf8_decoder;
 mod ws;
@@ -973,6 +975,15 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/tunnels/:id/start", post(api::start_tunnel))
         .route("/tunnels/:id/stop", post(api::stop_tunnel))
         .route("/tunnels/:id/reconnect", post(api::reconnect_tunnel))
+        // Workspace local file operations
+        .route("/local/read-file", post(api::local_file_read))
+        .route("/local/write-file", post(api::local_file_write))
+        .route("/local/list-dir", post(api::local_dir_list))
+        .route("/local/mkdir", post(api::local_file_mkdir))
+        .route("/local/delete", post(api::local_file_delete))
+        .route("/local/rename", post(api::local_file_rename))
+        .route("/local/exists", post(api::local_file_exists))
+        .route("/local/run-python", post(api::local_run_python))
         .with_state(app_state.clone());
 
     // Dev-only route introspection (cfg-gated; absent from release builds).
