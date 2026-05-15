@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import type { WorkspaceConfig } from '../../types/workspace'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
@@ -50,6 +50,12 @@ export default function WorkspacesPanel({
   openWorkspaceIds,
 }: WorkspacesPanelProps) {
   const [savedWorkspaces, setSavedWorkspaces] = useState<WorkspaceConfig[]>([])
+  const [wsCollapsed, setWsCollapsed] = useState(false)
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false)
+  const [wsHeight, setWsHeight] = useState(140)
+  const [isResizing, setIsResizing] = useState(false)
+  const resizeStartY = useRef(0)
+  const resizeStartHeight = useRef(0)
 
   const load = useCallback(async () => {
     setSavedWorkspaces(await loadSavedWorkspaces())
@@ -59,7 +65,6 @@ export default function WorkspacesPanel({
     load()
   }, [load])
 
-  // Re-load when openWorkspaceIds changes (a new workspace was just opened)
   useEffect(() => {
     load()
   }, [openWorkspaceIds.size, load])
@@ -75,57 +80,106 @@ export default function WorkspacesPanel({
     }
   }, [savedWorkspaces])
 
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+    resizeStartY.current = e.clientY
+    resizeStartHeight.current = wsHeight
+  }, [wsHeight])
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isResizing) return
+    setWsHeight(Math.max(60, Math.min(400, resizeStartHeight.current + (e.clientY - resizeStartY.current))))
+  }, [isResizing])
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false)
+  }, [])
+
   return (
-    <div className="workspace-panel-sidebar">
-      <div className="workspace-panel-header">
-        <span>Workspaces</span>
+    <div
+      className="workspace-panel-sidebar"
+      onMouseMove={isResizing ? handleMouseMove : undefined}
+      onMouseUp={isResizing ? handleMouseUp : undefined}
+      onMouseLeave={isResizing ? handleMouseUp : undefined}
+    >
+      {/* ── Workspaces section (collapsible) ── */}
+      <div
+        className="workspace-panel-section-header"
+        onClick={() => setWsCollapsed(!wsCollapsed)}
+      >
+        <span className="workspace-panel-section-toggle">{wsCollapsed ? '▸' : '▾'}</span>
+        <span>WORKSPACES</span>
         <button
-          className="workspace-explorer-header-btn"
-          onClick={onNewWorkspace}
+          className="workspace-panel-section-btn"
+          onClick={(e) => { e.stopPropagation(); onNewWorkspace() }}
           title="New Workspace"
         >
           +
         </button>
       </div>
-      <div className="workspace-panel-list">
-        {savedWorkspaces.length === 0 && (
-          <div className="workspace-panel-empty">
-            <p>No saved workspaces</p>
-            <button className="workspace-panel-add-btn" onClick={onNewWorkspace}>
-              + New Workspace
-            </button>
-          </div>
-        )}
-        {savedWorkspaces.map(ws => {
-          const isOpen = openWorkspaceIds.has(ws.id)
-          return (
-            <div
-              key={ws.id}
-              className={`workspace-panel-item ${isOpen ? 'active' : ''}`}
-              onClick={() => onOpenWorkspace(ws)}
-            >
-              <span className="workspace-panel-item-icon">
-                {ws.mode === 'remote' ? '📡' : '📁'}
-              </span>
-              <div className="workspace-panel-item-info">
-                <span className="workspace-panel-item-name">{ws.name}</span>
-                <span className="workspace-panel-item-path">{ws.rootPath}</span>
-              </div>
-              {isOpen && (
-                <span className="workspace-panel-item-badge">open</span>
-              )}
-              <button
-                className="workspace-panel-item-delete"
-                onClick={(e) => { e.stopPropagation(); deleteWorkspace(ws.id, ws.name) }}
-                title="Delete"
-              >
-                ×
+
+      {!wsCollapsed && (
+        <div className="workspace-panel-list" style={{ height: wsHeight, overflow: 'auto' }}>
+          {savedWorkspaces.length === 0 && (
+            <div className="workspace-panel-empty">
+              <p>No saved workspaces</p>
+              <button className="workspace-panel-add-btn" onClick={onNewWorkspace}>
+                + New Workspace
               </button>
             </div>
-          )
-        })}
+          )}
+          {savedWorkspaces.map(ws => {
+            const isOpen = openWorkspaceIds.has(ws.id)
+            return (
+              <div
+                key={ws.id}
+                className={`workspace-panel-item ${isOpen ? 'active' : ''}`}
+                onClick={() => onOpenWorkspace(ws)}
+              >
+                <span className="workspace-panel-item-icon">
+                  {ws.mode === 'remote' ? '📡' : '📁'}
+                </span>
+                <div className="workspace-panel-item-info">
+                  <span className="workspace-panel-item-name">{ws.name}</span>
+                  <span className="workspace-panel-item-path">{ws.rootPath}</span>
+                </div>
+                {isOpen && (
+                  <span className="workspace-panel-item-badge">open</span>
+                )}
+                <button
+                  className="workspace-panel-item-delete"
+                  onClick={(e) => { e.stopPropagation(); deleteWorkspace(ws.id, ws.name) }}
+                  title="Delete"
+                >
+                  ×
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── Resize handle ── */}
+      {!wsCollapsed && !explorerCollapsed && (
+        <div
+          className="workspace-panel-resize-handle"
+          onMouseDown={handleResizeStart}
+        />
+      )}
+
+      {/* ── Explorer section (collapsible) ── */}
+      <div
+        className="workspace-panel-section-header"
+        onClick={() => setExplorerCollapsed(!explorerCollapsed)}
+      >
+        <span className="workspace-panel-section-toggle">{explorerCollapsed ? '▸' : '▾'}</span>
+        <span>EXPLORER</span>
       </div>
-      <div id="workspace-sidebar-explorer" className="workspace-sidebar-explorer-target" />
+
+      {!explorerCollapsed && (
+        <div id="workspace-sidebar-explorer" className="workspace-sidebar-explorer-target" />
+      )}
     </div>
   )
 }

@@ -698,7 +698,7 @@
 }
 
 .workspace-panel-list {
-  flex: 1;
+  flex-shrink: 0;
   overflow-y: auto;
   padding: var(--spacing-xs) 0;
 }
@@ -798,6 +798,62 @@
 .workspace-panel-item-delete:hover {
   color: var(--color-error);
   background: var(--color-bg-hover);
+}
+
+/* Sidebar section headers (collapsible) */
+.workspace-panel-section-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  height: 24px;
+  flex-shrink: 0;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.workspace-panel-section-header:hover {
+  background: var(--color-bg-hover);
+}
+
+.workspace-panel-section-toggle {
+  font-size: 10px;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.workspace-panel-section-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.workspace-panel-section-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.workspace-panel-resize-handle {
+  height: 4px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+}
+
+.workspace-panel-resize-handle:hover {
+  background: var(--color-accent);
 }
 
 /* Output panel (Netstacks engine runs) */
