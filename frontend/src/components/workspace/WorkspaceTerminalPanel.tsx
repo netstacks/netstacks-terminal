@@ -71,7 +71,7 @@ export default forwardRef<WorkspaceTerminalPanelHandle, WorkspaceTerminalPanelPr
 
     return (
       <>
-        <div className="workspace-terminal-header">
+        <div className="workspace-terminal-header" onDoubleClick={onToggleCollapse}>
           <div className="workspace-terminal-tabs">
             {terminalTabs.map(tab => (
               <div
@@ -88,15 +88,16 @@ export default forwardRef<WorkspaceTerminalPanelHandle, WorkspaceTerminalPanelPr
                 </button>
               </div>
             ))}
-          </div>
-          <div className="workspace-terminal-actions">
             <button
               className="workspace-terminal-action-btn"
               onClick={handleNewTerminal}
               title="New terminal"
+              style={{ marginLeft: 2 }}
             >
               +
             </button>
+          </div>
+          <div className="workspace-terminal-actions">
             <button
               className="workspace-terminal-action-btn"
               onClick={onToggleCollapse}

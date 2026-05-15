@@ -88,7 +88,7 @@ export default function WorkspaceEditorArea({
 
   return (
     <>
-      <div className="workspace-inner-tab-bar">
+      <div className="workspace-inner-tab-bar" onDoubleClick={onCollapse}>
         <div className="workspace-inner-tab-list">
           {innerTabs.map(tab => (
             <div
