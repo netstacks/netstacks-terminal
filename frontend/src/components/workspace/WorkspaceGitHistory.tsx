@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { GitOps, CommitInfo } from '../../types/workspace'
+import ContextMenu from '../ContextMenu'
+import type { MenuItem } from '../ContextMenu'
+import { showToast } from '../Toast'
 
 interface WorkspaceGitHistoryProps {
   gitOps: GitOps
@@ -28,6 +31,7 @@ function formatRelativeDate(dateStr: string): string {
 export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps) {
   const [commits, setCommits] = useState<CommitInfo[]>([])
   const [loading, setLoading] = useState(true)
+  const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
 
   const fetchLog = useCallback(async () => {
     setLoading(true)
@@ -40,6 +44,30 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
       setLoading(false)
     }
   }, [gitOps])
+
+  const handleCommitContextMenu = useCallback((e: React.MouseEvent, commit: CommitInfo) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const items: MenuItem[] = [
+      {
+        id: 'copy-hash',
+        label: 'Copy Hash',
+        action: () => {
+          navigator.clipboard.writeText(commit.hash)
+          showToast('Hash copied', 'info', 1500)
+        },
+      },
+      {
+        id: 'copy-short-hash',
+        label: 'Copy Short Hash',
+        action: () => {
+          navigator.clipboard.writeText(commit.shortHash)
+          showToast('Short hash copied', 'info', 1500)
+        },
+      },
+    ]
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
+  }, [])
 
   useEffect(() => {
     fetchLog()
@@ -60,6 +88,7 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
           <div
             key={commit.hash}
             className="workspace-git-history-item"
+            onContextMenu={(e) => handleCommitContextMenu(e, commit)}
           >
             <div className="workspace-git-history-item-top">
               <span className="workspace-git-history-hash">{commit.shortHash}</span>
@@ -79,6 +108,11 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
           </div>
         ))}
       </div>
+      <ContextMenu
+        position={contextMenu?.position ?? null}
+        items={contextMenu?.items ?? []}
+        onClose={() => setContextMenu(null)}
+      />
     </div>
   )
 }
