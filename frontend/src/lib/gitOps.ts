@@ -8,6 +8,7 @@ import type {
   BranchEntry,
   StashEntry,
   BlameLine,
+  RebasePlanItem,
 } from '../types/workspace'
 
 // AgentGitOps — calls the local agent for all git operations.
@@ -129,6 +130,31 @@ export class AgentGitOps implements GitOps {
   async init(): Promise<void> {
     await this.post('/workspace/git/init')
   }
+
+  async commitAmend(message: string): Promise<CommitInfo> {
+    const data = await this.post<{ commit: CommitInfo }>('/workspace/git/commit/amend', {
+      message,
+    })
+    return data.commit
+  }
+
+  async rebasePlan(count = 20): Promise<CommitInfo[]> {
+    const data = await this.post<{ commits: CommitInfo[] }>('/workspace/git/rebase/plan', {
+      count,
+    })
+    return data.commits ?? []
+  }
+
+  async rebaseApply(baseHash: string, plan: RebasePlanItem[]): Promise<void> {
+    await this.post('/workspace/git/rebase/apply', {
+      base_hash: baseHash,
+      plan,
+    })
+  }
+
+  async rebaseAbort(): Promise<void> {
+    await this.post('/workspace/git/rebase/abort')
+  }
 }
 
 // RemoteGitOps — runs git over SSH session.
@@ -201,6 +227,10 @@ export class RemoteGitOps implements GitOps {
   async merge(): Promise<void> { return this.notImplemented('merge') }
   async stash(): Promise<void> { return this.notImplemented('stash') }
   async init(): Promise<void> { return this.notImplemented('init') }
+  async commitAmend(): Promise<CommitInfo> { return this.notImplemented('commitAmend') }
+  async rebasePlan(): Promise<CommitInfo[]> { return this.notImplemented('rebasePlan') }
+  async rebaseApply(): Promise<void> { return this.notImplemented('rebaseApply') }
+  async rebaseAbort(): Promise<void> { return this.notImplemented('rebaseAbort') }
 }
 
 // ── Shared parsers (used by RemoteGitOps) ──────────────────────────────────

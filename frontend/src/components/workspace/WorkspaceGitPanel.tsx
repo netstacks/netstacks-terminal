@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import WorkspaceGitChanges from './WorkspaceGitChanges'
 import WorkspaceGitHistory from './WorkspaceGitHistory'
 import WorkspaceGitBranches from './WorkspaceGitBranches'
+import WorkspaceHistoryEditor from './WorkspaceHistoryEditor'
 import type { GitOps, GitFileStatus, GitBranchInfo, GitPanelTab } from '../../types/workspace'
 import { showToast } from '../Toast'
 
@@ -41,6 +42,7 @@ export default function WorkspaceGitPanel({
   const [isPulling, setIsPulling] = useState(false)
   const [isFetching, setIsFetching] = useState(false)
   const [showPushRejected, setShowPushRejected] = useState(false)
+  const [showHistoryEditor, setShowHistoryEditor] = useState(false)
 
   const handlePush = useCallback(async () => {
     setIsPushing(true)
@@ -173,6 +175,13 @@ export default function WorkspaceGitPanel({
             >
               {isPushing ? '...' : 'Push'}
             </button>
+            <button
+              className="workspace-git-toolbar-btn"
+              onClick={() => setShowHistoryEditor(true)}
+              title="Clean Up History"
+            >
+              Tidy
+            </button>
           </div>
         </div>
       )}
@@ -201,6 +210,14 @@ export default function WorkspaceGitPanel({
           />
         )}
       </div>
+
+      {showHistoryEditor && (
+        <WorkspaceHistoryEditor
+          gitOps={gitOps}
+          onClose={() => setShowHistoryEditor(false)}
+          onRefresh={onRefresh}
+        />
+      )}
 
       {showPushRejected && (
         <div className="workspace-git-dialog-overlay" onClick={() => setShowPushRejected(false)}>

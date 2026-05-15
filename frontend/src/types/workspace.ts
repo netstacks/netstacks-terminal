@@ -65,6 +65,12 @@ export interface StashEntry {
   branch: string
 }
 
+export interface RebasePlanItem {
+  hash: string
+  action: 'pick' | 'squash' | 'drop'
+  message?: string
+}
+
 export interface BlameLine {
   lineNumber: number
   hash: string
@@ -212,4 +218,10 @@ export interface GitOps {
 
   // Init
   init(): Promise<void>
+
+  // Commit history editing
+  commitAmend(message: string): Promise<CommitInfo>
+  rebasePlan(count?: number): Promise<CommitInfo[]>
+  rebaseApply(baseHash: string, plan: RebasePlanItem[]): Promise<void>
+  rebaseAbort(): Promise<void>
 }
