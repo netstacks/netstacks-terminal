@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listSessions } from '../../api/sessions'
+import { AgentGitOps } from '../../lib/gitOps'
+import { LocalFileOps } from '../../lib/fileOps'
 import type { WorkspaceConfig, WorkspaceMode, AiToolType } from '../../types/workspace'
 
 interface WorkspaceNewDialogProps {
@@ -41,6 +43,13 @@ export default function WorkspaceNewDialog({
   const [aiTool, setAiTool] = useState<AiToolType>('claude')
   const [customCommand, setCustomCommand] = useState('')
   const [autoLaunch, setAutoLaunch] = useState(true)
+  const [gitCheck, setGitCheck] = useState<{
+    checking: boolean
+    isRepo: boolean
+    branch: string | null
+    isEmpty: boolean
+  } | null>(null)
+  const [initGit, setInitGit] = useState(false)
 
   const handleBrowse = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false })
@@ -49,11 +58,52 @@ export default function WorkspaceNewDialog({
     }
   }, [])
 
-  const handleSubmit = useCallback(() => {
+  useEffect(() => {
+    if (mode !== 'local' || !localPath.trim()) {
+      setGitCheck(null)
+      setInitGit(false)
+      return
+    }
+    const timer = setTimeout(async () => {
+      setGitCheck({ checking: true, isRepo: false, branch: null, isEmpty: false })
+      try {
+        const ops = new AgentGitOps(localPath.trim())
+        const isRepo = await ops.isRepo()
+        let branch: string | null = null
+        if (isRepo) {
+          const branchInfo = await ops.branch()
+          branch = branchInfo?.name ?? null
+        }
+        const fileOps = new LocalFileOps()
+        let isEmpty = false
+        try {
+          const entries = await fileOps.readDir(localPath.trim())
+          isEmpty = entries.length === 0
+        } catch {
+          isEmpty = false
+        }
+        setGitCheck({ checking: false, isRepo, branch, isEmpty })
+      } catch {
+        setGitCheck(null)
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [localPath, mode])
+
+  const handleSubmit = useCallback(async () => {
     const rootPath = mode === 'local' ? localPath : remotePath
     if (!rootPath.trim()) return
 
     const name = rootPath.split('/').filter(Boolean).pop() || 'workspace'
+
+    if (initGit && mode === 'local') {
+      try {
+        const ops = new AgentGitOps(rootPath.trim())
+        await ops.init()
+      } catch {
+        // Init may fail if already a repo — continue anyway
+      }
+    }
 
     const config: WorkspaceConfig = {
       id: crypto.randomUUID(),
@@ -75,7 +125,7 @@ export default function WorkspaceNewDialog({
     }
 
     onSubmit(config)
-  }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, autoLaunch, onSubmit])
+  }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, autoLaunch, initGit, onSubmit])
 
   const isValid = mode === 'local' ? localPath.trim().length > 0 : (remotePath.trim().length > 0 && remoteSessionId)
 
@@ -98,7 +148,7 @@ export default function WorkspaceNewDialog({
           </div>
         </div>
 
-        {mode === 'local' ? (
+        {mode === 'local' && (
           <div className="workspace-new-dialog-field">
             <span className="workspace-new-dialog-label">Directory</span>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -111,7 +161,37 @@ export default function WorkspaceNewDialog({
               <button className="workspace-new-dialog-btn" onClick={handleBrowse}>Browse</button>
             </div>
           </div>
-        ) : (
+        )}
+
+        {mode === 'local' && gitCheck && (
+          <div className="workspace-new-dialog-git-status">
+            {gitCheck.checking ? (
+              <span style={{ color: 'var(--color-text-secondary)' }}>Checking directory...</span>
+            ) : gitCheck.isRepo ? (
+              <div className="workspace-new-dialog-git-ok">
+                ✓ Git repository{gitCheck.branch ? ` on branch "${gitCheck.branch}"` : ''}
+              </div>
+            ) : gitCheck.isEmpty ? (
+              <div className="workspace-new-dialog-git-empty">
+                <span>Empty directory</span>
+                <label className="workspace-new-dialog-checkbox">
+                  <input type="checkbox" checked={initGit} onChange={e => setInitGit(e.target.checked)} />
+                  Initialize as git repository
+                </label>
+              </div>
+            ) : (
+              <div className="workspace-new-dialog-git-warn">
+                <span>Not a git repository</span>
+                <label className="workspace-new-dialog-checkbox">
+                  <input type="checkbox" checked={initGit} onChange={e => setInitGit(e.target.checked)} />
+                  Initialize as git repository
+                </label>
+              </div>
+            )}
+          </div>
+        )}
+
+        {mode === 'remote' && (
           <>
             <div className="workspace-new-dialog-field">
               <span className="workspace-new-dialog-label">SSH Session</span>
