@@ -6108,6 +6108,11 @@ pub async fn add_execution_device(
     let device_data = NewMopExecutionDevice {
         execution_id,
         session_id: device.session_id,
+        device_id: device.device_id,
+        credential_id: device.credential_id,
+        device_name: device.device_name,
+        device_host: device.device_host,
+        role: device.role,
         device_order: device.device_order,
     };
     let created = state.provider.create_mop_execution_device(device_data).await?;
@@ -6389,7 +6394,9 @@ pub async fn execute_step(
     let (device_host, device_name) = {
         let device = state.provider.get_mop_execution_device(&step.execution_device_id).await.ok();
         if let Some(ref dev) = device {
-            let session = state.provider.get_session(&dev.session_id).await.ok();
+            let session = if let Some(ref sid) = dev.session_id {
+                state.provider.get_session(sid).await.ok()
+            } else { None };
             (
                 session.as_ref().map(|s| s.host.clone()).unwrap_or_default(),
                 session.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
@@ -6445,7 +6452,9 @@ pub async fn execute_step(
     let device = state.provider.get_mop_execution_device(&step.execution_device_id).await?;
 
     // Get the session
-    let session = state.provider.get_session(&device.session_id).await?;
+    let session_id = device.session_id.as_deref()
+        .ok_or_else(|| ApiError { error: "Device has no session_id".to_string(), code: "VALIDATION".to_string() })?;
+    let session = state.provider.get_session(session_id).await?;
 
     // Get the profile for credentials
     let profile = state.provider.get_profile(&session.profile_id).await?;
@@ -6486,7 +6495,7 @@ pub async fn execute_step(
     // A future per-execution "expect new host key" toggle would feed in here.
     let shell_results = ssh::execute_commands_via_shell(
         config,
-        device.session_id.clone(),
+        session_id.to_string(),
         session.name.clone(),
         auto_commands,
         vec![(step_id.clone(), step.command.clone())],
@@ -6651,7 +6660,9 @@ pub async fn execute_device_phase(
     }
 
     // Get session info for SSH execution
-    let session = state.provider.get_session(&device.session_id).await?;
+    let session_id = device.session_id.as_deref()
+        .ok_or_else(|| ApiError { error: "Device has no session_id".to_string(), code: "VALIDATION".to_string() })?;
+    let session = state.provider.get_session(session_id).await?;
     let profile = state.provider.get_profile(&session.profile_id).await?;
     let credential = state
         .provider
@@ -6828,7 +6839,7 @@ pub async fn execute_device_phase(
         // AUDIT FIX (REMOTE-003): default-refuse changed host keys.
         let shell_results = ssh::execute_commands_via_shell(
             config,
-            device.session_id.clone(),
+            session_id.to_string(),
             session.name.clone(),
             auto_commands,
             cli_commands.clone(),
@@ -7016,8 +7027,12 @@ pub async fn analyze_mop_execution(
 
     // Gather device information
     for device in &devices {
-        let session = state.provider.get_session(&device.session_id).await.ok();
-        let session_name = session.map(|s| s.name).unwrap_or_else(|| device.session_id.clone());
+        let session = if let Some(ref sid) = device.session_id {
+            state.provider.get_session(sid).await.ok()
+        } else { None };
+        let session_name = session.map(|s| s.name)
+            .or_else(|| device.device_name.clone())
+            .unwrap_or_else(|| device.session_id.clone().unwrap_or_else(|| "unknown".to_string()));
 
         context.push_str(&format!("Device: {} (Status: {:?})\n", session_name, device.status));
 
@@ -7067,8 +7082,12 @@ pub async fn analyze_mop_execution(
     let mut recommendations = Vec::new();
     for device in &devices {
         if device.status == DeviceExecutionStatus::Failed {
-            let session = state.provider.get_session(&device.session_id).await.ok();
-            let name = session.map(|s| s.name).unwrap_or_else(|| device.session_id.clone());
+            let session = if let Some(ref sid) = device.session_id {
+                state.provider.get_session(sid).await.ok()
+            } else { None };
+            let name = session.map(|s| s.name)
+                .or_else(|| device.device_name.clone())
+                .unwrap_or_else(|| device.session_id.clone().unwrap_or_else(|| "unknown".to_string()));
             recommendations.push(format!("Review failed device: {}", name));
             if device.error_message.is_some() {
                 recommendations.push(format!("Check error on {}: {}", name, device.error_message.as_ref().unwrap()));
@@ -9274,6 +9293,112 @@ pub async fn stop_all_tunnels(
 
 // ── Workspace local file operations ────────────────────────────────────────
 
+/// Validate that a filesystem path is safe to operate on.
+///
+/// Blocks path-traversal attacks (`..` components), access to sensitive
+/// system directories, and access to the app's own database file.
+fn validate_local_path(raw: &str) -> Result<std::path::PathBuf, ApiError> {
+    use std::path::Path;
+
+    let path = Path::new(raw);
+
+    // Block relative paths and paths containing `..` traversal
+    if !path.is_absolute() {
+        return Err(ApiError {
+            error: "Only absolute paths are allowed".to_string(),
+            code: "FS_PATH_DENIED".to_string(),
+        });
+    }
+
+    // Check for `..` components before canonicalization (blocks the attempt
+    // even when the intermediate path doesn't exist yet, e.g. mkdir).
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(ApiError {
+                error: "Path traversal ('..') is not allowed".to_string(),
+                code: "FS_PATH_DENIED".to_string(),
+            });
+        }
+    }
+
+    // Try to canonicalize (resolves symlinks). If the path doesn't exist
+    // yet (e.g. mkdir, write to new file), canonicalize the longest existing
+    // ancestor instead so we can still validate the final location.
+    let canonical = if path.exists() {
+        path.canonicalize().map_err(|e| ApiError {
+            error: format!("Failed to resolve path: {}", e),
+            code: "FS_PATH_DENIED".to_string(),
+        })?
+    } else {
+        // Walk up until we find a component that exists, canonicalize that,
+        // then re-append the tail.
+        let mut existing = path.to_path_buf();
+        let mut tail_parts: Vec<std::ffi::OsString> = Vec::new();
+        while !existing.exists() {
+            if let Some(name) = existing.file_name() {
+                tail_parts.push(name.to_os_string());
+                existing = existing.parent().unwrap_or(Path::new("/")).to_path_buf();
+            } else {
+                break;
+            }
+        }
+        let mut base = existing.canonicalize().map_err(|e| ApiError {
+            error: format!("Failed to resolve path: {}", e),
+            code: "FS_PATH_DENIED".to_string(),
+        })?;
+        for part in tail_parts.into_iter().rev() {
+            base.push(part);
+        }
+        base
+    };
+
+    let canonical_str = canonical.to_string_lossy();
+
+    // Blocked prefixes — sensitive system directories and user secrets
+    let blocked_prefixes: &[&str] = &[
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/sudoers",
+        "/System",
+        "/usr",
+        "/bin",
+        "/sbin",
+    ];
+
+    for prefix in blocked_prefixes {
+        if canonical_str.starts_with(prefix) {
+            return Err(ApiError {
+                error: format!("Access to '{}' is not allowed", prefix),
+                code: "FS_PATH_DENIED".to_string(),
+            });
+        }
+    }
+
+    // Block ~/.ssh/
+    if let Some(home) = dirs::home_dir() {
+        let ssh_dir = home.join(".ssh");
+        if canonical.starts_with(&ssh_dir) {
+            return Err(ApiError {
+                error: "Access to ~/.ssh/ is not allowed".to_string(),
+                code: "FS_PATH_DENIED".to_string(),
+            });
+        }
+    }
+
+    // Block the app's own database file
+    let db_path = crate::db::default_db_path();
+    if let Ok(db_canonical) = db_path.canonicalize() {
+        if canonical == db_canonical {
+            return Err(ApiError {
+                error: "Access to the application database is not allowed".to_string(),
+                code: "FS_PATH_DENIED".to_string(),
+            });
+        }
+    }
+
+    Ok(canonical)
+}
+
 #[derive(Deserialize)]
 pub struct LocalFileReadRequest {
     pub path: String,
@@ -9282,6 +9407,7 @@ pub struct LocalFileReadRequest {
 pub async fn local_file_read(
     Json(req): Json<LocalFileReadRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_local_path(&req.path)?;
     let content = tokio::fs::read_to_string(&req.path).await.map_err(|e| ApiError {
         error: format!("Failed to read {}: {}", req.path, e),
         code: "FS_READ".to_string(),
@@ -9298,6 +9424,7 @@ pub struct LocalFileWriteRequest {
 pub async fn local_file_write(
     Json(req): Json<LocalFileWriteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_local_path(&req.path)?;
     tokio::fs::write(&req.path, &req.content).await.map_err(|e| ApiError {
         error: format!("Failed to write {}: {}", req.path, e),
         code: "FS_WRITE".to_string(),
@@ -9358,6 +9485,7 @@ pub struct LocalFileMkdirRequest {
 pub async fn local_file_mkdir(
     Json(req): Json<LocalFileMkdirRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_local_path(&req.path)?;
     tokio::fs::create_dir_all(&req.path).await.map_err(|e| ApiError {
         error: format!("Failed to mkdir {}: {}", req.path, e),
         code: "FS_MKDIR".to_string(),
@@ -9374,6 +9502,7 @@ pub struct LocalFileDeleteRequest {
 pub async fn local_file_delete(
     Json(req): Json<LocalFileDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_local_path(&req.path)?;
     if req.is_dir {
         tokio::fs::remove_dir_all(&req.path).await
     } else {
@@ -9394,6 +9523,8 @@ pub struct LocalFileRenameRequest {
 pub async fn local_file_rename(
     Json(req): Json<LocalFileRenameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_local_path(&req.from)?;
+    validate_local_path(&req.to)?;
     tokio::fs::rename(&req.from, &req.to).await.map_err(|e| ApiError {
         error: format!("Failed to rename: {}", e),
         code: "FS_RENAME".to_string(),
@@ -9422,6 +9553,7 @@ pub struct LocalRunPythonRequest {
 pub async fn local_run_python(
     Json(req): Json<LocalRunPythonRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    validate_local_path(&req.path)?;
     let content = tokio::fs::read_to_string(&req.path).await.map_err(|e| ApiError {
         error: format!("Failed to read {}: {}", req.path, e),
         code: "FS_READ".to_string(),

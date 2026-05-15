@@ -124,7 +124,8 @@ async fn handle_local_terminal(socket: WebSocket, manager: Arc<TerminalManager>,
             let mut ws_tx = ws_tx;
             let _ = ws_tx
                 .send(Message::Text(
-                    serde_json::to_string(&TerminalMessage::Error(e.to_string())).unwrap().into(),
+                    serde_json::to_string(&TerminalMessage::Error(e.to_string()))
+                        .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into(),
                 ))
                 .await;
             return;
@@ -146,7 +147,8 @@ async fn handle_ssh_terminal(socket: WebSocket, query: WsQuery, manager: Arc<Ter
         Err(e) => {
             let msg = ServerMessage::Error { data: e };
             let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&msg)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into()))
                 .await;
             return;
         }
@@ -188,7 +190,8 @@ async fn handle_ssh_terminal(socket: WebSocket, query: WsQuery, manager: Arc<Ter
                 data: format!("SSH connection failed: {}", e),
             };
             let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&msg)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into()))
                 .await;
             return;
         }
@@ -243,7 +246,8 @@ async fn handle_ssh_terminal(socket: WebSocket, query: WsQuery, manager: Arc<Ter
         via_jump: ssh_params.jump_display_name.clone(),
     };
     if ws_tx
-        .send(Message::Text(serde_json::to_string(&connected_msg).unwrap().into()))
+        .send(Message::Text(serde_json::to_string(&connected_msg)
+            .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into()))
         .await
         .is_err()
     {
@@ -968,7 +972,8 @@ async fn handle_telnet_terminal(
         Err(e) => {
             let msg = ServerMessage::Error { data: format!("Failed to get Telnet params: {}", e) };
             let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&msg)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into()))
                 .await;
             return;
         }
@@ -994,7 +999,8 @@ async fn handle_telnet_terminal(
                 data: format!("Telnet connection failed: {}", e),
             };
             let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&msg)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into()))
                 .await;
             return;
         }
@@ -1008,7 +1014,8 @@ async fn handle_telnet_terminal(
         via_jump: None,
     };
     if ws_tx
-        .send(Message::Text(serde_json::to_string(&connected_msg).unwrap().into()))
+        .send(Message::Text(serde_json::to_string(&connected_msg)
+            .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }).into()))
         .await
         .is_err()
     {
@@ -1198,7 +1205,8 @@ async fn handle_topology_live(socket: WebSocket, app_state: Arc<AppState>) {
                             host: String::new(),
                             error: format!("Invalid message: {}", e),
                         };
-                        let _ = msg_tx.send(serde_json::to_string(&err).unwrap());
+                        let _ = msg_tx.send(serde_json::to_string(&err)
+                            .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() }));
                         continue;
                     }
                 };
@@ -1304,7 +1312,8 @@ async fn poll_single_target(
                 host: host.clone(),
                 error: e,
             };
-            if msg_tx.send(serde_json::to_string(&err).unwrap()).is_err() {
+            if msg_tx.send(serde_json::to_string(&err)
+                .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() })).is_err() {
                 return false;
             }
             return true;
@@ -1419,7 +1428,8 @@ async fn poll_single_target(
                     timestamp: timestamp.clone(),
                     interfaces,
                 };
-                if msg_tx.send(serde_json::to_string(&msg).unwrap()).is_err() {
+                if msg_tx.send(serde_json::to_string(&msg)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() })).is_err() {
                     return false;
                 }
 
@@ -1473,7 +1483,8 @@ async fn poll_single_target(
                     memory_total_mb,
                     interfaces: iface_infos,
                 };
-                return msg_tx.send(serde_json::to_string(&device_msg).unwrap()).is_ok();
+                return msg_tx.send(serde_json::to_string(&device_msg)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() })).is_ok();
             }
             Err(crate::snmp::SnmpError::Timeout(_)) => {
                 last_error = Some("SNMP timeout after 5s".to_string());
@@ -1490,7 +1501,8 @@ async fn poll_single_target(
                     host: host.clone(),
                     error: e.to_string(),
                 };
-                return msg_tx.send(serde_json::to_string(&err).unwrap()).is_ok();
+                return msg_tx.send(serde_json::to_string(&err)
+                    .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() })).is_ok();
             }
         }
     }
@@ -1501,7 +1513,8 @@ async fn poll_single_target(
         host: host.clone(),
         error: last_error.unwrap_or_else(|| "No SNMP community succeeded".to_string()),
     };
-    msg_tx.send(serde_json::to_string(&err).unwrap()).is_ok()
+    msg_tx.send(serde_json::to_string(&err)
+        .unwrap_or_else(|e| { tracing::error!("Serialization failed: {}", e); r#"{"error":"serialization failed"}"#.to_string() })).is_ok()
 }
 
 /// Resolve SNMP communities from a profile ID via the vault.

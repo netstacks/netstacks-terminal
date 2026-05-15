@@ -12,7 +12,7 @@ export type ChangeStatus =
   | 'approved'
   | 'rejected';
 
-export type MopStepType = 'pre_check' | 'change' | 'post_check' | 'rollback';
+export type MopStepType = 'pre_check' | 'change' | 'post_check' | 'rollback' | 'api_action';
 
 export interface MopStep {
   id: string;

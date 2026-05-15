@@ -285,7 +285,7 @@ const AISidePanel = ({
       try {
         switch (cliFlavor) {
           case 'cisco-ios':
-          case 'cisco-xr':
+          case 'cisco-ios-xr':
           case 'cisco-nxos':
           case 'arista':
             // Cisco IOS / IOS-XR / NX-OS and Arista EOS all use this command

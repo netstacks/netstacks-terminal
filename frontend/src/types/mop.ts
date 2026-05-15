@@ -115,7 +115,7 @@ export interface MopExecution {
   id: string;
 
   // Plan reference (preferred; replaces legacy template_id)
-  plan_id: string;
+  plan_id?: string | null;
   plan_revision: number;
 
   // Legacy template reference (kept for backward compatibility)

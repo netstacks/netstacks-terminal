@@ -1420,6 +1420,9 @@ pub enum ChangeStatus {
     Complete,
     Failed,
     RolledBack,
+    PendingReview,
+    Approved,
+    Rejected,
 }
 
 impl Default for ChangeStatus {
@@ -1437,6 +1440,9 @@ impl ChangeStatus {
             Self::Complete => "complete",
             Self::Failed => "failed",
             Self::RolledBack => "rolled_back",
+            Self::PendingReview => "pending_review",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
         }
     }
 
@@ -1448,6 +1454,9 @@ impl ChangeStatus {
             "complete" => Some(Self::Complete),
             "failed" => Some(Self::Failed),
             "rolled_back" => Some(Self::RolledBack),
+            "pending_review" => Some(Self::PendingReview),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
             _ => None,
         }
     }
@@ -2655,12 +2664,18 @@ impl MopTemplate {
     }
 }
 
+fn default_plan_revision() -> i64 {
+    1
+}
+
 /// MOP Execution - an instance of executing a MOP template
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MopExecution {
     pub id: String,
     pub template_id: Option<String>,
     pub plan_id: Option<String>,
+    #[serde(default = "default_plan_revision")]
+    pub plan_revision: i64,
     pub name: String,
     pub description: Option<String>,
     pub execution_strategy: ExecutionStrategy,
@@ -2732,6 +2747,7 @@ impl MopExecution {
             id: uuid::Uuid::new_v4().to_string(),
             template_id: data.template_id,
             plan_id: data.plan_id,
+            plan_revision: 1,
             name: data.name,
             description: data.description,
             execution_strategy: data.execution_strategy,
@@ -2792,7 +2808,18 @@ impl MopExecution {
 pub struct MopExecutionDevice {
     pub id: String,
     pub execution_id: String,
-    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub device_order: i32,
     pub status: DeviceExecutionStatus,
     pub current_step_id: Option<String>,
@@ -2808,7 +2835,18 @@ pub struct MopExecutionDevice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMopExecutionDevice {
     pub execution_id: String,
-    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub device_order: i32,
 }
 
@@ -2832,6 +2870,11 @@ impl MopExecutionDevice {
             id: uuid::Uuid::new_v4().to_string(),
             execution_id: data.execution_id,
             session_id: data.session_id,
+            device_id: data.device_id,
+            credential_id: data.credential_id,
+            device_name: data.device_name,
+            device_host: data.device_host,
+            role: data.role,
             device_order: data.device_order,
             status: DeviceExecutionStatus::Pending,
             current_step_id: None,

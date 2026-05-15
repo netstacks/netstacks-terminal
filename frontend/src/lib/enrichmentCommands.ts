@@ -31,7 +31,7 @@ export const COMMAND_SETS: Record<CliFlavor, CommandSet> = {
     resources: ['show processes cpu | include CPU', 'show processes memory | include Processor'],
     interfaces: ['show interfaces'],
   },
-  'cisco-xr': {
+  'cisco-ios-xr': {
     version: ['show version'],
     resources: ['show processes cpu | include CPU', 'show memory summary'],
     interfaces: ['show interfaces'],

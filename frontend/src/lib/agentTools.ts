@@ -220,7 +220,7 @@ export const AGENT_TOOLS: AgentTool[] = [
         flavor: {
           type: 'string',
           description: 'The detected CLI flavor. Choose the closest match.',
-          enum: ['linux', 'cisco-ios', 'cisco-xr', 'cisco-nxos', 'juniper', 'arista', 'paloalto', 'fortinet']
+          enum: ['linux', 'cisco-ios', 'cisco-ios-xr', 'cisco-nxos', 'juniper', 'arista', 'paloalto', 'fortinet']
         }
       },
       required: ['session_id', 'flavor']

@@ -8,7 +8,7 @@
 import { useEffect, useRef } from 'react';
 
 // Only import Tauri event API if running in Tauri
-const isTauri = () => typeof window !== 'undefined' && '__TAURI__' in window;
+const isTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 export interface MenuEventCallbacks {
   onNewSession?: () => void;

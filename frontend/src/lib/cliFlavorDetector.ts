@@ -62,7 +62,7 @@ export function detectCliFlavor(
       output.includes('ios-xr') ||
       output.includes('iosxr')
     ) {
-      return 'cisco-xr';
+      return 'cisco-ios-xr';
     }
     // Default Cisco to IOS/IOS-XE
     return 'cisco-ios';
@@ -121,7 +121,7 @@ export function getFlavorDisplayName(flavor: CliFlavor): string {
   const names: Record<CliFlavor, string> = {
     auto: 'Auto-Detect',
     'cisco-ios': 'Cisco IOS',
-    'cisco-xr': 'Cisco IOS-XR',
+    'cisco-ios-xr': 'Cisco IOS-XR',
     'cisco-nxos': 'Cisco NX-OS',
     'juniper': 'Juniper JunOS',
     'arista': 'Arista EOS',

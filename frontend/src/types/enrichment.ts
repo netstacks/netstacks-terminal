@@ -10,7 +10,7 @@ export type CliFlavor =
   | 'auto'
   | 'linux'
   | 'cisco-ios'
-  | 'cisco-xr'
+  | 'cisco-ios-xr'
   | 'cisco-nxos'
   | 'juniper'
   | 'arista'

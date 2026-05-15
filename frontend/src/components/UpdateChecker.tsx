@@ -3,7 +3,7 @@ import './UpdateChecker.css';
 
 // Dynamic imports for Tauri plugins (only available in Tauri environment)
 const getTauriModules = async () => {
-  if (!('__TAURI__' in window)) {
+  if (!('__TAURI_INTERNALS__' in window)) {
     return { check: null, relaunch: null };
   }
   const [updater, process] = await Promise.all([

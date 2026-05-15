@@ -326,6 +326,7 @@ function truncateToolResult(content: string): string {
 // MCP tools use "mcp:{server_id}:{tool_name}" which contains colons and may exceed 64 chars
 // We maintain a bidirectional map between sanitized names and original names
 const toolNameMap = new Map<string, string>(); // sanitized -> original
+const TOOL_NAME_MAP_MAX_SIZE = 1000;
 
 function sanitizeToolName(name: string): string {
   // Non-MCP tools are already safe
@@ -342,6 +343,9 @@ function sanitizeToolName(name: string): string {
   // Truncate to 64 chars
   if (sanitized.length > 64) sanitized = sanitized.slice(0, 64);
 
+  if (toolNameMap.size >= TOOL_NAME_MAP_MAX_SIZE) {
+    toolNameMap.clear();
+  }
   toolNameMap.set(sanitized, name);
   return sanitized;
 }
@@ -1103,7 +1107,7 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
       case 'set_session_cli_flavor': {
         const sessionId = input.session_id as string;
         const rawFlavor = input.flavor as string;
-        const validFlavors: CliFlavor[] = ['linux', 'cisco-ios', 'cisco-xr', 'cisco-nxos', 'juniper', 'arista', 'paloalto', 'fortinet'];
+        const validFlavors: CliFlavor[] = ['linux', 'cisco-ios', 'cisco-ios-xr', 'cisco-nxos', 'juniper', 'arista', 'paloalto', 'fortinet'];
         if (!validFlavors.includes(rawFlavor as CliFlavor)) {
           return {
             content: `Invalid flavor "${rawFlavor}". Must be one of: ${validFlavors.join(', ')}.`,

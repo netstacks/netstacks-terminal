@@ -105,19 +105,20 @@ fn check_enterprise_mode() -> bool {
         return false;
     }
 
-    // Read and parse config file
+    // Read and parse config file using proper JSON parsing
     match fs::read_to_string(&config_path) {
         Ok(content) => {
-            // Simple check for controllerUrl in JSON
-            // If controllerUrl is present and not null, we're in Enterprise mode
-            // Format: "controllerUrl":"https://..." (not "controllerUrl":null)
-            if content.contains("\"controllerUrl\"")
-                && !content.contains("\"controllerUrl\":null")
-                && !content.contains("\"controllerUrl\": null")
-            {
-                return true;
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(config) => {
+                    // Enterprise mode is active when controllerUrl is present
+                    // and is a non-null, non-empty string
+                    matches!(
+                        config.get("controllerUrl"),
+                        Some(serde_json::Value::String(url)) if !url.is_empty()
+                    )
+                }
+                Err(_) => false,
             }
-            false
         }
         Err(_) => false,
     }
@@ -518,7 +519,16 @@ async fn async_main() {
     tracing::info!("NetStacks Agent starting on https://{}", addr);
 
     let acceptor = TlsAcceptor::from(local_tls.server_config);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                "Failed to bind to {}: {}. Is port {} already in use by another process?",
+                addr, e, addr.port()
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Layer 1: parent-PID watcher. Tauri's RunEvent::Exit cleanup is
     // unreliable (Ctrl+C, SIGKILL, crash all skip it), so the agent
@@ -566,9 +576,36 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
     };
 
     // CORS layer for development and Tauri production
-    // Allow localhost origins and Tauri origins
+    // Only allow localhost origins and Tauri origins
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            |origin: &axum::http::HeaderValue, _req: &axum::http::request::Parts| {
+                let Ok(origin_str) = origin.to_str() else { return false };
+                // Allow Tauri-specific origins
+                if origin_str == "tauri://localhost" || origin_str == "https://tauri.localhost" {
+                    return true;
+                }
+                // Allow http(s)://localhost[:port] and http(s)://127.0.0.1[:port]
+                // Origin header format is always scheme://host[:port] (no path)
+                for prefix in &[
+                    "http://localhost",
+                    "https://localhost",
+                    "http://127.0.0.1",
+                    "https://127.0.0.1",
+                ] {
+                    if origin_str == *prefix {
+                        return true;
+                    }
+                    // Allow with port suffix (e.g. "http://localhost:3000")
+                    if let Some(rest) = origin_str.strip_prefix(prefix) {
+                        if rest.starts_with(':') && rest[1..].chars().all(|c| c.is_ascii_digit()) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            },
+        ))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
 

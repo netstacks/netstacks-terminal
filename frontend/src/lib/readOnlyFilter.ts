@@ -64,7 +64,7 @@ const VENDOR_SAFE_PATTERNS: Record<CliFlavor, RegExp[]> = {
     /^terminal\s+length\s+\d+/i,  // Pagination control
     /^more\s+/i,
   ],
-  'cisco-xr': [
+  'cisco-ios-xr': [
     /^show\s+/i,
     /^ping\s+/i,
     /^traceroute\s+/i,

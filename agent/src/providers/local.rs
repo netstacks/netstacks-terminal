@@ -5901,7 +5901,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn list_mop_executions(&self) -> Result<Vec<MopExecution>, ProviderError> {
         let rows = sqlx::query(
-            "SELECT id, template_id, plan_id, name, description, execution_strategy, control_mode,
+            "SELECT id, template_id, plan_id, plan_revision, name, description, execution_strategy, control_mode,
                     status, current_phase, ai_analysis, on_failure,
                     pause_after_pre_checks, pause_after_changes, pause_after_post_checks,
                     created_by, created_at, updated_at,
@@ -5931,6 +5931,7 @@ impl DataProvider for LocalDataProvider {
                 id: row.get("id"),
                 template_id: row.get("template_id"),
                 plan_id: row.get("plan_id"),
+                plan_revision: row.get::<Option<i64>, _>("plan_revision").unwrap_or(1),
                 name: row.get("name"),
                 description: row.get("description"),
                 execution_strategy: strategy_str.parse().unwrap_or_default(),
@@ -5955,7 +5956,7 @@ impl DataProvider for LocalDataProvider {
 
     async fn get_mop_execution(&self, id: &str) -> Result<MopExecution, ProviderError> {
         let row = sqlx::query(
-            "SELECT id, template_id, plan_id, name, description, execution_strategy, control_mode,
+            "SELECT id, template_id, plan_id, plan_revision, name, description, execution_strategy, control_mode,
                     status, current_phase, ai_analysis, on_failure,
                     pause_after_pre_checks, pause_after_changes, pause_after_post_checks,
                     created_by, created_at, updated_at,
@@ -5985,6 +5986,7 @@ impl DataProvider for LocalDataProvider {
             id: row.get("id"),
             template_id: row.get("template_id"),
             plan_id: row.get("plan_id"),
+            plan_revision: row.get::<Option<i64>, _>("plan_revision").unwrap_or(1),
             name: row.get("name"),
             description: row.get("description"),
             execution_strategy: strategy_str.parse().unwrap_or_default(),
@@ -6087,7 +6089,8 @@ impl DataProvider for LocalDataProvider {
 
     async fn list_mop_execution_devices(&self, execution_id: &str) -> Result<Vec<MopExecutionDevice>, ProviderError> {
         let rows = sqlx::query(
-            "SELECT id, execution_id, session_id, device_order, status, current_step_id,
+            "SELECT id, execution_id, session_id, device_id, credential_id, device_name, device_host, role,
+                    device_order, status, current_step_id,
                     pre_snapshot_id, post_snapshot_id, ai_analysis, started_at, completed_at, error_message
              FROM mop_execution_devices WHERE execution_id = ? ORDER BY device_order"
         )
@@ -6113,6 +6116,11 @@ impl DataProvider for LocalDataProvider {
                 id: row.get("id"),
                 execution_id: row.get("execution_id"),
                 session_id: row.get("session_id"),
+                device_id: row.get("device_id"),
+                credential_id: row.get("credential_id"),
+                device_name: row.get("device_name"),
+                device_host: row.get("device_host"),
+                role: row.get("role"),
                 device_order: row.get("device_order"),
                 status: status_str.parse().unwrap_or_default(),
                 current_step_id: row.get("current_step_id"),
@@ -6129,7 +6137,8 @@ impl DataProvider for LocalDataProvider {
 
     async fn get_mop_execution_device(&self, id: &str) -> Result<MopExecutionDevice, ProviderError> {
         let row = sqlx::query(
-            "SELECT id, execution_id, session_id, device_order, status, current_step_id,
+            "SELECT id, execution_id, session_id, device_id, credential_id, device_name, device_host, role,
+                    device_order, status, current_step_id,
                     pre_snapshot_id, post_snapshot_id, ai_analysis, started_at, completed_at, error_message
              FROM mop_execution_devices WHERE id = ?"
         )
@@ -6154,6 +6163,11 @@ impl DataProvider for LocalDataProvider {
             id: row.get("id"),
             execution_id: row.get("execution_id"),
             session_id: row.get("session_id"),
+            device_id: row.get("device_id"),
+            credential_id: row.get("credential_id"),
+            device_name: row.get("device_name"),
+            device_host: row.get("device_host"),
+            role: row.get("role"),
             device_order: row.get("device_order"),
             status: status_str.parse().unwrap_or_default(),
             current_step_id: row.get("current_step_id"),
@@ -6170,14 +6184,20 @@ impl DataProvider for LocalDataProvider {
         let device = MopExecutionDevice::new(data);
 
         sqlx::query(
-            "INSERT INTO mop_execution_devices (id, execution_id, session_id, device_order, status,
+            "INSERT INTO mop_execution_devices (id, execution_id, session_id, device_id, credential_id,
+                                                device_name, device_host, role, device_order, status,
                                                 current_step_id, pre_snapshot_id, post_snapshot_id,
                                                 ai_analysis, started_at, completed_at, error_message)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&device.id)
         .bind(&device.execution_id)
         .bind(&device.session_id)
+        .bind(&device.device_id)
+        .bind(&device.credential_id)
+        .bind(&device.device_name)
+        .bind(&device.device_host)
+        .bind(&device.role)
         .bind(device.device_order)
         .bind(device.status.to_string())
         .bind(&device.current_step_id)

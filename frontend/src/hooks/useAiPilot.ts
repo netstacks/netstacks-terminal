@@ -108,6 +108,20 @@ Rate your confidence 0.0-1.0 where:
 - 0.5-0.7 = somewhat uncertain
 - <0.5 = need human review`;
 
+/**
+ * Safely parse a JSON AI response and validate that required fields exist.
+ * Returns null if parsing fails or required fields are missing.
+ */
+function parseAiResponse<T>(json: string, requiredFields: string[]): T | null {
+  try {
+    const parsed = JSON.parse(json);
+    if (requiredFields.every(f => f in parsed)) return parsed as T;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 let commentaryIdCounter = 0;
 
 function createCommentary(
@@ -195,6 +209,8 @@ export function useAiPilot(execHook: UseMopExecutionReturn): UseAiPilotReturn {
   const analyzeStepOutput = useCallback(async (device: MopExecutionDevice, step: MopExecutionStep) => {
     if (!state.active) return;
 
+    // Reset abort controller for new work
+    abortRef.current = new AbortController();
     setState(prev => ({ ...prev, processing: true }));
     try {
       const messages: ChatMessage[] = [
@@ -214,13 +230,19 @@ ${step.output || '(no output)'}`,
       ];
 
       const response = await sendChatMessage(messages);
-      try {
-        const parsed = JSON.parse(response);
+      // Check if aborted while awaiting
+      if (abortRef.current?.signal.aborted) return;
+
+      const parsed = parseAiResponse<{ assessment?: string; type?: string; confidence?: number }>(
+        response,
+        ['assessment'],
+      );
+      if (parsed) {
         const entry = createCommentary(
           step.step_type,
           device.device_name,
           parsed.assessment || response,
-          parsed.type || 'info',
+          (parsed.type as AiCommentary['type']) || 'info',
           step.command,
           parsed.confidence,
         );
@@ -229,8 +251,8 @@ ${step.output || '(no output)'}`,
         if (parsed.confidence != null) {
           checkConfidence(parsed.confidence);
         }
-      } catch {
-        // Non-JSON response - use as plain commentary
+      } else {
+        // Non-JSON or missing fields - use as plain commentary
         addCommentary(createCommentary(step.step_type, device.device_name, response, 'info', step.command));
       }
     } catch (err) {
@@ -253,6 +275,8 @@ ${step.output || '(no output)'}`,
   ) => {
     if (!state.active || state.level < 2) return;
 
+    // Reset abort controller for new work
+    abortRef.current = new AbortController();
     setState(prev => ({ ...prev, processing: true }));
     try {
       // Build execution summary
@@ -277,13 +301,19 @@ ${deviceSummaries}`,
       ];
 
       const response = await sendChatMessage(messages);
-      try {
-        const parsed = JSON.parse(response);
+      // Check if aborted while awaiting
+      if (abortRef.current?.signal.aborted) return;
+
+      const parsed = parseAiResponse<{ action?: string; stepId?: string; phaseType?: string; rationale?: string; confidence?: number }>(
+        response,
+        ['action'],
+      );
+      if (parsed) {
         const suggestion: AiSuggestion = {
           id: `sug-${Date.now()}`,
-          action: parsed.action || 'proceed',
+          action: (parsed.action as AiSuggestion['action']) || 'proceed',
           stepId: parsed.stepId,
-          phaseType: parsed.phaseType,
+          phaseType: parsed.phaseType as AiSuggestion['phaseType'],
           rationale: parsed.rationale || 'No rationale provided',
           confidence: parsed.confidence ?? 0.7,
         };
@@ -292,7 +322,7 @@ ${deviceSummaries}`,
         if (suggestion.confidence < state.confidenceThreshold) {
           checkConfidence(suggestion.confidence);
         }
-      } catch {
+      } else {
         addCommentary(createCommentary('', '', `AI suggestion: ${response}`, 'suggestion'));
       }
     } catch (err) {
@@ -348,6 +378,8 @@ ${deviceSummaries}`,
   ) => {
     if (!state.active || state.level < 3) return;
 
+    // Reset abort controller for new work
+    abortRef.current = new AbortController();
     setState(prev => ({ ...prev, processing: true }));
     try {
       const deviceResults = devices.map(d => {
@@ -374,12 +406,18 @@ ${deviceResults.map(d => `${d.name}: ${d.passed}/${d.total} passed, ${d.failed} 
       ];
 
       const response = await sendChatMessage(messages);
-      try {
-        const parsed = JSON.parse(response);
+      // Check if aborted while awaiting
+      if (abortRef.current?.signal.aborted) return;
+
+      const parsed = parseAiResponse<{ recommendation?: string; rationale?: string; confidence?: number }>(
+        response,
+        ['recommendation'],
+      );
+      if (parsed) {
         const gate: PhaseGateSummary = {
           phase,
           deviceResults: deviceResults.map(d => ({ name: d.name, passed: d.passed, failed: d.failed, total: d.total })),
-          recommendation: parsed.recommendation || 'pause',
+          recommendation: (parsed.recommendation as PhaseGateSummary['recommendation']) || 'pause',
           rationale: parsed.rationale || 'No rationale provided',
           confidence: parsed.confidence ?? 0.7,
         };
@@ -392,7 +430,7 @@ ${deviceResults.map(d => `${d.name}: ${d.passed}/${d.total} passed, ${d.failed} 
         } else if (gate.confidence < state.confidenceThreshold) {
           checkConfidence(gate.confidence);
         }
-      } catch {
+      } else {
         addCommentary(createCommentary(phase, '', `Phase gate analysis: ${response}`, 'info'));
       }
     } catch (err) {

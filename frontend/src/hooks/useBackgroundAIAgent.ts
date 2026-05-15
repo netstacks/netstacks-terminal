@@ -31,6 +31,12 @@ export function useBackgroundAIAgent(options: UseBackgroundAIAgentOptions = {}) 
   const [progress, setProgress] = useState(0);
   const lastMessageCountRef = useRef(0);
 
+  // Store callbacks in refs to avoid re-firing effects when callers pass inline functions
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+  const onProgressRef = useRef(onProgress);
+  onProgressRef.current = onProgress;
+
   // Use the core AI agent hook
   const agent = useAIAgent({
     provider: 'anthropic', // Default provider for token tracking
@@ -112,19 +118,19 @@ export function useBackgroundAIAgent(options: UseBackgroundAIAgentOptions = {}) 
             level: 'success',
           }]);
           setIsRunning(false);
-          onComplete?.(agent.messages);
+          onCompleteRef.current?.(agent.messages);
         }
         break;
       case 'error':
         setIsRunning(false);
         break;
     }
-  }, [agent.agentState, isRunning, agent.messages.length, onComplete]);
+  }, [agent.agentState, isRunning, agent.messages.length]);
 
   // Notify parent of progress changes
   useEffect(() => {
     if (isRunning || progress === 100) {
-      onProgress?.({
+      onProgressRef.current?.({
         isRunning,
         currentTask,
         logs,
@@ -132,7 +138,7 @@ export function useBackgroundAIAgent(options: UseBackgroundAIAgentOptions = {}) 
         messages: agent.messages,
       });
     }
-  }, [isRunning, currentTask, logs, progress, agent.messages, onProgress]);
+  }, [isRunning, currentTask, logs, progress, agent.messages]);
 
   // Start enrichment
   const startEnrichment = useCallback(async (prompt: string, taskName: string) => {

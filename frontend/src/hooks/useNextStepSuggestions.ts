@@ -6,7 +6,7 @@
  * and provides category-based organization of suggestions.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { sendChatMessage, AiNotConfiguredError } from '../api/ai';
 import type { AiContext } from '../api/ai';
 import { resolveProvider } from '../lib/aiProviderResolver';
@@ -42,6 +42,19 @@ export function useNextStepSuggestions({
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callbackRef = useRef<((command: string) => void) | null>(null);
+  const mountedRef = useRef(true);
+
+  // Track mount status and clean up timeout on unmount
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+    };
+  }, []);
 
   const generateSuggestions = useCallback((
     lastCommand: string,
@@ -60,6 +73,7 @@ export function useNextStepSuggestions({
 
     // Debounce the AI call
     debounceRef.current = setTimeout(async () => {
+      if (!mountedRef.current) return;
       setLoading(true);
 
       try {
@@ -104,24 +118,34 @@ Categories:
           { role: 'user', content: prompt }
         ], { context, provider, model });
 
+        if (!mountedRef.current) return;
+
         // Parse JSON from response
         const jsonMatch = response.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]) as NextStepSuggestion[];
-          // Validate and sanitize suggestions
-          const validSuggestions = parsed
-            .filter(s => s.command && s.description && s.confidence && s.category)
-            .slice(0, maxSuggestions);
-          setSuggestions(validSuggestions);
+          try {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (!Array.isArray(parsed)) {
+              setSuggestions([]);
+            } else {
+              // Validate and sanitize suggestions
+              const validSuggestions = (parsed as NextStepSuggestion[])
+                .filter(s => s.command && s.description && s.confidence && s.category)
+                .slice(0, maxSuggestions);
+              setSuggestions(validSuggestions);
+            }
+          } catch {
+            setSuggestions([]);
+          }
         }
       } catch (error) {
         // Silently fail for AI not configured - user hasn't set up AI
         if (!(error instanceof AiNotConfiguredError)) {
           console.error('[NextStepSuggestions] Failed to generate:', error);
         }
-        setSuggestions([]);
+        if (mountedRef.current) setSuggestions([]);
       } finally {
-        setLoading(false);
+        if (mountedRef.current) setLoading(false);
       }
     }, debounceMs);
   }, [enabled, maxSuggestions, debounceMs]);

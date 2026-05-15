@@ -49,7 +49,7 @@ export function useCommandSuggestions(options: UseCommandSuggestionsOptions = {}
         } else {
           const flavorNames: Record<string, string> = {
             'cisco-ios': 'Cisco IOS/IOS-XE',
-            'cisco-xr': 'Cisco IOS-XR',
+            'cisco-ios-xr': 'Cisco IOS-XR',
             'cisco-nxos': 'Cisco NX-OS',
             'juniper': 'Juniper Junos',
             'arista': 'Arista EOS',

@@ -37,7 +37,7 @@ where
     /// expose a public accessor) — see `infer_methods()`.
     pub fn route(self, path: &str, method_router: MethodRouter<S>) -> Self {
         let methods = infer_methods(&method_router);
-        self.routes.lock().unwrap().push(RouteInfo {
+        self.routes.lock().unwrap_or_else(|e| e.into_inner()).push(RouteInfo {
             path: path.to_string(),
             methods,
         });
@@ -51,7 +51,7 @@ where
     pub fn nest_tracked(self, prefix: &str, other: TrackedRouter<S>) -> Self {
         let (other_router, other_routes) = other.into_inner_with_routes();
         {
-            let mut log = self.routes.lock().unwrap();
+            let mut log = self.routes.lock().unwrap_or_else(|e| e.into_inner());
             for r in other_routes {
                 log.push(RouteInfo {
                     path: format!("{}{}", prefix, r.path),
@@ -78,7 +78,7 @@ where
 
     /// Consume self, returning the inner Router and the captured routes.
     pub fn into_inner_with_routes(self) -> (Router<S>, Vec<RouteInfo>) {
-        let routes = std::mem::take(&mut *self.routes.lock().unwrap());
+        let routes = std::mem::take(&mut *self.routes.lock().unwrap_or_else(|e| e.into_inner()));
         (self.inner, routes)
     }
 
@@ -86,7 +86,7 @@ where
     /// /api/dev/routes endpoint, so it shares that endpoint's cfg gate.
     #[cfg(any(debug_assertions, feature = "dev-routes"))]
     pub fn captured_routes(&self) -> Vec<RouteInfo> {
-        self.routes.lock().unwrap().clone()
+        self.routes.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 

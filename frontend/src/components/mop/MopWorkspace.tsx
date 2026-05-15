@@ -768,6 +768,7 @@ export default function MopWorkspace({ planId, executionId, onTitleChange, onDel
       change: [],
       post_check: [],
       rollback: [],
+      api_action: [],
     };
     for (const step of activeSteps) {
       map[step.step_type]?.push(step);
