@@ -78,6 +78,217 @@ impl GitOps {
         let output = self.run(&["blame", "--porcelain", file_path]).await?;
         Ok(parse_blame_output(&output))
     }
+
+    // Task 5: Stage, Unstage, Revert, Commit
+    pub async fn stage(&self, paths: &[&str]) -> Result<(), GitError> {
+        if paths.is_empty() {
+            self.run(&["add", "-A"]).await?;
+        } else {
+            let mut args = vec!["add", "--"];
+            args.extend_from_slice(paths);
+            self.run(&args).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn unstage(&self, paths: &[&str]) -> Result<(), GitError> {
+        if paths.is_empty() {
+            self.run(&["reset", "HEAD"]).await?;
+        } else {
+            let mut args = vec!["reset", "HEAD", "--"];
+            args.extend_from_slice(paths);
+            self.run(&args).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn revert(&self, paths: &[&str]) -> Result<(), GitError> {
+        let mut args = vec!["checkout", "--"];
+        args.extend_from_slice(paths);
+        self.run(&args).await?;
+        Ok(())
+    }
+
+    pub async fn commit(&self, message: &str, paths: &[&str]) -> Result<CommitInfo, GitError> {
+        if !paths.is_empty() {
+            self.stage(paths).await?;
+        }
+        self.run(&["commit", "-m", message]).await?;
+        let commits = self.log(1, None).await?;
+        commits.into_iter().next().ok_or_else(|| GitError::CommandFailed("no commit after git commit".into()))
+    }
+
+    // Task 6: Push, Pull, Fetch
+    pub async fn push(&self, force: bool) -> Result<(), GitError> {
+        let branch_info = self.branch_info().await?;
+        let branch_name = branch_info.map(|b| b.name).unwrap_or_else(|| "HEAD".into());
+
+        let mut args = vec!["push".to_string()];
+        if force {
+            args.push("--force-with-lease".to_string());
+        }
+        args.extend_from_slice(&["--set-upstream".to_string(), "origin".to_string(), branch_name]);
+
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.current_dir(&self.cwd);
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        let output = cmd.output().await.map_err(GitError::Io)?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn pull(&self, rebase: bool) -> Result<(), GitError> {
+        if rebase {
+            self.run(&["pull", "--rebase"]).await?;
+        } else {
+            self.run(&["pull"]).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn fetch(&self) -> Result<(), GitError> {
+        self.run(&["fetch", "origin", "--prune"]).await?;
+        Ok(())
+    }
+
+    // Task 7: Branch Management
+    pub async fn list_branches(&self) -> Result<Vec<BranchEntry>, GitError> {
+        let local = self
+            .run(&[
+                "branch",
+                "--format=%(refname:short)|||%(upstream:short)|||%(HEAD)",
+                "--no-color",
+            ])
+            .await?;
+
+        let remote = self
+            .run(&["branch", "-r", "--format=%(refname:short)", "--no-color"])
+            .await
+            .unwrap_or_default();
+
+        let mut entries: Vec<BranchEntry> = local
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.splitn(3, "|||").collect();
+                let name = parts.get(0).unwrap_or(&"").to_string();
+                let upstream = parts
+                    .get(1)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let is_current = parts.get(2).map(|s| s.trim() == "*").unwrap_or(false);
+                BranchEntry { name, is_current, is_remote: false, upstream }
+            })
+            .collect();
+
+        let remotes: Vec<BranchEntry> = remote
+            .lines()
+            .filter(|l| !l.is_empty() && !l.contains("HEAD ->"))
+            .map(|name| BranchEntry {
+                name: name.trim().to_string(),
+                is_current: false,
+                is_remote: true,
+                upstream: None,
+            })
+            .collect();
+
+        entries.extend(remotes);
+        Ok(entries)
+    }
+
+    pub async fn create_branch(&self, name: &str, from: Option<&str>) -> Result<(), GitError> {
+        if let Some(base) = from {
+            self.run(&["checkout", "-b", name, base]).await?;
+        } else {
+            self.run(&["checkout", "-b", name]).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn switch_branch(&self, name: &str) -> Result<(), GitError> {
+        self.run(&["checkout", name]).await?;
+        Ok(())
+    }
+
+    pub async fn delete_branch(&self, name: &str, force: bool) -> Result<(), GitError> {
+        if force {
+            self.run(&["branch", "-D", name]).await?;
+        } else {
+            self.run(&["branch", "-d", name]).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn merge(&self, branch: &str) -> Result<(), GitError> {
+        self.run(&["merge", "--no-ff", branch]).await?;
+        Ok(())
+    }
+
+    // Task 8: Stash, ListStashes, Init
+    pub async fn stash(&self, action: &str, index: Option<usize>) -> Result<(), GitError> {
+        match action {
+            "push" => {
+                self.run(&["stash", "push"]).await?;
+            }
+            "pop" => {
+                if let Some(i) = index {
+                    let ref_str = format!("stash@{{{}}}", i);
+                    self.run(&["stash", "pop", &ref_str]).await?;
+                } else {
+                    self.run(&["stash", "pop"]).await?;
+                }
+            }
+            "drop" => {
+                if let Some(i) = index {
+                    let ref_str = format!("stash@{{{}}}", i);
+                    self.run(&["stash", "drop", &ref_str]).await?;
+                } else {
+                    self.run(&["stash", "drop"]).await?;
+                }
+            }
+            _ => {
+                return Err(GitError::CommandFailed(format!(
+                    "Unknown stash action: {}",
+                    action
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn list_stashes(&self) -> Result<Vec<StashEntry>, GitError> {
+        let output = self
+            .run(&["stash", "list", "--format=%gd|||%gs"])
+            .await
+            .unwrap_or_default();
+        Ok(output
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty())
+            .map(|(i, line)| {
+                let parts: Vec<&str> = line.splitn(2, "|||").collect();
+                let branch = parts
+                    .get(0)
+                    .unwrap_or(&"")
+                    .trim_start_matches("stash@{")
+                    .trim_end_matches('}')
+                    .to_string();
+                let message = parts.get(1).unwrap_or(&line).to_string();
+                StashEntry { index: i, message, branch }
+            })
+            .collect())
+    }
+
+    pub async fn init(&self) -> Result<(), GitError> {
+        self.run(&["init"]).await?;
+        Ok(())
+    }
 }
 
 fn parse_status_output(output: &str) -> Vec<GitFileStatus> {
@@ -302,5 +513,177 @@ mod tests {
         assert_eq!(lines[0].content, "hello");
         assert_eq!(lines[0].line_number, 1);
         assert_eq!(lines[0].author, "Test");
+    }
+
+    // Task 5 tests
+    #[tokio::test]
+    async fn test_stage_and_commit() {
+        let dir = make_repo();
+        std::fs::write(dir.path().join("b.txt"), "new file").unwrap();
+        let ops = GitOps::new(dir.path());
+
+        let files = ops.status().await.unwrap();
+        assert_eq!(files[0].status, "untracked");
+
+        ops.stage(&["b.txt"]).await.unwrap();
+        let files = ops.status().await.unwrap();
+        assert!(files[0].staged);
+
+        let commit = ops.commit("add b.txt", &[]).await.unwrap();
+        assert_eq!(commit.message, "add b.txt");
+
+        let files = ops.status().await.unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unstage() {
+        let dir = make_repo();
+        std::fs::write(dir.path().join("c.txt"), "c").unwrap();
+        let ops = GitOps::new(dir.path());
+        ops.stage(&["c.txt"]).await.unwrap();
+        let files = ops.status().await.unwrap();
+        assert!(files[0].staged);
+
+        ops.unstage(&["c.txt"]).await.unwrap();
+        let files = ops.status().await.unwrap();
+        assert!(!files[0].staged);
+    }
+
+    #[tokio::test]
+    async fn test_revert() {
+        let dir = make_repo();
+        std::fs::write(dir.path().join("a.txt"), "modified").unwrap();
+        let ops = GitOps::new(dir.path());
+        let files = ops.status().await.unwrap();
+        assert_eq!(files[0].status, "modified");
+
+        ops.revert(&["a.txt"]).await.unwrap();
+        let files = ops.status().await.unwrap();
+        assert!(files.is_empty());
+    }
+
+    // Task 6 tests
+    #[tokio::test]
+    async fn test_push_fails_without_remote() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        let result = ops.push(false).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(msg.contains("remote") || msg.contains("origin") || msg.contains("git error"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_fails_without_remote() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        let result = ops.fetch().await;
+        assert!(result.is_err());
+    }
+
+    // Task 7 tests
+    #[tokio::test]
+    async fn test_list_branches() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        let branches = ops.list_branches().await.unwrap();
+        assert_eq!(branches.len(), 1);
+        assert!(branches[0].is_current);
+        assert!(!branches[0].is_remote);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_switch_branch() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        ops.create_branch("feature/test", None).await.unwrap();
+
+        let branches = ops.list_branches().await.unwrap();
+        assert!(branches.iter().any(|b| b.name == "feature/test"));
+
+        ops.switch_branch("feature/test").await.unwrap();
+        let info = ops.branch_info().await.unwrap().unwrap();
+        assert_eq!(info.name, "feature/test");
+    }
+
+    #[tokio::test]
+    async fn test_delete_branch() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        ops.create_branch("to-delete", None).await.unwrap();
+        ops.switch_branch("to-delete").await.unwrap();
+        // Switch back to main/master first
+        let main_branch = {
+            std::process::Command::new("git")
+                .args(["config", "init.defaultBranch"])
+                .current_dir(dir.path())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "main".into())
+        };
+        let default = if main_branch.is_empty() { "master".to_string() } else { main_branch };
+        ops.switch_branch(&default).await.unwrap();
+        ops.delete_branch("to-delete", false).await.unwrap();
+        let branches = ops.list_branches().await.unwrap();
+        assert!(!branches.iter().any(|b| b.name == "to-delete"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_branch() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        ops.create_branch("feature/merge-test", None).await.unwrap();
+        ops.switch_branch("feature/merge-test").await.unwrap();
+        std::fs::write(dir.path().join("merged.txt"), "merged content").unwrap();
+        ops.stage(&["merged.txt"]).await.unwrap();
+        ops.commit("add merged.txt", &[]).await.unwrap();
+
+        let main_branch = {
+            std::process::Command::new("git")
+                .args(["config", "init.defaultBranch"])
+                .current_dir(dir.path())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "main".into())
+        };
+        let default = if main_branch.is_empty() { "master".to_string() } else { main_branch };
+        ops.switch_branch(&default).await.unwrap();
+        ops.merge("feature/merge-test").await.unwrap();
+
+        let log = ops.log(10, None).await.unwrap();
+        assert!(log.iter().any(|c| c.message == "add merged.txt"));
+    }
+
+    // Task 8 tests
+    #[tokio::test]
+    async fn test_stash_push_and_pop() {
+        let dir = make_repo();
+        std::fs::write(dir.path().join("a.txt"), "stashed change").unwrap();
+        let ops = GitOps::new(dir.path());
+
+        let files = ops.status().await.unwrap();
+        assert!(!files.is_empty());
+
+        ops.stash("push", None).await.unwrap();
+
+        let files = ops.status().await.unwrap();
+        assert!(files.is_empty());
+
+        let stashes = ops.list_stashes().await.unwrap();
+        assert_eq!(stashes.len(), 1);
+
+        ops.stash("pop", Some(0)).await.unwrap();
+        let files = ops.status().await.unwrap();
+        assert!(!files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_init_non_repo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ops = GitOps::new(dir.path());
+        assert!(!ops.is_repo().await);
+        ops.init().await.unwrap();
+        assert!(ops.is_repo().await);
     }
 }
