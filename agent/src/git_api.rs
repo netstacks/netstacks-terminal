@@ -351,3 +351,18 @@ pub async fn git_generate_commit_message(
     let message = ops.generate_commit_message().await.map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "message": message })))
 }
+
+// ── Clone ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GitCloneRequest {
+    pub url: String,
+    pub destination: String,
+}
+
+pub async fn git_clone(
+    Json(req): Json<GitCloneRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    GitOps::clone_repo(&req.url, &req.destination).await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}

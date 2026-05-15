@@ -9,6 +9,23 @@ impl GitOps {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self { cwd: cwd.into() }
     }
+
+    /// Clone a git repository to a destination path.
+    /// This is an associated function (no &self) since the repo doesn't exist yet.
+    pub async fn clone_repo(url: &str, destination: &str) -> Result<(), GitError> {
+        let output = tokio::process::Command::new("git")
+            .args(&["clone", url, destination])
+            .output()
+            .await
+            .map_err(GitError::Io)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
 }
 
 impl GitOps {

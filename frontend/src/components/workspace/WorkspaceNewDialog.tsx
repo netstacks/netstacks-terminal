@@ -3,7 +3,11 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { listSessions } from '../../api/sessions'
 import { AgentGitOps } from '../../lib/gitOps'
 import { LocalFileOps } from '../../lib/fileOps'
-import type { WorkspaceConfig, WorkspaceMode, AiToolType } from '../../types/workspace'
+import { getClient } from '../../api/client'
+import { showToast } from '../Toast'
+import type { WorkspaceConfig, AiToolType } from '../../types/workspace'
+
+type DialogMode = 'local' | 'remote' | 'clone'
 
 interface WorkspaceNewDialogProps {
   sessions?: { id: string; name: string }[]
@@ -26,9 +30,12 @@ export default function WorkspaceNewDialog({
   onCancel,
 }: WorkspaceNewDialogProps) {
   const [sessions, setSessions] = useState(initialSessions || [])
-  const [mode, setMode] = useState<WorkspaceMode>('local')
+  const [mode, setMode] = useState<DialogMode>('local')
   const [localPath, setLocalPath] = useState('')
   const [remoteSessionId, setRemoteSessionId] = useState(sessions[0]?.id || '')
+  const [cloneUrl, setCloneUrl] = useState('')
+  const [clonePath, setClonePath] = useState('')
+  const [cloning, setCloning] = useState(false)
 
   useEffect(() => {
     if (sessions.length === 0) {
@@ -91,6 +98,46 @@ export default function WorkspaceNewDialog({
   }, [localPath, mode])
 
   const handleSubmit = useCallback(async () => {
+    if (mode === 'clone') {
+      if (!cloneUrl.trim() || !clonePath.trim()) return
+      setCloning(true)
+      try {
+        // Derive repo name from URL for destination subdirectory
+        const repoName = cloneUrl.trim().split('/').pop()?.replace(/\.git$/, '') || 'repo'
+        const fullPath = `${clonePath.trim()}/${repoName}`
+
+        await getClient().http.post('/workspace/git/clone', {
+          url: cloneUrl.trim(),
+          destination: fullPath,
+        })
+
+        const name = repoName
+        const config: WorkspaceConfig = {
+          id: crypto.randomUUID(),
+          name,
+          mode: 'local',
+          rootPath: fullPath,
+          aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined },
+          autoLaunchAi: autoLaunch,
+          fileExplorerWidth: 220,
+          terminalPanelHeight: 250,
+          terminalPanelCollapsed: false,
+          expandedDirs: [],
+          selectedPath: null,
+          openFiles: [],
+          activeFileIndex: null,
+          terminalSessions: [],
+          activeTerminalIndex: null,
+        }
+        onSubmit(config)
+      } catch (err) {
+        showToast(`Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+      } finally {
+        setCloning(false)
+      }
+      return
+    }
+
     const rootPath = mode === 'local' ? localPath : remotePath
     if (!rootPath.trim()) return
 
@@ -125,9 +172,13 @@ export default function WorkspaceNewDialog({
     }
 
     onSubmit(config)
-  }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, autoLaunch, initGit, onSubmit])
+  }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, autoLaunch, initGit, cloneUrl, clonePath, cloning, onSubmit])
 
-  const isValid = mode === 'local' ? localPath.trim().length > 0 : (remotePath.trim().length > 0 && remoteSessionId)
+  const isValid = mode === 'local'
+    ? localPath.trim().length > 0
+    : mode === 'remote'
+    ? (remotePath.trim().length > 0 && remoteSessionId)
+    : (cloneUrl.trim().length > 0 && clonePath.trim().length > 0)
 
   return (
     <div className="workspace-new-dialog-overlay" onClick={onCancel}>
@@ -144,6 +195,10 @@ export default function WorkspaceNewDialog({
             <label className="workspace-new-dialog-radio">
               <input type="radio" checked={mode === 'remote'} onChange={() => setMode('remote')} />
               Remote Server
+            </label>
+            <label className="workspace-new-dialog-radio">
+              <input type="radio" checked={mode === 'clone'} onChange={() => setMode('clone')} />
+              Clone Repository
             </label>
           </div>
         </div>
@@ -218,6 +273,35 @@ export default function WorkspaceNewDialog({
           </>
         )}
 
+        {mode === 'clone' && (
+          <>
+            <div className="workspace-new-dialog-field">
+              <span className="workspace-new-dialog-label">Repository URL</span>
+              <input
+                className="workspace-new-dialog-input"
+                value={cloneUrl}
+                onChange={e => setCloneUrl(e.target.value)}
+                placeholder="https://github.com/user/repo.git"
+              />
+            </div>
+            <div className="workspace-new-dialog-field">
+              <span className="workspace-new-dialog-label">Clone to Directory</span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  className="workspace-new-dialog-input"
+                  value={clonePath}
+                  onChange={e => setClonePath(e.target.value)}
+                  placeholder="/path/to/clone/into"
+                />
+                <button className="workspace-new-dialog-btn" onClick={async () => {
+                  const selected = await open({ directory: true, multiple: false })
+                  if (selected && typeof selected === 'string') setClonePath(selected)
+                }}>Browse</button>
+              </div>
+            </div>
+          </>
+        )}
+
         <div className="workspace-new-dialog-field">
           <span className="workspace-new-dialog-label">AI Coding Tool</span>
           <select
@@ -255,9 +339,9 @@ export default function WorkspaceNewDialog({
           <button
             className="workspace-new-dialog-btn primary"
             onClick={handleSubmit}
-            disabled={!isValid}
+            disabled={!isValid || cloning}
           >
-            Open Workspace
+            {cloning ? 'Cloning...' : mode === 'clone' ? 'Clone & Open' : 'Open Workspace'}
           </button>
         </div>
       </div>
