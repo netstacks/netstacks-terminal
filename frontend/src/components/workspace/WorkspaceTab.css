@@ -1890,6 +1890,10 @@
   bottom: auto;
 }
 
+.workspace-ai-panel-inline .ai-side-panel-quick-actions {
+  display: none;
+}
+
 /* Sidebar explorer target - receives portaled file explorer */
 .workspace-sidebar-explorer-target {
   display: flex;
