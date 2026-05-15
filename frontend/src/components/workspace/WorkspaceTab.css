@@ -1230,3 +1230,98 @@
   color: var(--color-text-secondary);
   font-size: var(--font-size-small);
 }
+
+/* Git History Tab */
+.workspace-git-history {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.workspace-git-history-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.workspace-git-history-item {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+  gap: 2px;
+}
+
+.workspace-git-history-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.workspace-git-history-item-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workspace-git-history-hash {
+  font-family: var(--font-family-mono);
+  font-size: 11px;
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+.workspace-git-history-message {
+  font-size: var(--font-size-small);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.workspace-git-history-item-bottom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.workspace-git-history-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-history-date {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.workspace-git-history-branches {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.workspace-git-history-badge {
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: var(--color-bg-hover);
+  color: var(--color-accent);
+  border: 1px solid var(--color-border);
+}
+
+.workspace-git-history-loading {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-small);
+}
+
+.workspace-git-history-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-small);
+}
