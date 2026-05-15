@@ -9,7 +9,7 @@ interface WorkspacesPanelProps {
   openWorkspaceIds: Set<string>
 }
 
-async function loadSavedWorkspaces(): Promise<WorkspaceConfig[]> {
+export async function loadSavedWorkspaces(): Promise<WorkspaceConfig[]> {
   try {
     const { data } = await getClient().http.get('/settings/workspaces')
     if (typeof data === 'string') return JSON.parse(data)

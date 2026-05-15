@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useWorkspace } from '../../hooks/useWorkspace'
 import { useGitStatus } from '../../hooks/useGitStatus'
 import WorkspaceFileExplorer from './WorkspaceFileExplorer'
@@ -6,11 +6,15 @@ import WorkspaceEditorArea from './WorkspaceEditorArea'
 import WorkspaceTerminalPanel, { type WorkspaceTerminalPanelHandle } from './WorkspaceTerminalPanel'
 import WorkspaceOutputPanel from './WorkspaceOutputPanel'
 import WorkspaceGitPanel from './WorkspaceGitPanel'
+import { loadSavedWorkspaces } from './WorkspacesPanel'
 import type { WorkspaceConfig } from '../../types/workspace'
 import './WorkspaceTab.css'
 
 interface WorkspaceTabProps {
   config: WorkspaceConfig
+  openWorkspaceIds: Set<string>
+  onOpenWorkspace: (config: WorkspaceConfig) => void
+  onNewWorkspace: () => void
 }
 
 type PythonRunMode = 'native' | 'netstacks' | null
@@ -24,7 +28,7 @@ const RUNNABLE_EXTS: Record<string, (path: string) => string> = {
   ts: (p) => `npx tsx "${p}"`,
 }
 
-export default function WorkspaceTab({ config }: WorkspaceTabProps) {
+export default function WorkspaceTab({ config, openWorkspaceIds, onOpenWorkspace, onNewWorkspace }: WorkspaceTabProps) {
   const workspace = useWorkspace({ config })
   const { state, fileOps, gitOps } = workspace
   const git = useGitStatus({
@@ -41,9 +45,21 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
   const terminalStartY = useRef(0)
   const terminalStartHeight = useRef(0)
 
+  const [allWorkspaces, setAllWorkspaces] = useState<WorkspaceConfig[]>([])
+  const [workspaceListCollapsed, setWorkspaceListCollapsed] = useState(false)
+  const [workspaceListHeight, setWorkspaceListHeight] = useState(120)
+  const [isResizingWorkspaceList, setIsResizingWorkspaceList] = useState(false)
+  const workspaceListStartY = useRef(0)
+  const workspaceListStartHeight = useRef(0)
+
   const [pythonRunMode, setPythonRunMode] = useState<PythonRunMode>(config.pythonRunMode || null)
   const [showRunModeDialog, setShowRunModeDialog] = useState(false)
   const [pendingRunPath, setPendingRunPath] = useState<string | null>(null)
+
+  // Fetch workspaces on mount
+  useEffect(() => {
+    loadSavedWorkspaces().then(setAllWorkspaces).catch(() => {})
+  }, [])
 
   // Output panel state for Netstacks engine runs
   const [outputFilePath, setOutputFilePath] = useState<string | null>(null)
@@ -65,7 +81,14 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
     terminalStartHeight.current = state.terminalPanelHeight
   }, [state.terminalPanelHeight])
 
-  const isResizing = isResizingExplorer || isResizingTerminal
+  const handleWorkspaceListResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizingWorkspaceList(true)
+    workspaceListStartY.current = e.clientY
+    workspaceListStartHeight.current = workspaceListHeight
+  }, [workspaceListHeight])
+
+  const isResizing = isResizingExplorer || isResizingTerminal || isResizingWorkspaceList
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (isResizingExplorer) {
@@ -74,11 +97,15 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
     if (isResizingTerminal) {
       workspace.setTerminalPanelHeight(terminalStartHeight.current + (terminalStartY.current - e.clientY))
     }
-  }, [isResizingExplorer, isResizingTerminal, workspace])
+    if (isResizingWorkspaceList) {
+      setWorkspaceListHeight(Math.max(60, Math.min(300, workspaceListStartHeight.current + (e.clientY - workspaceListStartY.current))))
+    }
+  }, [isResizingExplorer, isResizingTerminal, isResizingWorkspaceList, workspace])
 
   const handleMouseUp = useCallback(() => {
     setIsResizingExplorer(false)
     setIsResizingTerminal(false)
+    setIsResizingWorkspaceList(false)
   }, [])
 
   const handleFileOpen = useCallback((filePath: string, fileName: string) => {
@@ -147,6 +174,50 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
       onMouseLeave={isResizing ? handleMouseUp : undefined}
     >
       <div className="workspace-explorer" style={{ width: state.fileExplorerWidth }}>
+        {/* Workspace list section */}
+        <div className="workspace-list-section">
+          <div
+            className="workspace-list-header"
+            onClick={() => setWorkspaceListCollapsed(!workspaceListCollapsed)}
+          >
+            <span className="workspace-list-header-toggle">{workspaceListCollapsed ? '▸' : '▾'}</span>
+            <span>WORKSPACES</span>
+            <button
+              className="workspace-list-header-btn"
+              onClick={(e) => { e.stopPropagation(); onNewWorkspace() }}
+              title="New Workspace"
+            >
+              +
+            </button>
+          </div>
+          {!workspaceListCollapsed && (
+            <div className="workspace-list-items" style={{ height: workspaceListHeight }}>
+              {allWorkspaces.map(ws => (
+                <div
+                  key={ws.id}
+                  className={`workspace-list-item ${ws.id === config.id ? 'active' : ''}`}
+                  onClick={() => onOpenWorkspace(ws)}
+                >
+                  <span className="workspace-list-item-icon">{ws.mode === 'remote' ? '📡' : '📁'}</span>
+                  <div className="workspace-list-item-info">
+                    <span className="workspace-list-item-name">{ws.name}</span>
+                    <span className="workspace-list-item-path">{ws.rootPath}</span>
+                  </div>
+                  {openWorkspaceIds.has(ws.id) && (
+                    <span className="workspace-list-item-badge">OPEN</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Resize handle between workspace list and file explorer */}
+        {!workspaceListCollapsed && (
+          <div className="workspace-resize-handle horizontal" onMouseDown={handleWorkspaceListResizeStart} />
+        )}
+
+        {/* Files / Git tabs and content */}
         <div className="workspace-zone1-tabs">
           <button
             className={`workspace-zone1-tab ${state.zone1Tab === 'files' ? 'active' : ''}`}

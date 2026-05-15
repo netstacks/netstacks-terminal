@@ -128,7 +128,7 @@ import { listNetBoxSources } from './api/netboxSources'
 import type { NetBoxNeighbor } from './api/netbox'
 
 // Check if running in Tauri environment
-const isTauri = '__TAURI__' in window
+const isTauri = '__TAURI_INTERNALS__' in window
 
 // Tab type discriminator
 type TabType = 'terminal' | 'document' | 'topology' | 'device-detail' | 'link-detail' | 'mop' | 'sftp-editor' | 'script' | 'api-response' | 'settings' | 'incident-detail' | 'alert-detail' | 'stack-detail' | 'backup-history' | 'config-template' | 'config-stack' | 'config-instance' | 'config-deployment' | 'workspace'
@@ -5609,7 +5609,12 @@ def main(command: str = "show version"):
       )
     } else if (tab.type === 'workspace' && tab.workspaceConfig) {
       return (
-        <WorkspaceTab config={tab.workspaceConfig} />
+        <WorkspaceTab
+          config={tab.workspaceConfig}
+          openWorkspaceIds={new Set(tabs.filter(t => t.type === 'workspace' && t.workspaceConfig).map(t => t.workspaceConfig!.id))}
+          onOpenWorkspace={openWorkspaceTab}
+          onNewWorkspace={() => setShowNewWorkspace(true)}
+        />
       )
     } else if (tab.type === 'backup-history') {
       return (
