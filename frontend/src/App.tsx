@@ -580,6 +580,7 @@ function AppContent() {
   const [aiTopologyContext, setAiTopologyContext] = useState<{ topologyId: string; devices: Device[]; refreshCounter: number } | null>(null)
   // Track topology refresh keys to trigger reloads after AI updates
   const [topologyRefreshKeys, setTopologyRefreshKeys] = useState<Record<string, number>>({})
+
   // AI progress panel state (for background topology enrichment)
   const [aiProgressRunning, setAiProgressRunning] = useState(false)
   const [aiProgressTask, setAiProgressTask] = useState('')
@@ -613,6 +614,28 @@ function AppContent() {
   // Unified tabs state (terminals and documents)
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activeTabId, setActiveTabId] = useState<string | null>(null)
+
+  // Detect if active workspace uses NetStacks Agent — portal AI panel to Zone 3
+  const activeWsConfig = useMemo(() => {
+    const t = tabs.find(tab => tab.id === activeTabId && tab.type === 'workspace')
+    return t?.workspaceConfig ?? null
+  }, [tabs, activeTabId])
+  const isNetstacksAgentActive = activeWsConfig?.aiTool?.tool === 'netstacks-agent'
+  const [aiPortalTarget, setAiPortalTarget] = useState<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (isNetstacksAgentActive) {
+      const findTarget = () => {
+        const el = document.getElementById('workspace-ai-panel-target')
+        setAiPortalTarget(el)
+      }
+      findTarget()
+      const timer = setTimeout(findTarget, 100)
+      return () => clearTimeout(timer)
+    } else {
+      setAiPortalTarget(null)
+    }
+  }, [isNetstacksAgentActive, activeTabId])
 
   // Document data cache for document tabs (documentId -> Document)
   const [documentCache, setDocumentCache] = useState<Record<string, Document>>({})
@@ -6368,13 +6391,10 @@ def main(command: str = "show version"):
         </div>
 
         {/* AI Side Panel — portaled to Zone 3 when NetStacks Agent is active */}
-        {(() => {
-          const activeWsTab = tabs.find(t => t.id === activeTabId && t.type === 'workspace')
-          const isNetstacksAgent = activeWsTab?.workspaceConfig?.aiTool?.tool === 'netstacks-agent'
-          const aiPortalTarget = isNetstacksAgent ? document.getElementById('workspace-ai-panel-target') : null
-          const aiPanel = (
+        {aiPortalTarget ? createPortal(
+        <div className="workspace-ai-panel-inline">
         <AISidePanel
-          isOpen={isNetstacksAgent ? true : aiChatOpen}
+          isOpen={true}
           onClose={() => {
             setAiChatOpen(false)
             setAiContext(null)
@@ -6475,12 +6495,106 @@ def main(command: str = "show version"):
             openSettingsTab(tab as import('./components/SettingsPanel').SettingsTab | undefined)
           }}
         />
-          )
-          if (aiPortalTarget) {
-            return createPortal(aiPanel, aiPortalTarget)
-          }
-          return aiPanel
-        })()}
+        </div>, aiPortalTarget) : (
+        <AISidePanel
+          isOpen={aiChatOpen}
+          onClose={() => {
+            setAiChatOpen(false)
+            setAiContext(null)
+            setAiPanelInitialMessages(undefined)
+          }}
+          expandTrigger={aiExpandTrigger}
+          isOverlay={aiOverlayMode}
+          onOverlayChange={(overlay: boolean) => {
+            setAiOverlayMode(overlay)
+            if (overlay) {
+              setAiChatOpen(true)
+              setAiPanelCollapsed(false)
+            }
+          }}
+          availableSessions={availableSessions}
+          onExecuteCommand={handleAgentExecuteCommand}
+          getTerminalContext={handleAgentGetTerminalContext}
+          onOpenSession={handleAgentOpenSession}
+          onListDocuments={handleAgentListDocuments}
+          onReadDocument={handleAgentReadDocument}
+          onSearchDocuments={handleAgentSearchDocuments}
+          onSaveDocument={handleAgentSaveDocument}
+          initialMessages={aiPanelInitialMessages}
+          defaultPinned={aiPanelPinned}
+          externalPrompt={aiExternalPrompt}
+          topologyContext={aiTopologyContext ? {
+            topologyId: aiTopologyContext.topologyId,
+            devices: aiTopologyContext.devices,
+            onRefresh: () => setAiTopologyContext(prev => prev ? { ...prev, refreshCounter: Date.now() } : null)
+          } : undefined}
+          onNetBoxGetNeighbors={handleNetBoxGetNeighbors}
+          onTopologyDeviceUpdated={handleTopologyDeviceUpdated}
+          onCreateMop={handleCreateMop}
+          onTroubleshootingCapture={handleTroubleshootingAICapture}
+          isTroubleshootingActive={isTroubleshootingActive}
+          captureAIConversations={captureAIConversations}
+          onCollapsedChange={setAiPanelCollapsed}
+          focusedSessionId={(() => {
+            const activeTab = tabs.find(t => t.id === activeTabId)
+            if (activeTab && isTerminalTab(activeTab) && activeTab.sessionId) return activeTab.sessionId
+            return undefined
+          })()}
+          focusedSessionName={(() => {
+            const activeTab = tabs.find(t => t.id === activeTabId)
+            if (activeTab && isTerminalTab(activeTab)) return activeTab.title
+            return undefined
+          })()}
+          scriptContext={(() => {
+            const activeTab = tabs.find(t => t.id === activeTabId)
+            if (!activeTab || !isScriptTab(activeTab)) return undefined
+            const handle = scriptEditorRefs.current.get(activeTab.id)
+            if (!handle) return undefined
+            return {
+              name: handle.getName(),
+              getContent: () => handle.getContent(),
+              onApplyCode: (code: string) => handle.applyContent(code),
+            }
+          })()}
+          onNavigateToBackup={(deviceId, deviceName) => {
+            openBackupHistoryTab(deviceId, deviceName)
+          }}
+          onNavigateToDevice={(deviceId, deviceName) => {
+            const existing = tabs.find(t => t.type === 'device-detail' && t.deviceName === deviceName)
+            if (existing) {
+              setActiveTabId(existing.id)
+            } else {
+              const newTab: Tab = {
+                id: `device-detail-${deviceId}-${Date.now()}`,
+                type: 'device-detail',
+                title: deviceName,
+                status: 'ready',
+                deviceName,
+              }
+              setTabs(prev => [...prev, newTab])
+              setActiveTabId(newTab.id)
+            }
+          }}
+          onOpenTerminalSession={(deviceName) => {
+            const session = tabs.find(t => isTerminalTab(t) && t.title === deviceName)
+            if (session) {
+              setActiveTabId(session.id)
+            }
+          }}
+          onNavigateToMop={(mopId, mopName) => {
+            handleOpenMopTab(mopId, mopName)
+          }}
+          onNavigateToTopology={(topologyName) => {
+            const existing = tabs.find(t => t.type === 'topology' && t.title === topologyName)
+            if (existing) {
+              setActiveTabId(existing.id)
+            }
+          }}
+          onNavigateToSettings={(tab) => {
+            openSettingsTab(tab as import('./components/SettingsPanel').SettingsTab | undefined)
+          }}
+        />
+        )}
 
         {/* Hot Edge Zones - invisible trigger areas at window edges */}
         {hotEdgesEnabled && !sidebarOpen && (
