@@ -959,6 +959,73 @@
   color: var(--color-error);
 }
 
+/* Zone header bars (Editor / Terminal) */
+.workspace-zone-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0 8px;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  user-select: none;
+}
+
+.workspace-zone-collapse-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.workspace-zone-collapse-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.workspace-zone-collapsed-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0 8px;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.workspace-zone-collapsed-bar:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.workspace-zone-collapsed-expand {
+  font-size: 10px;
+}
+
+.workspace-editor-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* Zone 3 mode switcher (Terminal / Output) */
 .workspace-zone3-tabs {
   display: flex;

@@ -15,6 +15,7 @@ interface WorkspaceEditorAreaProps {
   onCloseTab: (id: string) => void
   onMarkModified: (id: string, modified: boolean) => void
   onRunFile: (filePath: string) => void
+  onCollapse?: () => void
 }
 
 export default function WorkspaceEditorArea({
@@ -26,6 +27,7 @@ export default function WorkspaceEditorArea({
   onCloseTab,
   onMarkModified,
   onRunFile,
+  onCollapse,
 }: WorkspaceEditorAreaProps) {
 
   if (innerTabs.length === 0) {
@@ -114,6 +116,15 @@ export default function WorkspaceEditorArea({
             <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
               <path d="M8 5v14l11-7z" />
             </svg>
+          </button>
+        )}
+        {onCollapse && (
+          <button
+            className="workspace-terminal-action-btn"
+            onClick={onCollapse}
+            title="Collapse editor"
+          >
+            ▲
           </button>
         )}
       </div>

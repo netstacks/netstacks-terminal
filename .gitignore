@@ -65,3 +65,4 @@ output/
 *.key
 *.pub
 TAURI_PRIVATE_KEY*
+.netstacks/

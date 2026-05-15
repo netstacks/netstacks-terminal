@@ -1,6 +1,6 @@
 import { useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react'
 import Terminal, { type TerminalHandle } from '../Terminal'
-import type { TerminalTab, WorkspaceMode } from '../../types/workspace'
+import type { TerminalTab } from '../../types/workspace'
 
 export interface WorkspaceTerminalPanelHandle {
   sendToActiveTerminal: (command: string) => void
@@ -10,8 +10,6 @@ interface WorkspaceTerminalPanelProps {
   terminalTabs: TerminalTab[]
   activeTerminalTabId: string | null
   collapsed: boolean
-  mode: WorkspaceMode
-  sessionId?: string
   workspaceRoot: string
   onSetActiveTab: (id: string) => void
   onCloseTab: (id: string) => void

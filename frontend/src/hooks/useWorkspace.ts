@@ -352,7 +352,7 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
   }, [])
 
   const setTerminalPanelHeight = useCallback((height: number) => {
-    setState(s => ({ ...s, terminalPanelHeight: Math.max(100, Math.min(600, height)) }))
+    setState(s => ({ ...s, terminalPanelHeight: Math.max(100, height) }))
   }, [])
 
   const toggleTerminalPanel = useCallback(() => {
