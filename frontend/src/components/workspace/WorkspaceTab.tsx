@@ -5,6 +5,7 @@ import WorkspaceFileExplorer from './WorkspaceFileExplorer'
 import WorkspaceEditorArea from './WorkspaceEditorArea'
 import WorkspaceTerminalPanel, { type WorkspaceTerminalPanelHandle } from './WorkspaceTerminalPanel'
 import WorkspaceOutputPanel from './WorkspaceOutputPanel'
+import WorkspaceGitPanel from './WorkspaceGitPanel'
 import type { WorkspaceConfig } from '../../types/workspace'
 import './WorkspaceTab.css'
 
@@ -180,9 +181,17 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
             onViewBlame={handleViewBlame}
           />
         ) : (
-          <div style={{ flex: 1, overflow: 'auto', padding: 16, color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-small)' }}>
-            Git panel placeholder — wired in Task 3
-          </div>
+          <WorkspaceGitPanel
+            gitOps={gitOps}
+            isGitRepo={git.isGitRepo}
+            branch={git.branch}
+            statuses={git.statuses}
+            activeTab={state.gitPanelTab}
+            onSetTab={workspace.setGitPanelTab}
+            onRefresh={git.refresh}
+            onOpenFile={handleFileOpen}
+            onViewDiff={handleViewDiff}
+          />
         )}
       </div>
 
