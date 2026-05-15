@@ -146,24 +146,44 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
       onMouseLeave={isResizing ? handleMouseUp : undefined}
     >
       <div className="workspace-explorer" style={{ width: state.fileExplorerWidth }}>
-        <WorkspaceFileExplorer
-          rootPath={state.rootPath}
-          mode={state.mode}
-          fileOps={fileOps}
-          expandedDirs={state.expandedDirs}
-          selectedPath={state.selectedPath}
-          gitBranch={git.branch}
-          gitStatuses={git.statuses}
-          isGitRepo={git.isGitRepo}
-          onToggleDir={workspace.toggleDir}
-          onSelectPath={workspace.setSelectedPath}
-          onOpenFile={handleFileOpen}
-          onRefreshGit={git.refresh}
-          getFileStatus={git.getFileStatus}
-          gitOps={gitOps}
-          onViewDiff={handleViewDiff}
-          onViewBlame={handleViewBlame}
-        />
+        <div className="workspace-zone1-tabs">
+          <button
+            className={`workspace-zone1-tab ${state.zone1Tab === 'files' ? 'active' : ''}`}
+            onClick={() => workspace.setZone1Tab('files')}
+          >
+            Files
+          </button>
+          <button
+            className={`workspace-zone1-tab ${state.zone1Tab === 'git' ? 'active' : ''}`}
+            onClick={() => workspace.setZone1Tab('git')}
+          >
+            Git
+          </button>
+        </div>
+        {state.zone1Tab === 'files' ? (
+          <WorkspaceFileExplorer
+            rootPath={state.rootPath}
+            mode={state.mode}
+            fileOps={fileOps}
+            expandedDirs={state.expandedDirs}
+            selectedPath={state.selectedPath}
+            gitBranch={git.branch}
+            gitStatuses={git.statuses}
+            isGitRepo={git.isGitRepo}
+            onToggleDir={workspace.toggleDir}
+            onSelectPath={workspace.setSelectedPath}
+            onOpenFile={handleFileOpen}
+            onRefreshGit={git.refresh}
+            getFileStatus={git.getFileStatus}
+            gitOps={gitOps}
+            onViewDiff={handleViewDiff}
+            onViewBlame={handleViewBlame}
+          />
+        ) : (
+          <div style={{ flex: 1, overflow: 'auto', padding: 16, color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-small)' }}>
+            Git panel placeholder — wired in Task 3
+          </div>
+        )}
       </div>
 
       <div className="workspace-resize-handle vertical" onMouseDown={handleExplorerResizeStart} />
