@@ -189,7 +189,6 @@ export default function WorkspaceTab({ config }: WorkspaceTabProps) {
             activeTab={state.gitPanelTab}
             onSetTab={workspace.setGitPanelTab}
             onRefresh={git.refresh}
-            onOpenFile={handleFileOpen}
             onViewDiff={handleViewDiff}
           />
         )}

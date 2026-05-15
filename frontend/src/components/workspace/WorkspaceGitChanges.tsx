@@ -7,7 +7,6 @@ interface WorkspaceGitChangesProps {
   branch: GitBranchInfo | null
   statuses: GitFileStatus[]
   onRefresh: () => void
-  onOpenFile: (filePath: string, fileName: string) => void
   onViewDiff: (filePath: string) => void
 }
 
@@ -26,7 +25,6 @@ export default function WorkspaceGitChanges({
   branch,
   statuses,
   onRefresh,
-  onOpenFile,
   onViewDiff,
 }: WorkspaceGitChangesProps) {
   const [commitMsg, setCommitMsg] = useState('')

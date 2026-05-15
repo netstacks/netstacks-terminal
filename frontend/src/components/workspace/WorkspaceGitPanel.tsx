@@ -13,7 +13,6 @@ interface WorkspaceGitPanelProps {
   activeTab: GitPanelTab
   onSetTab: (tab: GitPanelTab) => void
   onRefresh: () => void
-  onOpenFile: (filePath: string, fileName: string) => void
   onViewDiff: (filePath: string) => void
 }
 
@@ -25,7 +24,6 @@ export default function WorkspaceGitPanel({
   activeTab,
   onSetTab,
   onRefresh,
-  onOpenFile,
   onViewDiff,
 }: WorkspaceGitPanelProps) {
 
@@ -81,7 +79,6 @@ export default function WorkspaceGitPanel({
             branch={branch}
             statuses={statuses}
             onRefresh={onRefresh}
-            onOpenFile={onOpenFile}
             onViewDiff={onViewDiff}
           />
         )}
