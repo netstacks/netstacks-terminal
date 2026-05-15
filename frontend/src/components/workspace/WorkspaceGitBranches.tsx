@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { GitOps, GitBranchInfo, BranchEntry } from '../../types/workspace'
 import { showToast } from '../Toast'
+import ContextMenu from '../ContextMenu'
+import type { MenuItem } from '../ContextMenu'
 
 interface WorkspaceGitBranchesProps {
   gitOps: GitOps
@@ -18,6 +20,7 @@ export default function WorkspaceGitBranches({
   const [showNewBranch, setShowNewBranch] = useState(false)
   const [newBranchName, setNewBranchName] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
 
   const fetchBranches = useCallback(async () => {
     setLoading(true)
@@ -69,6 +72,60 @@ export default function WorkspaceGitBranches({
     }
   }, [gitOps, newBranchName, onRefresh, fetchBranches])
 
+  const handleDeleteBranch = useCallback(async (name: string) => {
+    try {
+      await gitOps.deleteBranch(name)
+      fetchBranches()
+      showToast(`Deleted ${name}`, 'success')
+    } catch (err) {
+      showToast(`Delete failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, fetchBranches])
+
+  const handleMerge = useCallback(async (name: string) => {
+    try {
+      await gitOps.merge(name)
+      onRefresh()
+      fetchBranches()
+      showToast(`Merged ${name} into ${currentBranch?.name || 'current'}`, 'success')
+    } catch (err) {
+      showToast(`Merge failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefresh, fetchBranches, currentBranch])
+
+  const handleBranchContextMenu = useCallback((e: React.MouseEvent, branch: BranchEntry) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const items: MenuItem[] = []
+
+    if (branch.isCurrent) {
+      items.push({
+        id: 'current',
+        label: 'Current Branch',
+        disabled: true,
+        action: () => {},
+      })
+    } else {
+      items.push({
+        id: 'switch',
+        label: 'Switch to Branch',
+        action: () => handleSwitch(branch.name),
+      })
+      items.push({
+        id: 'merge',
+        label: `Merge into ${currentBranch?.name || 'current'}`,
+        action: () => handleMerge(branch.name),
+      })
+      items.push({ id: 'divider-1', label: '', divider: true, action: () => {} })
+      items.push({
+        id: 'delete',
+        label: 'Delete Branch',
+        action: () => handleDeleteBranch(branch.name),
+      })
+    }
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
+  }, [handleSwitch, handleMerge, handleDeleteBranch, currentBranch])
+
   const localBranches = branches.filter(b => !b.isRemote)
   const remoteBranches = branches.filter(b => b.isRemote)
 
@@ -118,6 +175,7 @@ export default function WorkspaceGitBranches({
             key={b.name}
             className={`workspace-git-branches-item ${b.isCurrent ? 'current' : ''}`}
             onClick={() => handleSwitch(b.name)}
+            onContextMenu={(e) => handleBranchContextMenu(e, b)}
           >
             <span className="workspace-git-branches-item-indicator" />
             <span className="workspace-git-branches-item-name">{b.name}</span>
@@ -142,6 +200,12 @@ export default function WorkspaceGitBranches({
           </>
         )}
       </div>
+
+      <ContextMenu
+        position={contextMenu?.position ?? null}
+        items={contextMenu?.items ?? []}
+        onClose={() => setContextMenu(null)}
+      />
     </div>
   )
 }
