@@ -341,3 +341,13 @@ pub async fn git_rebase_abort(
     ops.rebase_abort().await.map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+// ── Generate Commit Message ───────────────────────────────────────────────
+
+pub async fn git_generate_commit_message(
+    Json(req): Json<WorkspaceRoot>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ops = GitOps::new(&req.workspace_root);
+    let message = ops.generate_commit_message().await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "message": message })))
+}

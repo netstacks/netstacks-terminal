@@ -7,6 +7,7 @@ import { showToast } from '../Toast'
 interface WorkspaceGitHistoryProps {
   gitOps: GitOps
   onViewDiff: (filePath: string) => void
+  onRefresh: () => void
 }
 
 function formatRelativeDate(dateStr: string): string {
@@ -28,7 +29,7 @@ function formatRelativeDate(dateStr: string): string {
   }
 }
 
-export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps) {
+export default function WorkspaceGitHistory({ gitOps, onRefresh }: WorkspaceGitHistoryProps) {
   const [commits, setCommits] = useState<CommitInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
@@ -54,11 +55,23 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
       await gitOps.switchBranch(newBranchName.trim())
       setNewBranchFrom(null)
       setNewBranchName('')
+      onRefresh()
       showToast(`Created and switched to ${newBranchName.trim()}`, 'success')
     } catch (err) {
       showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     }
-  }, [gitOps, newBranchFrom, newBranchName])
+  }, [gitOps, newBranchFrom, newBranchName, onRefresh])
+
+  const handleCheckoutCommit = useCallback(async (hash: string) => {
+    try {
+      await gitOps.switchBranch(hash)
+      onRefresh()
+      fetchLog()
+      showToast('Checked out commit', 'success')
+    } catch (err) {
+      showToast(`Checkout failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefresh, fetchLog])
 
   const handleCommitContextMenu = useCallback((e: React.MouseEvent, commit: CommitInfo) => {
     e.preventDefault()
@@ -81,6 +94,11 @@ export default function WorkspaceGitHistory({ gitOps }: WorkspaceGitHistoryProps
         },
       },
       { id: 'divider-1', label: '', divider: true, action: () => {} },
+      {
+        id: 'checkout',
+        label: 'Checkout This Commit',
+        action: () => handleCheckoutCommit(commit.hash),
+      },
       {
         id: 'new-branch',
         label: 'New Branch from Here',

@@ -199,6 +199,7 @@ export default function WorkspaceGitPanel({
           <WorkspaceGitHistory
             gitOps={gitOps}
             onViewDiff={onViewDiff}
+            onRefresh={onRefresh}
           />
         )}
         {activeTab === 'branches' && (

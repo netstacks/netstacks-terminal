@@ -31,6 +31,7 @@ export default function WorkspaceGitChanges({
 }: WorkspaceGitChangesProps) {
   const [commitMsg, setCommitMsg] = useState('')
   const [isCommitting, setIsCommitting] = useState(false)
+  const [generating, setGenerating] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
 
   const staged = statuses.filter(s => s.staged)
@@ -117,6 +118,18 @@ export default function WorkspaceGitChanges({
     }
     setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
   }, [onViewDiff, handleStageFile, handleUnstageFile, handleRevertFile])
+
+  const handleGenerate = useCallback(async () => {
+    setGenerating(true)
+    try {
+      const msg = await gitOps.generateCommitMessage()
+      setCommitMsg(msg)
+    } catch (err) {
+      showToast(`Generate failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setGenerating(false)
+    }
+  }, [gitOps])
 
   const handleCommit = useCallback(async (andPush: boolean) => {
     if (!commitMsg.trim()) return
@@ -227,6 +240,17 @@ export default function WorkspaceGitChanges({
             }
           }}
         />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+          <button
+            className="workspace-git-changes-section-btn"
+            onClick={handleGenerate}
+            disabled={generating || !hasChanges}
+            title="Generate commit message from changes"
+            style={{ fontSize: 11 }}
+          >
+            {generating ? 'Generating...' : '✨ Generate'}
+          </button>
+        </div>
         <div className="workspace-git-commit-actions">
           <button
             className="workspace-git-commit-btn primary"

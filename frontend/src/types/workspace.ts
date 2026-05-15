@@ -224,4 +224,7 @@ export interface GitOps {
   rebasePlan(count?: number): Promise<CommitInfo[]>
   rebaseApply(baseHash: string, plan: RebasePlanItem[]): Promise<void>
   rebaseAbort(): Promise<void>
+
+  // Commit message generation
+  generateCommitMessage(): Promise<string>
 }

@@ -155,6 +155,11 @@ export class AgentGitOps implements GitOps {
   async rebaseAbort(): Promise<void> {
     await this.post('/workspace/git/rebase/abort')
   }
+
+  async generateCommitMessage(): Promise<string> {
+    const data = await this.post<{ message: string }>('/workspace/git/generate-commit-message')
+    return data.message ?? ''
+  }
 }
 
 // RemoteGitOps — runs git over SSH session.
@@ -231,6 +236,7 @@ export class RemoteGitOps implements GitOps {
   async rebasePlan(): Promise<CommitInfo[]> { return this.notImplemented('rebasePlan') }
   async rebaseApply(): Promise<void> { return this.notImplemented('rebaseApply') }
   async rebaseAbort(): Promise<void> { return this.notImplemented('rebaseAbort') }
+  async generateCommitMessage(): Promise<string> { return this.notImplemented('generateCommitMessage') }
 }
 
 // ── Shared parsers (used by RemoteGitOps) ──────────────────────────────────

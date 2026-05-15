@@ -353,6 +353,33 @@ impl GitOps {
         self.run(&["rebase", "--abort"]).await?;
         Ok(())
     }
+
+    pub async fn generate_commit_message(&self) -> Result<String, GitError> {
+        let diff = self.diff(None).await?;
+        if diff.trim().is_empty() {
+            return Ok("No changes to describe".to_string());
+        }
+        // Simple heuristic: extract file names and change types from diff
+        let mut files_changed = Vec::new();
+        for line in diff.lines() {
+            if line.starts_with("diff --git") {
+                if let Some(path) = line.split(" b/").last() {
+                    files_changed.push(path.to_string());
+                }
+            }
+        }
+        let additions = diff.lines().filter(|l| l.starts_with('+')).count();
+        let deletions = diff.lines().filter(|l| l.starts_with('-')).count();
+
+        let file_list = if files_changed.len() <= 3 {
+            files_changed.join(", ")
+        } else {
+            format!("{} and {} other files", files_changed[..2].join(", "), files_changed.len() - 2)
+        };
+
+        let message = format!("Update {}\n\n{} additions, {} deletions", file_list, additions, deletions);
+        Ok(message)
+    }
 }
 
 fn parse_status_output(output: &str) -> Vec<GitFileStatus> {
