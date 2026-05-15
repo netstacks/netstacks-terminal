@@ -1527,3 +1527,80 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Git Confirmation Dialogs */
+.workspace-git-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.workspace-git-dialog {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: var(--spacing-lg);
+  max-width: 420px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.workspace-git-dialog h3 {
+  margin: 0 0 var(--spacing-sm);
+  font-size: 14px;
+  color: var(--color-text-primary);
+}
+
+.workspace-git-dialog p {
+  margin: 0 0 var(--spacing-md);
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.workspace-git-dialog-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  justify-content: flex-end;
+}
+
+.workspace-git-dialog-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-small);
+  font-family: var(--font-family);
+  cursor: pointer;
+}
+
+.workspace-git-dialog-btn:hover {
+  background: var(--color-bg-hover);
+}
+
+.workspace-git-dialog-btn.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: white;
+}
+
+.workspace-git-dialog-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.workspace-git-dialog-btn.danger {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.workspace-git-dialog-btn.danger:hover {
+  background: rgba(var(--color-error-rgb, 255, 80, 80), 0.1);
+}

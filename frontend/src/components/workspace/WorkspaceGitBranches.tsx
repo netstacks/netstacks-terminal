@@ -7,12 +7,14 @@ import type { MenuItem } from '../ContextMenu'
 interface WorkspaceGitBranchesProps {
   gitOps: GitOps
   currentBranch: GitBranchInfo | null
+  hasChanges: boolean
   onRefresh: () => void
 }
 
 export default function WorkspaceGitBranches({
   gitOps,
   currentBranch,
+  hasChanges,
   onRefresh,
 }: WorkspaceGitBranchesProps) {
   const [branches, setBranches] = useState<BranchEntry[]>([])
@@ -21,6 +23,7 @@ export default function WorkspaceGitBranches({
   const [newBranchName, setNewBranchName] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
+  const [switchDialog, setSwitchDialog] = useState<{ branchName: string } | null>(null)
 
   const fetchBranches = useCallback(async () => {
     setLoading(true)
@@ -46,6 +49,10 @@ export default function WorkspaceGitBranches({
 
   const handleSwitch = useCallback(async (name: string) => {
     if (name === currentBranch?.name) return
+    if (hasChanges) {
+      setSwitchDialog({ branchName: name })
+      return
+    }
     try {
       await gitOps.switchBranch(name)
       onRefresh()
@@ -54,7 +61,34 @@ export default function WorkspaceGitBranches({
     } catch (err) {
       showToast(`Switch failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     }
-  }, [gitOps, currentBranch, onRefresh, fetchBranches])
+  }, [gitOps, currentBranch, hasChanges, onRefresh, fetchBranches])
+
+  const handleStashAndSwitch = useCallback(async () => {
+    if (!switchDialog) return
+    try {
+      await gitOps.stash('push')
+      await gitOps.switchBranch(switchDialog.branchName)
+      onRefresh()
+      fetchBranches()
+      setSwitchDialog(null)
+      showToast(`Saved changes and switched to ${switchDialog.branchName}`, 'success')
+    } catch (err) {
+      showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, switchDialog, onRefresh, fetchBranches])
+
+  const handleForceSwitch = useCallback(async () => {
+    if (!switchDialog) return
+    try {
+      await gitOps.switchBranch(switchDialog.branchName)
+      onRefresh()
+      fetchBranches()
+      setSwitchDialog(null)
+      showToast(`Switched to ${switchDialog.branchName}`, 'success')
+    } catch (err) {
+      showToast(`Switch failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, switchDialog, onRefresh, fetchBranches])
 
   const handleCreateBranch = useCallback(async () => {
     const name = newBranchName.trim()
@@ -206,6 +240,31 @@ export default function WorkspaceGitBranches({
         items={contextMenu?.items ?? []}
         onClose={() => setContextMenu(null)}
       />
+
+      {switchDialog && (
+        <div className="workspace-git-dialog-overlay" onClick={() => setSwitchDialog(null)}>
+          <div className="workspace-git-dialog" onClick={e => e.stopPropagation()}>
+            <h3>Unsaved Changes</h3>
+            <p>
+              You have changes that would be lost if you switch branches.
+            </p>
+            <p style={{ fontSize: '11px', opacity: 0.7 }}>
+              "Save for Later" sets your changes aside and restores them when you come back to this branch.
+            </p>
+            <div className="workspace-git-dialog-actions">
+              <button className="workspace-git-dialog-btn" onClick={() => setSwitchDialog(null)}>
+                Cancel
+              </button>
+              <button className="workspace-git-dialog-btn danger" onClick={handleForceSwitch}>
+                Discard Changes
+              </button>
+              <button className="workspace-git-dialog-btn primary" onClick={handleStashAndSwitch}>
+                Save for Later
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

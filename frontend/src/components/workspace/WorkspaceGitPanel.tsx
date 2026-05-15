@@ -40,6 +40,7 @@ export default function WorkspaceGitPanel({
   const [isPushing, setIsPushing] = useState(false)
   const [isPulling, setIsPulling] = useState(false)
   const [isFetching, setIsFetching] = useState(false)
+  const [showPushRejected, setShowPushRejected] = useState(false)
 
   const handlePush = useCallback(async () => {
     setIsPushing(true)
@@ -48,9 +49,29 @@ export default function WorkspaceGitPanel({
       onRefresh()
       showToast('Pushed', 'success')
     } catch (err) {
-      showToast(`Push failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+      const msg = err instanceof Error ? err.message : ''
+      if (msg.includes('rejected') || msg.includes('non-fast-forward') || msg.includes('fetch first')) {
+        setShowPushRejected(true)
+      } else {
+        showToast(`Push failed: ${msg || 'Unknown error'}`, 'error')
+      }
     } finally {
       setIsPushing(false)
+    }
+  }, [gitOps, onRefresh])
+
+  const handleSyncAndPush = useCallback(async () => {
+    setShowPushRejected(false)
+    setIsPulling(true)
+    try {
+      await gitOps.pull()
+      await gitOps.push()
+      onRefresh()
+      showToast('Synced & pushed', 'success')
+    } catch (err) {
+      showToast(`Sync failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setIsPulling(false)
     }
   }, [gitOps, onRefresh])
 
@@ -175,10 +196,30 @@ export default function WorkspaceGitPanel({
           <WorkspaceGitBranches
             gitOps={gitOps}
             currentBranch={branch}
+            hasChanges={statuses.some(s => s.status !== 'clean')}
             onRefresh={onRefresh}
           />
         )}
       </div>
+
+      {showPushRejected && (
+        <div className="workspace-git-dialog-overlay" onClick={() => setShowPushRejected(false)}>
+          <div className="workspace-git-dialog" onClick={e => e.stopPropagation()}>
+            <h3>Changes on the Server</h3>
+            <p>
+              Someone else pushed changes since your last sync. You need to bring those in first.
+            </p>
+            <div className="workspace-git-dialog-actions">
+              <button className="workspace-git-dialog-btn" onClick={() => setShowPushRejected(false)}>
+                Cancel
+              </button>
+              <button className="workspace-git-dialog-btn primary" onClick={handleSyncAndPush}>
+                Sync & Push
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
