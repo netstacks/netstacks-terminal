@@ -1,6 +1,6 @@
 export type WorkspaceMode = 'local' | 'remote'
 
-export type AiToolType = 'claude' | 'aider' | 'opencode' | 'kimicode' | 'none' | 'custom'
+export type AiToolType = 'claude' | 'aider' | 'opencode' | 'kimicode' | 'none' | 'custom' | 'netstacks-agent'
 
 export interface AiToolConfig {
   tool: AiToolType

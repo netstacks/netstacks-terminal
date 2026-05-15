@@ -3,6 +3,8 @@ import Editor, { type OnMount } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import type { FileOps } from '../../types/workspace'
 import { showToast } from '../Toast'
+import { useMonacoCopilot } from '../../hooks/useMonacoCopilot'
+import MonacoCopilotWidget from '../MonacoCopilotWidget'
 
 interface WorkspaceCodeEditorProps {
   filePath: string
@@ -60,6 +62,8 @@ export default function WorkspaceCodeEditor({
   onModifiedChangeRef.current = onModifiedChange
   onRunFileRef.current = onRunFile
 
+  const copilot = useMonacoCopilot()
+
   const ext = filePath.split('.').pop()?.toLowerCase() || ''
   const language = EXT_TO_LANG[ext] || 'plaintext'
 
@@ -84,6 +88,7 @@ export default function WorkspaceCodeEditor({
 
   const handleEditorMount: OnMount = useCallback((ed, monaco) => {
     editorRef.current = ed
+    copilot.register(ed)
 
     // Cmd+S: Save
     ed.addAction({
@@ -126,7 +131,7 @@ export default function WorkspaceCodeEditor({
       const isDirty = ed.getValue() !== savedContentRef.current
       onModifiedChangeRef.current(isDirty)
     })
-  }, [])
+  }, [copilot])
 
   // Window-level Cmd+S capture for when Monaco doesn't have focus
   useEffect(() => {
@@ -168,6 +173,15 @@ export default function WorkspaceCodeEditor({
           padding: { top: 4 },
         }}
       />
+      {copilot.isOpen && copilot.widgetPosition && editorRef.current && (
+        <MonacoCopilotWidget
+          position={copilot.widgetPosition}
+          onSubmit={copilot.handleSubmit}
+          onCancel={copilot.close}
+          loading={copilot.loading}
+          error={copilot.error}
+        />
+      )}
     </div>
   )
 }

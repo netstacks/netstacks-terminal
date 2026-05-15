@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import WorkspaceCodeEditor from './WorkspaceCodeEditor'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import WorkspaceDiffViewer from './WorkspaceDiffViewer'
 import WorkspaceBlameViewer from './WorkspaceBlameViewer'
+import WorkspaceMarkdownPreview from './WorkspaceMarkdownPreview'
 import type { InnerTab, FileOps, GitOps } from '../../types/workspace'
 
 const RUNNABLE_EXTS = new Set(['py', 'sh', 'bash', 'zsh', 'js', 'ts'])
@@ -29,6 +31,7 @@ export default function WorkspaceEditorArea({
   onRunFile,
   onCollapse,
 }: WorkspaceEditorAreaProps) {
+  const [previewTabs, setPreviewTabs] = useState<Set<string>>(new Set())
 
   if (innerTabs.length === 0) {
     return (
@@ -42,10 +45,21 @@ export default function WorkspaceEditorArea({
   const activeTab = innerTabs.find(t => t.id === activeInnerTabId) || innerTabs[0]
   const activeExt = activeTab.filePath?.split('.').pop()?.toLowerCase() || ''
   const canRun = activeTab.type === 'code-editor' && activeTab.filePath && RUNNABLE_EXTS.has(activeExt)
+  const isMdFile = activeTab.type === 'code-editor' && activeTab.filePath && (activeExt === 'md' || activeExt === 'markdown')
+  const isPreview = previewTabs.has(activeTab.id)
 
   const renderTabContent = (tab: InnerTab) => {
     switch (tab.type) {
       case 'code-editor':
+        if (isPreview && tab.id === activeTab.id && tab.filePath) {
+          return (
+            <WorkspaceMarkdownPreview
+              key={`preview-${tab.id}`}
+              filePath={tab.filePath}
+              fileOps={fileOps}
+            />
+          )
+        }
         return (
           <WorkspaceCodeEditor
             key={tab.id}
@@ -116,6 +130,21 @@ export default function WorkspaceEditorArea({
             <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
               <path d="M8 5v14l11-7z" />
             </svg>
+          </button>
+        )}
+        {isMdFile && (
+          <button
+            className="workspace-terminal-action-btn"
+            onClick={() => setPreviewTabs(prev => {
+              const next = new Set(prev)
+              if (next.has(activeTab.id)) next.delete(activeTab.id)
+              else next.add(activeTab.id)
+              return next
+            })}
+            title={isPreview ? 'Edit' : 'Preview'}
+            style={{ fontSize: 12, padding: '0 6px' }}
+          >
+            {isPreview ? '✏️' : '👁'}
           </button>
         )}
         {onCollapse && (

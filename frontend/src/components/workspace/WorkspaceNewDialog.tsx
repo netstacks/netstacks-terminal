@@ -20,6 +20,7 @@ const AI_TOOLS: { value: AiToolType; label: string }[] = [
   { value: 'aider', label: 'Aider' },
   { value: 'opencode', label: 'OpenCode' },
   { value: 'kimicode', label: 'KimiCode' },
+  { value: 'netstacks-agent', label: 'NetStacks Agent' },
   { value: 'none', label: 'None' },
   { value: 'custom', label: 'Custom...' },
 ]
