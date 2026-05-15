@@ -984,6 +984,26 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/local/rename", post(api::local_file_rename))
         .route("/local/exists", post(api::local_file_exists))
         .route("/local/run-python", post(api::local_run_python))
+        // Git operations
+        .route("/workspace/git/status", post(git_api::git_status))
+        .route("/workspace/git/diff", post(git_api::git_diff))
+        .route("/workspace/git/log", post(git_api::git_log))
+        .route("/workspace/git/blame", post(git_api::git_blame))
+        .route("/workspace/git/stage", post(git_api::git_stage))
+        .route("/workspace/git/unstage", post(git_api::git_unstage))
+        .route("/workspace/git/revert", post(git_api::git_revert))
+        .route("/workspace/git/commit", post(git_api::git_commit))
+        .route("/workspace/git/push", post(git_api::git_push))
+        .route("/workspace/git/pull", post(git_api::git_pull))
+        .route("/workspace/git/fetch", post(git_api::git_fetch))
+        .route("/workspace/git/branches", post(git_api::git_list_branches))
+        .route("/workspace/git/branch/create", post(git_api::git_create_branch))
+        .route("/workspace/git/branch/switch", post(git_api::git_switch_branch))
+        .route("/workspace/git/branch/delete", post(git_api::git_delete_branch))
+        .route("/workspace/git/merge", post(git_api::git_merge))
+        .route("/workspace/git/stashes", post(git_api::git_list_stashes))
+        .route("/workspace/git/stash", post(git_api::git_stash))
+        .route("/workspace/git/init", post(git_api::git_init))
         .with_state(app_state.clone());
 
     // Dev-only route introspection (cfg-gated; absent from release builds).
