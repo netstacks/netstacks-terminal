@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import './App.css'
 import './components/ContextMenu.css'
 import { getClient } from './api/client'
@@ -6366,9 +6367,14 @@ def main(command: str = "show version"):
           </div>
         </div>
 
-        {/* AI Side Panel */}
+        {/* AI Side Panel — portaled to Zone 3 when NetStacks Agent is active */}
+        {(() => {
+          const activeWsTab = tabs.find(t => t.id === activeTabId && t.type === 'workspace')
+          const isNetstacksAgent = activeWsTab?.workspaceConfig?.aiTool?.tool === 'netstacks-agent'
+          const aiPortalTarget = isNetstacksAgent ? document.getElementById('workspace-ai-panel-target') : null
+          const aiPanel = (
         <AISidePanel
-          isOpen={aiChatOpen}
+          isOpen={isNetstacksAgent ? true : aiChatOpen}
           onClose={() => {
             setAiChatOpen(false)
             setAiContext(null)
@@ -6469,6 +6475,12 @@ def main(command: str = "show version"):
             openSettingsTab(tab as import('./components/SettingsPanel').SettingsTab | undefined)
           }}
         />
+          )
+          if (aiPortalTarget) {
+            return createPortal(aiPanel, aiPortalTarget)
+          }
+          return aiPanel
+        })()}
 
         {/* Hot Edge Zones - invisible trigger areas at window edges */}
         {hotEdgesEnabled && !sidebarOpen && (

@@ -228,15 +228,7 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
               style={{ height: editorCollapsed ? '100%' : state.terminalPanelHeight, flex: editorCollapsed ? 1 : undefined }}
             >
               {state.aiTool.tool === 'netstacks-agent' ? (
-                <div id="workspace-ai-panel-target" style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-                  <div className="workspace-empty-state">
-                    <div className="workspace-empty-state-icon">🤖</div>
-                    <div>NetStacks Agent</div>
-                    <div style={{ fontSize: 'var(--font-size-small)', color: 'var(--color-text-secondary)', marginTop: 8 }}>
-                      Use the AI panel to interact with the assistant
-                    </div>
-                  </div>
-                </div>
+                <div id="workspace-ai-panel-target" style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }} />
               ) : (
                 <>
                   {showOutput && (
