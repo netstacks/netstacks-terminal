@@ -5611,9 +5611,7 @@ def main(command: str = "show version"):
       return (
         <WorkspaceTab
           config={tab.workspaceConfig}
-          openWorkspaceIds={new Set(tabs.filter(t => t.type === 'workspace' && t.workspaceConfig).map(t => t.workspaceConfig!.id))}
-          onOpenWorkspace={openWorkspaceTab}
-          onNewWorkspace={() => setShowNewWorkspace(true)}
+          isActive={tab.id === activeTabId}
         />
       )
     } else if (tab.type === 'backup-history') {

@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useWorkspace } from '../../hooks/useWorkspace'
 import { useGitStatus } from '../../hooks/useGitStatus'
 import WorkspaceFileExplorer from './WorkspaceFileExplorer'
@@ -6,15 +7,12 @@ import WorkspaceEditorArea from './WorkspaceEditorArea'
 import WorkspaceTerminalPanel, { type WorkspaceTerminalPanelHandle } from './WorkspaceTerminalPanel'
 import WorkspaceOutputPanel from './WorkspaceOutputPanel'
 import WorkspaceGitPanel from './WorkspaceGitPanel'
-import { loadSavedWorkspaces } from './WorkspacesPanel'
 import type { WorkspaceConfig } from '../../types/workspace'
 import './WorkspaceTab.css'
 
 interface WorkspaceTabProps {
   config: WorkspaceConfig
-  openWorkspaceIds: Set<string>
-  onOpenWorkspace: (config: WorkspaceConfig) => void
-  onNewWorkspace: () => void
+  isActive: boolean
 }
 
 type PythonRunMode = 'native' | 'netstacks' | null
@@ -28,7 +26,7 @@ const RUNNABLE_EXTS: Record<string, (path: string) => string> = {
   ts: (p) => `npx tsx "${p}"`,
 }
 
-export default function WorkspaceTab({ config, openWorkspaceIds, onOpenWorkspace, onNewWorkspace }: WorkspaceTabProps) {
+export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
   const workspace = useWorkspace({ config })
   const { state, fileOps, gitOps } = workspace
   const git = useGitStatus({
@@ -37,42 +35,20 @@ export default function WorkspaceTab({ config, openWorkspaceIds, onOpenWorkspace
   })
   const terminalPanelRef = useRef<WorkspaceTerminalPanelHandle>(null)
 
-  const [isResizingExplorer, setIsResizingExplorer] = useState(false)
-  const explorerStartX = useRef(0)
-  const explorerStartWidth = useRef(0)
-
   const [isResizingTerminal, setIsResizingTerminal] = useState(false)
   const terminalStartY = useRef(0)
   const terminalStartHeight = useRef(0)
-
-  const [allWorkspaces, setAllWorkspaces] = useState<WorkspaceConfig[]>([])
-  const [workspaceListCollapsed, setWorkspaceListCollapsed] = useState(false)
-  const [workspaceListHeight, setWorkspaceListHeight] = useState(120)
-  const [isResizingWorkspaceList, setIsResizingWorkspaceList] = useState(false)
-  const workspaceListStartY = useRef(0)
-  const workspaceListStartHeight = useRef(0)
 
   const [pythonRunMode, setPythonRunMode] = useState<PythonRunMode>(config.pythonRunMode || null)
   const [showRunModeDialog, setShowRunModeDialog] = useState(false)
   const [pendingRunPath, setPendingRunPath] = useState<string | null>(null)
 
-  // Fetch workspaces on mount
-  useEffect(() => {
-    loadSavedWorkspaces().then(setAllWorkspaces).catch(() => {})
-  }, [])
 
   // Output panel state for Netstacks engine runs
   const [outputFilePath, setOutputFilePath] = useState<string | null>(null)
   const [showOutput, setShowOutput] = useState(false)
   // Zone 3 mode: 'terminal' or 'output'
   const [zone3Mode, setZone3Mode] = useState<'terminal' | 'output'>('terminal')
-
-  const handleExplorerResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsResizingExplorer(true)
-    explorerStartX.current = e.clientX
-    explorerStartWidth.current = state.fileExplorerWidth
-  }, [state.fileExplorerWidth])
 
   const handleTerminalResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -81,31 +57,16 @@ export default function WorkspaceTab({ config, openWorkspaceIds, onOpenWorkspace
     terminalStartHeight.current = state.terminalPanelHeight
   }, [state.terminalPanelHeight])
 
-  const handleWorkspaceListResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsResizingWorkspaceList(true)
-    workspaceListStartY.current = e.clientY
-    workspaceListStartHeight.current = workspaceListHeight
-  }, [workspaceListHeight])
-
-  const isResizing = isResizingExplorer || isResizingTerminal || isResizingWorkspaceList
+  const isResizing = isResizingTerminal
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (isResizingExplorer) {
-      workspace.setFileExplorerWidth(explorerStartWidth.current + (e.clientX - explorerStartX.current))
-    }
     if (isResizingTerminal) {
       workspace.setTerminalPanelHeight(terminalStartHeight.current + (terminalStartY.current - e.clientY))
     }
-    if (isResizingWorkspaceList) {
-      setWorkspaceListHeight(Math.max(60, Math.min(300, workspaceListStartHeight.current + (e.clientY - workspaceListStartY.current))))
-    }
-  }, [isResizingExplorer, isResizingTerminal, isResizingWorkspaceList, workspace])
+  }, [isResizingTerminal, workspace])
 
   const handleMouseUp = useCallback(() => {
-    setIsResizingExplorer(false)
     setIsResizingTerminal(false)
-    setIsResizingWorkspaceList(false)
   }, [])
 
   const handleFileOpen = useCallback((filePath: string, fileName: string) => {
@@ -166,108 +127,68 @@ export default function WorkspaceTab({ config, openWorkspaceIds, onOpenWorkspace
     }
   }, [pendingRunPath, executeRun])
 
-  return (
-    <div
-      className={`workspace-tab ${isResizing ? 'resizing' : ''}`}
-      onMouseMove={isResizing ? handleMouseMove : undefined}
-      onMouseUp={isResizing ? handleMouseUp : undefined}
-      onMouseLeave={isResizing ? handleMouseUp : undefined}
-    >
-      <div className="workspace-explorer" style={{ width: state.fileExplorerWidth }}>
-        {/* Workspace list section */}
-        <div className="workspace-list-section">
-          <div
-            className="workspace-list-header"
-            onClick={() => setWorkspaceListCollapsed(!workspaceListCollapsed)}
-          >
-            <span className="workspace-list-header-toggle">{workspaceListCollapsed ? '▸' : '▾'}</span>
-            <span>WORKSPACES</span>
-            <button
-              className="workspace-list-header-btn"
-              onClick={(e) => { e.stopPropagation(); onNewWorkspace() }}
-              title="New Workspace"
-            >
-              +
-            </button>
-          </div>
-          {!workspaceListCollapsed && (
-            <div className="workspace-list-items" style={{ height: workspaceListHeight }}>
-              {allWorkspaces.map(ws => (
-                <div
-                  key={ws.id}
-                  className={`workspace-list-item ${ws.id === config.id ? 'active' : ''}`}
-                  onClick={() => onOpenWorkspace(ws)}
-                >
-                  <span className="workspace-list-item-icon">{ws.mode === 'remote' ? '📡' : '📁'}</span>
-                  <div className="workspace-list-item-info">
-                    <span className="workspace-list-item-name">{ws.name}</span>
-                    <span className="workspace-list-item-path">{ws.rootPath}</span>
-                  </div>
-                  {openWorkspaceIds.has(ws.id) && (
-                    <span className="workspace-list-item-badge">OPEN</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Resize handle between workspace list and file explorer */}
-        {!workspaceListCollapsed && (
-          <div className="workspace-resize-handle horizontal" onMouseDown={handleWorkspaceListResizeStart} />
-        )}
-
-        {/* Files / Git tabs and content */}
-        <div className="workspace-zone1-tabs">
-          <button
-            className={`workspace-zone1-tab ${state.zone1Tab === 'files' ? 'active' : ''}`}
-            onClick={() => workspace.setZone1Tab('files')}
-          >
-            Files
-          </button>
-          <button
-            className={`workspace-zone1-tab ${state.zone1Tab === 'git' ? 'active' : ''}`}
-            onClick={() => workspace.setZone1Tab('git')}
-          >
-            Git
-          </button>
-        </div>
-        {state.zone1Tab === 'files' ? (
-          <WorkspaceFileExplorer
-            rootPath={state.rootPath}
-            mode={state.mode}
-            fileOps={fileOps}
-            expandedDirs={state.expandedDirs}
-            selectedPath={state.selectedPath}
-            gitBranch={git.branch}
-            gitStatuses={git.statuses}
-            isGitRepo={git.isGitRepo}
-            onToggleDir={workspace.toggleDir}
-            onSelectPath={workspace.setSelectedPath}
-            onOpenFile={handleFileOpen}
-            onRefreshGit={git.refresh}
-            getFileStatus={git.getFileStatus}
-            gitOps={gitOps}
-            onViewDiff={handleViewDiff}
-            onViewBlame={handleViewBlame}
-          />
-        ) : (
-          <WorkspaceGitPanel
-            gitOps={gitOps}
-            isGitRepo={git.isGitRepo}
-            branch={git.branch}
-            statuses={git.statuses}
-            activeTab={state.gitPanelTab}
-            onSetTab={workspace.setGitPanelTab}
-            onRefresh={git.refresh}
-            onViewDiff={handleViewDiff}
-          />
-        )}
+  const sidebarContent = (
+    <>
+      <div className="workspace-zone1-tabs">
+        <button
+          className={`workspace-zone1-tab ${state.zone1Tab === 'files' ? 'active' : ''}`}
+          onClick={() => workspace.setZone1Tab('files')}
+        >
+          Files
+        </button>
+        <button
+          className={`workspace-zone1-tab ${state.zone1Tab === 'git' ? 'active' : ''}`}
+          onClick={() => workspace.setZone1Tab('git')}
+        >
+          Git
+        </button>
       </div>
+      {state.zone1Tab === 'files' ? (
+        <WorkspaceFileExplorer
+          rootPath={state.rootPath}
+          mode={state.mode}
+          fileOps={fileOps}
+          expandedDirs={state.expandedDirs}
+          selectedPath={state.selectedPath}
+          gitBranch={git.branch}
+          gitStatuses={git.statuses}
+          isGitRepo={git.isGitRepo}
+          onToggleDir={workspace.toggleDir}
+          onSelectPath={workspace.setSelectedPath}
+          onOpenFile={handleFileOpen}
+          onRefreshGit={git.refresh}
+          getFileStatus={git.getFileStatus}
+          gitOps={gitOps}
+          onViewDiff={handleViewDiff}
+          onViewBlame={handleViewBlame}
+        />
+      ) : (
+        <WorkspaceGitPanel
+          gitOps={gitOps}
+          isGitRepo={git.isGitRepo}
+          branch={git.branch}
+          statuses={git.statuses}
+          activeTab={state.gitPanelTab}
+          onSetTab={workspace.setGitPanelTab}
+          onRefresh={git.refresh}
+          onViewDiff={handleViewDiff}
+        />
+      )}
+    </>
+  )
 
-      <div className="workspace-resize-handle vertical" onMouseDown={handleExplorerResizeStart} />
+  const portalTarget = isActive ? document.getElementById('workspace-sidebar-explorer') : null
 
-      <div className="workspace-main">
+  return (
+    <>
+      {portalTarget && createPortal(sidebarContent, portalTarget)}
+      <div
+        className={`workspace-tab ${isResizing ? 'resizing' : ''}`}
+        onMouseMove={isResizing ? handleMouseMove : undefined}
+        onMouseUp={isResizing ? handleMouseUp : undefined}
+        onMouseLeave={isResizing ? handleMouseUp : undefined}
+      >
+        <div className="workspace-main" style={{ flex: 1 }}>
         <div className="workspace-editor-area" style={{
           flex: state.terminalPanelCollapsed && !showOutput ? 1 : undefined,
           height: state.terminalPanelCollapsed && !showOutput ? '100%' : undefined,
@@ -341,34 +262,35 @@ export default function WorkspaceTab({ config, openWorkspaceIds, onOpenWorkspace
             />
           )}
         </div>
-      </div>
+        </div>
 
-      {showRunModeDialog && (
-        <div className="workspace-new-dialog-overlay" onClick={() => { setShowRunModeDialog(false); setPendingRunPath(null) }}>
-          <div className="workspace-new-dialog" onClick={e => e.stopPropagation()} style={{ width: 400 }}>
-            <h3>How should Python files run?</h3>
-            <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-small)', margin: '0 0 16px' }}>
-              This choice will be remembered for this workspace.
-            </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <button className="workspace-run-mode-option" onClick={() => handleRunModeSelect('native')}>
-                <span className="workspace-run-mode-icon">🐍</span>
-                <div>
-                  <div className="workspace-run-mode-title">Native (python3)</div>
-                  <div className="workspace-run-mode-desc">Run with system Python. You manage dependencies yourself.</div>
-                </div>
-              </button>
-              <button className="workspace-run-mode-option" onClick={() => handleRunModeSelect('netstacks')}>
-                <span className="workspace-run-mode-icon">⚡</span>
-                <div>
-                  <div className="workspace-run-mode-title">Netstacks Engine (UV)</div>
-                  <div className="workspace-run-mode-desc">Auto-installs dependencies from imports. Uses UV + PEP 723.</div>
-                </div>
-              </button>
+        {showRunModeDialog && (
+          <div className="workspace-new-dialog-overlay" onClick={() => { setShowRunModeDialog(false); setPendingRunPath(null) }}>
+            <div className="workspace-new-dialog" onClick={e => e.stopPropagation()} style={{ width: 400 }}>
+              <h3>How should Python files run?</h3>
+              <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-small)', margin: '0 0 16px' }}>
+                This choice will be remembered for this workspace.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <button className="workspace-run-mode-option" onClick={() => handleRunModeSelect('native')}>
+                  <span className="workspace-run-mode-icon">🐍</span>
+                  <div>
+                    <div className="workspace-run-mode-title">Native (python3)</div>
+                    <div className="workspace-run-mode-desc">Run with system Python. You manage dependencies yourself.</div>
+                  </div>
+                </button>
+                <button className="workspace-run-mode-option" onClick={() => handleRunModeSelect('netstacks')}>
+                  <span className="workspace-run-mode-icon">⚡</span>
+                  <div>
+                    <div className="workspace-run-mode-title">Netstacks Engine (UV)</div>
+                    <div className="workspace-run-mode-desc">Auto-installs dependencies from imports. Uses UV + PEP 723.</div>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+    </>
   )
 }

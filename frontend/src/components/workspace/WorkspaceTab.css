@@ -1735,3 +1735,11 @@
   font-weight: 600;
   flex-shrink: 0;
 }
+
+/* Sidebar explorer target - receives portaled file explorer */
+.workspace-sidebar-explorer-target {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}

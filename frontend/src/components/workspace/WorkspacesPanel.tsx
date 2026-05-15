@@ -125,6 +125,7 @@ export default function WorkspacesPanel({
           )
         })}
       </div>
+      <div id="workspace-sidebar-explorer" className="workspace-sidebar-explorer-target" />
     </div>
   )
 }
