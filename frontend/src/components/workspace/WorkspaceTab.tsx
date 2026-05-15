@@ -222,13 +222,13 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
           )}
 
           {/* Zone 3: Terminal or AI Panel */}
-          {!state.terminalPanelCollapsed || showOutput ? (
-            <div
-              className="workspace-terminal-panel"
-              style={{ height: editorCollapsed ? '100%' : state.terminalPanelHeight, flex: editorCollapsed ? 1 : undefined }}
-            >
-              {state.aiTool.tool === 'netstacks-agent' ? (
-                <>
+          {state.aiTool.tool === 'netstacks-agent' ? (
+            <>
+              {!state.terminalPanelCollapsed ? (
+                <div
+                  className="workspace-terminal-panel"
+                  style={{ height: editorCollapsed ? '100%' : state.terminalPanelHeight, flex: editorCollapsed ? 1 : undefined }}
+                >
                   <div className="workspace-zone3-tabs" onDoubleClick={() => { workspace.toggleTerminalPanel(); if (editorCollapsed) setEditorCollapsed(false) }}>
                     <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-secondary)' }}>AI Assistant</span>
                     <div style={{ flex: 1 }} />
@@ -241,9 +241,24 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
                     </button>
                   </div>
                   <div id="workspace-ai-panel-target" style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }} />
-                </>
+                </div>
               ) : (
                 <>
+                  <div className="workspace-zone-collapsed-bar" onClick={() => workspace.toggleTerminalPanel()}>
+                    <span>AI Assistant</span>
+                    <span className="workspace-zone-collapsed-expand">▲</span>
+                  </div>
+                  <div id="workspace-ai-panel-target" style={{ display: 'none' }} />
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              {!state.terminalPanelCollapsed || showOutput ? (
+                <div
+                  className="workspace-terminal-panel"
+                  style={{ height: editorCollapsed ? '100%' : state.terminalPanelHeight, flex: editorCollapsed ? 1 : undefined }}
+                >
                   {showOutput && (
                     <div className="workspace-zone3-tabs">
                       <button
@@ -289,14 +304,14 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
                       onClose={() => { setShowOutput(false); setZone3Mode('terminal') }}
                     />
                   )}
-                </>
+                </div>
+              ) : (
+                <div className="workspace-zone-collapsed-bar" onClick={() => workspace.toggleTerminalPanel()}>
+                  <span>Terminal</span>
+                  <span className="workspace-zone-collapsed-expand">▲</span>
+                </div>
               )}
-            </div>
-          ) : (
-            <div className="workspace-zone-collapsed-bar" onClick={() => workspace.toggleTerminalPanel()}>
-              <span>{state.aiTool.tool === 'netstacks-agent' ? 'AI Assistant' : 'Terminal'}</span>
-              <span className="workspace-zone-collapsed-expand">▲</span>
-            </div>
+            </>
           )}
         </div>
 
