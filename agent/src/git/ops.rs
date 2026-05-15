@@ -41,6 +41,43 @@ impl GitOps {
         let output = self.run(&["status", "--branch", "--porcelain"]).await?;
         Ok(parse_branch_output(&output))
     }
+
+    pub async fn diff(&self, file_path: Option<&str>) -> Result<String, GitError> {
+        let mut args = vec!["diff"];
+        if let Some(p) = file_path {
+            args.push("--");
+            args.push(p);
+        }
+        self.run(&args).await
+    }
+
+    pub async fn log(&self, limit: usize, file_path: Option<&str>) -> Result<Vec<CommitInfo>, GitError> {
+        let limit_str = limit.to_string();
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.current_dir(&self.cwd);
+        cmd.args([
+            "log",
+            "--format=%H|||%h|||%s|||%an|||%aI|||%D",
+            "-n",
+            &limit_str,
+        ]);
+        if let Some(p) = file_path {
+            cmd.args(["--", p]);
+        }
+        let output = cmd.output().await.map_err(GitError::Io)?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_log_output(&stdout))
+    }
+
+    pub async fn blame(&self, file_path: &str) -> Result<Vec<BlameLine>, GitError> {
+        let output = self.run(&["blame", "--porcelain", file_path]).await?;
+        Ok(parse_blame_output(&output))
+    }
 }
 
 fn parse_status_output(output: &str) -> Vec<GitFileStatus> {
@@ -76,6 +113,64 @@ fn parse_status_code(x: &str, y: &str) -> (String, bool) {
         (_, "D") => ("deleted".into(), false),
         _ => ("modified".into(), x != " "),
     }
+}
+
+fn parse_log_output(output: &str) -> Vec<CommitInfo> {
+    output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.splitn(6, "|||").collect();
+            let branches = parts
+                .get(5)
+                .map(|r| {
+                    r.split(", ")
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.trim_start_matches("HEAD -> ").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            CommitInfo {
+                hash: parts.get(0).unwrap_or(&"").to_string(),
+                short_hash: parts.get(1).unwrap_or(&"").to_string(),
+                message: parts.get(2).unwrap_or(&"").to_string(),
+                author: parts.get(3).unwrap_or(&"").to_string(),
+                date: parts.get(4).unwrap_or(&"").to_string(),
+                branches,
+            }
+        })
+        .collect()
+}
+
+fn parse_blame_output(output: &str) -> Vec<BlameLine> {
+    let mut lines = Vec::new();
+    let mut current_hash = String::new();
+    let mut current_author = String::new();
+    let mut current_date = String::new();
+    let mut current_line_no: usize = 0;
+
+    for line in output.lines() {
+        if line.starts_with('\t') {
+            lines.push(BlameLine {
+                line_number: current_line_no,
+                hash: current_hash[..7.min(current_hash.len())].to_string(),
+                author: current_author.clone(),
+                date: current_date.clone(),
+                content: line[1..].to_string(),
+            });
+        } else if line.starts_with("author ") && !line.starts_with("author-") {
+            current_author = line[7..].to_string();
+        } else if line.starts_with("author-time ") {
+            current_date = line[12..].to_string();
+        } else {
+            let parts: Vec<&str> = line.splitn(4, ' ').collect();
+            if parts.len() >= 3 && parts[0].len() == 40 {
+                current_hash = parts[0].to_string();
+                current_line_no = parts[2].parse().unwrap_or(0);
+            }
+        }
+    }
+    lines
 }
 
 fn parse_branch_output(output: &str) -> Option<GitBranchInfo> {
@@ -168,5 +263,44 @@ mod tests {
         assert!(!b.name.is_empty());
         assert_eq!(b.ahead, 0);
         assert_eq!(b.behind, 0);
+    }
+
+    #[tokio::test]
+    async fn test_diff_empty_when_clean() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        let d = ops.diff(None).await.unwrap();
+        assert!(d.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_diff_shows_change() {
+        let dir = make_repo();
+        std::fs::write(dir.path().join("a.txt"), "changed").unwrap();
+        let ops = GitOps::new(dir.path());
+        let d = ops.diff(None).await.unwrap();
+        assert!(d.contains("changed"));
+    }
+
+    #[tokio::test]
+    async fn test_log_returns_commits() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        let commits = ops.log(10, None).await.unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].message, "init");
+        assert!(!commits[0].hash.is_empty());
+        assert_eq!(commits[0].short_hash.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_blame_returns_lines() {
+        let dir = make_repo();
+        let ops = GitOps::new(dir.path());
+        let lines = ops.blame("a.txt").await.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].content, "hello");
+        assert_eq!(lines[0].line_number, 1);
+        assert_eq!(lines[0].author, "Test");
     }
 }
