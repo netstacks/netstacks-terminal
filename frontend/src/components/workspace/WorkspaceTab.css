@@ -1049,3 +1049,184 @@
 .workspace-git-init-btn:hover {
   opacity: 0.9;
 }
+
+/* Git Changes Tab */
+.workspace-git-changes {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.workspace-git-changes-section {
+  flex-shrink: 0;
+}
+
+.workspace-git-changes-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  user-select: none;
+}
+
+.workspace-git-changes-section-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 4px;
+  font-family: var(--font-family);
+}
+
+.workspace-git-changes-section-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.workspace-git-changes-file-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.workspace-git-changes-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: var(--font-size-small);
+  cursor: pointer;
+  color: var(--color-text-primary);
+}
+
+.workspace-git-changes-file:hover {
+  background: var(--color-bg-hover);
+}
+
+.workspace-git-changes-file-status {
+  width: 16px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.workspace-git-changes-file-status.modified { color: var(--color-warning); }
+.workspace-git-changes-file-status.added { color: var(--color-success); }
+.workspace-git-changes-file-status.untracked { color: var(--color-success); }
+.workspace-git-changes-file-status.deleted { color: var(--color-error); }
+.workspace-git-changes-file-status.renamed { color: var(--color-text-accent); }
+
+.workspace-git-changes-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+}
+
+.workspace-git-changes-file-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+.workspace-git-changes-file:hover .workspace-git-changes-file-actions {
+  opacity: 1;
+}
+
+.workspace-git-changes-file-action-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.workspace-git-changes-file-action-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.workspace-git-commit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.workspace-git-commit-input {
+  width: 100%;
+  min-height: 60px;
+  max-height: 120px;
+  resize: vertical;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-small);
+  padding: 6px 8px;
+}
+
+.workspace-git-commit-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.workspace-git-commit-input::placeholder {
+  color: var(--color-text-secondary);
+}
+
+.workspace-git-commit-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.workspace-git-commit-btn {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-small);
+  font-family: var(--font-family);
+  cursor: pointer;
+}
+
+.workspace-git-commit-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.workspace-git-commit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.workspace-git-commit-btn.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: white;
+}
+
+.workspace-git-commit-btn.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.workspace-git-changes-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-small);
+}
