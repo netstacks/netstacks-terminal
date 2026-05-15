@@ -228,6 +228,51 @@ export default function WorkspaceFileExplorer({
     }
   }, [handleInlineSubmit])
 
+  const handleCopyPath = useCallback((path: string) => {
+    navigator.clipboard.writeText(path)
+    showToast('Path copied', 'info', 1500)
+    setContextMenu(null)
+  }, [])
+
+  const handleCopyRelativePath = useCallback((relativePath: string) => {
+    navigator.clipboard.writeText(relativePath)
+    showToast('Relative path copied', 'info', 1500)
+  }, [])
+
+  const handleStage = useCallback(async (paths: string[]) => {
+    if (!gitOps) return
+    try {
+      await gitOps.stage(paths)
+      onRefreshGit()
+      showToast('Staged', 'success', 1500)
+    } catch (err) {
+      showToast(`Stage failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefreshGit])
+
+  const handleUnstage = useCallback(async (paths: string[]) => {
+    if (!gitOps) return
+    try {
+      await gitOps.unstage(paths)
+      onRefreshGit()
+      showToast('Unstaged', 'success', 1500)
+    } catch (err) {
+      showToast(`Unstage failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefreshGit])
+
+  const handleRevert = useCallback(async (paths: string[]) => {
+    if (!gitOps) return
+    try {
+      await gitOps.revert(paths)
+      onRefreshGit()
+      refreshDir(getParentDir(paths[0]))
+      showToast('Reverted', 'success', 1500)
+    } catch (err) {
+      showToast(`Revert failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefreshGit, refreshDir, getParentDir])
+
   const handleContextMenu = useCallback((e: React.MouseEvent, entry: WorkspaceFileEntry) => {
     e.preventDefault()
     e.stopPropagation()
@@ -280,51 +325,6 @@ export default function WorkspaceFileExplorer({
     )
     setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
   }, [rootPath, isGitRepo, onOpenFile, handleNewFile, handleNewFolder, handleRename, handleDelete, handleCopyPath, handleCopyRelativePath, handleStage, handleUnstage, handleRevert, onViewDiff, onViewBlame])
-
-  const handleCopyPath = useCallback((path: string) => {
-    navigator.clipboard.writeText(path)
-    showToast('Path copied', 'info', 1500)
-    setContextMenu(null)
-  }, [])
-
-  const handleCopyRelativePath = useCallback((relativePath: string) => {
-    navigator.clipboard.writeText(relativePath)
-    showToast('Relative path copied', 'info', 1500)
-  }, [])
-
-  const handleStage = useCallback(async (paths: string[]) => {
-    if (!gitOps) return
-    try {
-      await gitOps.stage(paths)
-      onRefreshGit()
-      showToast('Staged', 'success', 1500)
-    } catch (err) {
-      showToast(`Stage failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-    }
-  }, [gitOps, onRefreshGit])
-
-  const handleUnstage = useCallback(async (paths: string[]) => {
-    if (!gitOps) return
-    try {
-      await gitOps.unstage(paths)
-      onRefreshGit()
-      showToast('Unstaged', 'success', 1500)
-    } catch (err) {
-      showToast(`Unstage failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-    }
-  }, [gitOps, onRefreshGit])
-
-  const handleRevert = useCallback(async (paths: string[]) => {
-    if (!gitOps) return
-    try {
-      await gitOps.revert(paths)
-      onRefreshGit()
-      refreshDir(getParentDir(paths[0]))
-      showToast('Reverted', 'success', 1500)
-    } catch (err) {
-      showToast(`Revert failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-    }
-  }, [gitOps, onRefreshGit, refreshDir, getParentDir])
 
   const handleFileClick = useCallback((entry: WorkspaceFileEntry) => {
     onSelectPath(entry.path)
