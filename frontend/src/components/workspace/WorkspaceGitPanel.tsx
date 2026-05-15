@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import WorkspaceGitChanges from './WorkspaceGitChanges'
 import WorkspaceGitHistory from './WorkspaceGitHistory'
 import WorkspaceGitBranches from './WorkspaceGitBranches'
@@ -37,6 +37,49 @@ export default function WorkspaceGitPanel({
     }
   }, [gitOps, onRefresh])
 
+  const [isPushing, setIsPushing] = useState(false)
+  const [isPulling, setIsPulling] = useState(false)
+  const [isFetching, setIsFetching] = useState(false)
+
+  const handlePush = useCallback(async () => {
+    setIsPushing(true)
+    try {
+      await gitOps.push()
+      onRefresh()
+      showToast('Pushed', 'success')
+    } catch (err) {
+      showToast(`Push failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setIsPushing(false)
+    }
+  }, [gitOps, onRefresh])
+
+  const handlePull = useCallback(async () => {
+    setIsPulling(true)
+    try {
+      await gitOps.pull()
+      onRefresh()
+      showToast('Pulled', 'success')
+    } catch (err) {
+      showToast(`Pull failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setIsPulling(false)
+    }
+  }, [gitOps, onRefresh])
+
+  const handleFetch = useCallback(async () => {
+    setIsFetching(true)
+    try {
+      await gitOps.fetch()
+      onRefresh()
+      showToast('Fetched', 'success')
+    } catch (err) {
+      showToast(`Fetch failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setIsFetching(false)
+    }
+  }, [gitOps, onRefresh])
+
   if (!isGitRepo) {
     return (
       <div className="workspace-git-panel">
@@ -72,6 +115,46 @@ export default function WorkspaceGitPanel({
           Branches
         </button>
       </div>
+      {branch && (
+        <div className="workspace-git-toolbar">
+          <div className="workspace-git-toolbar-branch">
+            <span>⎇</span>
+            <span className="workspace-git-toolbar-branch-name">{branch.name}</span>
+            {(branch.ahead > 0 || branch.behind > 0) && (
+              <span className="workspace-git-toolbar-ahead-behind">
+                {branch.ahead > 0 && `↑${branch.ahead}`}
+                {branch.behind > 0 && ` ↓${branch.behind}`}
+              </span>
+            )}
+          </div>
+          <div className="workspace-git-toolbar-actions">
+            <button
+              className="workspace-git-toolbar-btn"
+              onClick={handleFetch}
+              disabled={isFetching}
+              title="Fetch"
+            >
+              {isFetching ? '...' : 'Fetch'}
+            </button>
+            <button
+              className="workspace-git-toolbar-btn"
+              onClick={handlePull}
+              disabled={isPulling}
+              title="Pull"
+            >
+              {isPulling ? '...' : 'Pull'}
+            </button>
+            <button
+              className="workspace-git-toolbar-btn"
+              onClick={handlePush}
+              disabled={isPushing}
+              title="Push"
+            >
+              {isPushing ? '...' : 'Push'}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="workspace-git-panel-content">
         {activeTab === 'changes' && (
           <WorkspaceGitChanges

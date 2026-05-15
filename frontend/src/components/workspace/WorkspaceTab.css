@@ -1464,3 +1464,66 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Git Panel Toolbar */
+.workspace-git-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--color-bg-primary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-small);
+  flex-shrink: 0;
+}
+
+.workspace-git-toolbar-branch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-text-primary);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.workspace-git-toolbar-branch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-toolbar-ahead-behind {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.workspace-git-toolbar-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.workspace-git-toolbar-btn {
+  padding: 2px 8px;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: var(--font-family);
+}
+
+.workspace-git-toolbar-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.workspace-git-toolbar-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
