@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitFileStatus {
     pub path: String,
     pub status: String, // "modified" | "added" | "deleted" | "untracked" | "renamed" | "copied"
@@ -19,6 +20,7 @@ pub struct GitBranchInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommitInfo {
     pub hash: String,
     pub short_hash: String,
@@ -29,6 +31,7 @@ pub struct CommitInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BranchEntry {
     pub name: String,
     pub is_current: bool,
@@ -44,6 +47,7 @@ pub struct StashEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlameLine {
     pub line_number: usize,
     pub hash: String,
