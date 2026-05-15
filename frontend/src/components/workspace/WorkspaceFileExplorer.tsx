@@ -54,7 +54,6 @@ const GIT_STATUS_LABELS: Record<GitStatusCode, string> = {
 
 export default function WorkspaceFileExplorer({
   rootPath,
-  mode,
   fileOps,
   expandedDirs,
   selectedPath,
@@ -71,7 +70,7 @@ export default function WorkspaceFileExplorer({
   onViewBlame,
 }: WorkspaceFileExplorerProps) {
   const [dirContents, setDirContents] = useState<Map<string, DirContents>>(new Map())
-  const [filter, setFilter] = useState('')
+  const [filter] = useState('')
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [inlineInput, setInlineInput] = useState<InlineInputMode>(null)
   const [inlineValue, setInlineValue] = useState('')
@@ -357,7 +356,7 @@ export default function WorkspaceFileExplorer({
     </div>
   )
 
-  const renderEntry = (entry: WorkspaceFileEntry, depth: number, parentDir: string) => {
+  const renderEntry = (entry: WorkspaceFileEntry, depth: number) => {
     const isExpanded = expandedDirs.has(entry.path)
     const isSelected = selectedPath === entry.path
     const gitStatus = getFileStatus(entry.path)
@@ -446,7 +445,7 @@ export default function WorkspaceFileExplorer({
       <>
         {showNewFolderInput && renderInlineInput(depth, true)}
         {showNewFileInput && renderInlineInput(depth, false)}
-        {contents.entries.map(entry => renderEntry(entry, depth, dirPath))}
+        {contents.entries.map(entry => renderEntry(entry, depth))}
       </>
     )
   }

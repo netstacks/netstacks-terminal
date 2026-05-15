@@ -107,6 +107,10 @@ import { MopExecutionProvider, useMopExecutionOptional } from './contexts/MopExe
 import { AuthProvider } from './components/auth/AuthProvider'
 import TroubleshootingDialog from './components/TroubleshootingDialog'
 import DeviceEditDialog from './components/DeviceEditDialog'
+import WorkspaceTab from './components/workspace/WorkspaceTab'
+import WorkspaceNewDialog from './components/workspace/WorkspaceNewDialog'
+import WorkspacesPanel, { addSavedWorkspace } from './components/workspace/WorkspacesPanel'
+import type { WorkspaceConfig } from './types/workspace'
 import { useTroubleshootingSession, type OnTimeoutCallback } from './hooks/useTroubleshootingSession'
 import { useCertRenewal } from './hooks/useCertRenewal'
 import { useDriftAlerts } from './hooks/useDriftAlerts'
@@ -127,7 +131,7 @@ import type { NetBoxNeighbor } from './api/netbox'
 const isTauri = '__TAURI__' in window
 
 // Tab type discriminator
-type TabType = 'terminal' | 'document' | 'topology' | 'device-detail' | 'link-detail' | 'mop' | 'sftp-editor' | 'script' | 'api-response' | 'settings' | 'incident-detail' | 'alert-detail' | 'stack-detail' | 'backup-history' | 'config-template' | 'config-stack' | 'config-instance' | 'config-deployment'
+type TabType = 'terminal' | 'document' | 'topology' | 'device-detail' | 'link-detail' | 'mop' | 'sftp-editor' | 'script' | 'api-response' | 'settings' | 'incident-detail' | 'alert-detail' | 'stack-detail' | 'backup-history' | 'config-template' | 'config-stack' | 'config-instance' | 'config-deployment' | 'workspace'
 
 // Status for document tabs
 type DocumentStatus = 'saved' | 'modified' | 'new'
@@ -216,6 +220,8 @@ interface Tab {
   configInstanceId?: string
   configInstanceStackId?: string
   configDeploymentId?: string
+  // Workspace tab
+  workspaceConfig?: WorkspaceConfig
   // Shared
   color?: string
 }
@@ -449,7 +455,7 @@ const defaultPluginIcon = (
   </svg>
 )
 
-type ViewType = 'sessions' | 'topology' | 'docs' | 'changes' | 'agents' | 'scripts' | 'stacks' | string
+type ViewType = 'sessions' | 'topology' | 'docs' | 'changes' | 'agents' | 'scripts' | 'stacks' | 'workspaces' | string
 
 function AppContent() {
   const [activeView, setActiveView] = useState<ViewType>('sessions')
@@ -601,6 +607,7 @@ function AppContent() {
   const [quickConnectOpen, setQuickConnectOpen] = useState(false)
   const [quickConnectInitialHost, setQuickConnectInitialHost] = useState<string | undefined>(undefined)
   const [showAbout, setShowAbout] = useState(false)
+  const [showNewWorkspace, setShowNewWorkspace] = useState(false)
   const [profilingChatAgent, setProfilingChatAgent] = useState<{id: string, name: string} | null>(null)
   // Unified tabs state (terminals and documents)
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -864,6 +871,26 @@ function AppContent() {
     }
   }, [tabs])
 
+  const openWorkspaceTab = useCallback(async (config: WorkspaceConfig) => {
+    const existingTab = tabs.find(t => t.type === 'workspace' && t.workspaceConfig?.id === config.id)
+    if (existingTab) {
+      setActiveTabId(existingTab.id)
+      setShowNewWorkspace(false)
+      return
+    }
+    await addSavedWorkspace(config)
+    const newTab: Tab = {
+      id: `workspace-${config.id}`,
+      type: 'workspace',
+      title: config.name,
+      status: 'ready' as DetailStatus,
+      workspaceConfig: config,
+    }
+    setTabs(prev => [...prev, newTab])
+    setActiveTabId(newTab.id)
+    setShowNewWorkspace(false)
+  }, [tabs])
+
   const openBackupHistoryTab = useCallback((deviceId: string, deviceName: string) => {
     const existing = tabs.find(t => t.type === 'backup-history' && t.backupDeviceId === deviceId)
     if (existing) {
@@ -1073,6 +1100,7 @@ function AppContent() {
       case 'stacks': return 'Stacks'
       case 'quickActions': return 'Quick Actions'
       case 'sftp': return 'SFTP Browser'
+      case 'workspaces': return 'Workspaces'
       default: {
         // Check for plugin panel
         const pluginPanel = pluginPanels.find(
@@ -5579,6 +5607,10 @@ def main(command: str = "show version"):
           onTitleChange={(title) => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, title } : t))}
         />
       )
+    } else if (tab.type === 'workspace' && tab.workspaceConfig) {
+      return (
+        <WorkspaceTab config={tab.workspaceConfig} />
+      )
     } else if (tab.type === 'backup-history') {
       return (
         <BackupHistoryTab
@@ -5709,6 +5741,16 @@ def main(command: str = "show version"):
                 </svg>
               </button>
             )}
+            <button
+              className={`activity-bar-item ${activeView === 'workspaces' ? 'active' : ''}`}
+              onClick={() => handleActivityClick('workspaces')}
+              title="Workspaces"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="24" height="24">
+                <path d="M3 7V17C3 18.1046 3.89543 19 5 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H13L11 5H5C3.89543 5 3 5.89543 3 7Z" />
+                <path d="M12 11V17M9 14H15" strokeLinecap="round" />
+              </svg>
+            </button>
           </div>
           <div className="activity-bar-bottom">
             <button
@@ -5803,6 +5845,13 @@ def main(command: str = "show version"):
             )}
             {activeView === 'stacks' && canStacks && (
               <ConfigPanel onOpenTemplateTab={handleOpenConfigTemplateTab} onOpenStackTab={handleOpenConfigStackTab} onOpenInstanceTab={handleOpenInstanceTab} onCreateTemplate={handleCreateConfigTemplate} onCreateStack={handleCreateConfigStack} />
+            )}
+            {activeView === 'workspaces' && (
+              <WorkspacesPanel
+                onOpenWorkspace={openWorkspaceTab}
+                onNewWorkspace={() => setShowNewWorkspace(true)}
+                openWorkspaceIds={new Set(tabs.filter(t => t.type === 'workspace' && t.workspaceConfig).map(t => t.workspaceConfig!.id))}
+              />
             )}
             {activeView === 'sftp' && (
               <SftpPanel onOpenFile={handleSftpOpenFile} />
@@ -5959,6 +6008,12 @@ def main(command: str = "show version"):
                             <polyline points="16 18 22 12 16 6" />
                             <polyline points="8 6 2 12 8 18" />
                             <line x1="14" y1="4" x2="10" y2="20" />
+                          </svg>
+                        </span>
+                      ) : tab.type === 'workspace' ? (
+                        <span className="tab-icon tab-icon-workspace" title="Workspace">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="14" height="14">
+                            <path d="M3 7V17C3 18.1 3.9 19 5 19H19C20.1 19 21 18.1 21 17V9C21 7.9 20.1 7 19 7H13L11 5H5C3.9 5 3 5.9 3 7Z" />
                           </svg>
                         </span>
                       ) : isSettingsTab(tab) ? (
@@ -7066,6 +7121,15 @@ def main(command: str = "show version"):
         isOpen={showAbout}
         onClose={() => setShowAbout(false)}
       />
+
+      {/* New Workspace Dialog */}
+      {showNewWorkspace && (
+        <WorkspaceNewDialog
+          sessions={[]}
+          onSubmit={openWorkspaceTab}
+          onCancel={() => setShowNewWorkspace(false)}
+        />
+      )}
 
       {/* Troubleshooting Session Dialog (Phase 26) */}
       <TroubleshootingDialog

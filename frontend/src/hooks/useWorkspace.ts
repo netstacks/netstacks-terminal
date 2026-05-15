@@ -42,7 +42,7 @@ interface UseWorkspaceReturn {
 
 function createInitialState(config: WorkspaceConfig): WorkspaceState {
   // Restore inner tabs from saved config
-  const innerTabs: InnerTab[] = (config.openFiles || []).map((f, i) => ({
+  const innerTabs: InnerTab[] = (config.openFiles || []).map((f) => ({
     id: crypto.randomUUID(),
     type: f.type,
     title: f.title,

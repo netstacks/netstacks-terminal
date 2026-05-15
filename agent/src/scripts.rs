@@ -75,7 +75,7 @@ fn uv_cache_path() -> PathBuf {
 /// disk — preventing both a hostile mirror and a successful MITM from
 /// installing a tampered uv binary that would later run with full device
 /// credentials in env (per EXEC-013).
-async fn ensure_uv() -> Result<PathBuf, ScriptError> {
+pub async fn ensure_uv() -> Result<PathBuf, ScriptError> {
     use sha2::{Digest, Sha256};
 
     let cached = uv_cache_path();
@@ -785,7 +785,7 @@ pub async fn delete_script(
 
 /// Prepare script content for execution: prepend metadata if missing,
 /// append main() wrapper if needed with main_args.
-fn prepare_script_content(content: &str, main_args: Option<&str>) -> String {
+pub fn prepare_script_for_run(content: &str, main_args: Option<&str>) -> String {
     let mut prepared = prepend_dynamic_metadata(content);
     if main_args.is_some() && needs_main_wrapper(&prepared) {
         prepared = append_main_wrapper(&prepared);
@@ -813,7 +813,7 @@ pub async fn run_script_once(
 ) -> Result<ScriptOutput, ScriptError> {
     let start = Instant::now();
     let uv = ensure_uv().await?;
-    let prepared = prepare_script_content(script_content, main_args);
+    let prepared = prepare_script_for_run(script_content, main_args);
     let script_path = write_temp_script(&prepared).await?;
 
     let mut cmd = Command::new(&uv);
@@ -1033,7 +1033,7 @@ pub async fn run_script(
 
     // Ensure uv is available and write prepared script to temp file
     let uv = ensure_uv().await?;
-    let prepared = prepare_script_content(&script.content, main_args);
+    let prepared = prepare_script_for_run(&script.content, main_args);
     let script_path = write_temp_script(&prepared).await?;
 
     // Execute per-device
@@ -1342,7 +1342,7 @@ pub async fn run_script_stream(
             .await;
 
         let prepared =
-            prepare_script_content(&script.content, options.main_args.as_deref());
+            prepare_script_for_run(&script.content, options.main_args.as_deref());
         let script_path = match write_temp_script(&prepared).await {
             Ok(p) => p,
             Err(e) => {

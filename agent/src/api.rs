@@ -6,12 +6,15 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::StatusCode,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{sse::{Event as SseEvent, KeepAlive, Sse}, IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::sync::Arc;
+use tokio::io::AsyncBufReadExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::ai;
 use crate::models::*;
@@ -9267,4 +9270,261 @@ pub async fn stop_all_tunnels(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.tunnel_manager.stop_all().await;
     Ok(Json(serde_json::json!({"status": "stopped"})))
+}
+
+// ── Workspace local file operations ────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct LocalFileReadRequest {
+    pub path: String,
+}
+
+pub async fn local_file_read(
+    Json(req): Json<LocalFileReadRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let content = tokio::fs::read_to_string(&req.path).await.map_err(|e| ApiError {
+        error: format!("Failed to read {}: {}", req.path, e),
+        code: "FS_READ".to_string(),
+    })?;
+    Ok(Json(serde_json::json!({ "content": content, "path": req.path })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalFileWriteRequest {
+    pub path: String,
+    pub content: String,
+}
+
+pub async fn local_file_write(
+    Json(req): Json<LocalFileWriteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tokio::fs::write(&req.path, &req.content).await.map_err(|e| ApiError {
+        error: format!("Failed to write {}: {}", req.path, e),
+        code: "FS_WRITE".to_string(),
+    })?;
+    Ok(Json(serde_json::json!({ "success": true, "path": req.path, "bytes": req.content.len() })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalDirListRequest {
+    pub path: String,
+}
+
+pub async fn local_dir_list(
+    Json(req): Json<LocalDirListRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut entries = Vec::new();
+    let mut dir = tokio::fs::read_dir(&req.path).await.map_err(|e| ApiError {
+        error: format!("Failed to read dir {}: {}", req.path, e),
+        code: "FS_READDIR".to_string(),
+    })?;
+    while let Some(entry) = dir.next_entry().await.map_err(|e| ApiError {
+        error: e.to_string(),
+        code: "FS_READDIR".to_string(),
+    })? {
+        let metadata = entry.metadata().await.ok();
+        let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = metadata.as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().to_string_lossy().to_string();
+        entries.push(serde_json::json!({
+            "name": name,
+            "path": path,
+            "is_dir": is_dir,
+            "size": size,
+            "modified": modified,
+        }));
+    }
+    entries.sort_by(|a, b| {
+        let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+        let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+        if a_dir != b_dir { return if a_dir { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater }; }
+        let a_name = a["name"].as_str().unwrap_or("");
+        let b_name = b["name"].as_str().unwrap_or("");
+        a_name.to_lowercase().cmp(&b_name.to_lowercase())
+    });
+    Ok(Json(serde_json::json!({ "entries": entries, "path": req.path })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalFileMkdirRequest {
+    pub path: String,
+}
+
+pub async fn local_file_mkdir(
+    Json(req): Json<LocalFileMkdirRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tokio::fs::create_dir_all(&req.path).await.map_err(|e| ApiError {
+        error: format!("Failed to mkdir {}: {}", req.path, e),
+        code: "FS_MKDIR".to_string(),
+    })?;
+    Ok(Json(serde_json::json!({ "success": true, "path": req.path })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalFileDeleteRequest {
+    pub path: String,
+    pub is_dir: bool,
+}
+
+pub async fn local_file_delete(
+    Json(req): Json<LocalFileDeleteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.is_dir {
+        tokio::fs::remove_dir_all(&req.path).await
+    } else {
+        tokio::fs::remove_file(&req.path).await
+    }.map_err(|e| ApiError {
+        error: format!("Failed to delete {}: {}", req.path, e),
+        code: "FS_DELETE".to_string(),
+    })?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalFileRenameRequest {
+    pub from: String,
+    pub to: String,
+}
+
+pub async fn local_file_rename(
+    Json(req): Json<LocalFileRenameRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tokio::fs::rename(&req.from, &req.to).await.map_err(|e| ApiError {
+        error: format!("Failed to rename: {}", e),
+        code: "FS_RENAME".to_string(),
+    })?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalFileExistsRequest {
+    pub path: String,
+}
+
+pub async fn local_file_exists(
+    Json(req): Json<LocalFileExistsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let exists = tokio::fs::try_exists(&req.path).await.unwrap_or(false);
+    Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
+#[derive(Deserialize)]
+pub struct LocalRunPythonRequest {
+    pub path: String,
+    pub main_args: Option<String>,
+}
+
+pub async fn local_run_python(
+    Json(req): Json<LocalRunPythonRequest>,
+) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let content = tokio::fs::read_to_string(&req.path).await.map_err(|e| ApiError {
+        error: format!("Failed to read {}: {}", req.path, e),
+        code: "FS_READ".to_string(),
+    })?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(100);
+    let main_args = req.main_args.clone();
+    let path = req.path.clone();
+
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+
+        let _ = tx.send(Ok(SseEvent::default()
+            .event("status")
+            .data("Setting up Python runtime..."))).await;
+
+        let uv = match crate::scripts::ensure_uv().await {
+            Ok(uv) => uv,
+            Err(e) => {
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("error")
+                    .data(e.error))).await;
+                return;
+            }
+        };
+
+        let _ = tx.send(Ok(SseEvent::default()
+            .event("status")
+            .data(format!("Running {}...", path.split('/').last().unwrap_or(&path))))).await;
+
+        let prepared = crate::scripts::prepare_script_for_run(&content, main_args.as_deref());
+
+        let tmp_dir = std::env::temp_dir();
+        let script_path = tmp_dir.join(format!("ns_ws_{}.py", uuid::Uuid::new_v4()));
+        if let Err(e) = tokio::fs::write(&script_path, &prepared).await {
+            let _ = tx.send(Ok(SseEvent::default()
+                .event("error")
+                .data(format!("Failed to write temp script: {}", e)))).await;
+            return;
+        }
+
+        let mut cmd = tokio::process::Command::new(&uv);
+        cmd.arg("run").arg("--quiet").arg("--script").arg(&script_path);
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+
+        if let Some(args) = &main_args {
+            cmd.env("NETSTACKS_ARGS", args);
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&script_path).await;
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("error")
+                    .data(format!("Failed to start: {}", e)))).await;
+                return;
+            }
+        };
+
+        let stderr = child.stderr.take();
+        let stdout = child.stdout.take();
+        let tx2 = tx.clone();
+
+        if let Some(stderr) = stderr {
+            let tx_err = tx2.clone();
+            tokio::spawn(async move {
+                let reader = tokio::io::BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = tx_err.send(Ok(SseEvent::default()
+                        .event("stderr")
+                        .data(line))).await;
+                }
+            });
+        }
+
+        if let Some(stdout) = stdout {
+            let tx_out = tx2.clone();
+            tokio::spawn(async move {
+                let reader = tokio::io::BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = tx_out.send(Ok(SseEvent::default()
+                        .event("stdout")
+                        .data(line))).await;
+                }
+            });
+        }
+
+        let status = child.wait().await;
+        let _ = tokio::fs::remove_file(&script_path).await;
+        let duration_ms = start.elapsed().as_millis();
+        let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+
+        let _ = tx.send(Ok(SseEvent::default()
+            .event("complete")
+            .data(serde_json::json!({
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+            }).to_string()))).await;
+    });
+
+    Ok(Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default()))
 }

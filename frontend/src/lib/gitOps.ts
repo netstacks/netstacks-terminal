@@ -2,6 +2,7 @@ import { getClient } from '../api/client'
 import type {
   GitOps,
   GitFileStatus,
+  GitStatusCode,
   GitBranchInfo,
   CommitInfo,
   BranchEntry,
@@ -224,7 +225,7 @@ function parseStatusOutput(output: string): GitFileStatus[] {
     })
 }
 
-function parseStatusCode(x: string, y: string): { status: string; staged: boolean } {
+function parseStatusCode(x: string, y: string): { status: GitStatusCode; staged: boolean } {
   if (x === '?' && y === '?') return { status: 'untracked', staged: false }
   if (x === 'A') return { status: 'added', staged: true }
   if (x === 'D') return { status: 'deleted', staged: true }
