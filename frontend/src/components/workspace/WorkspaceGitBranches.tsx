@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { GitOps, GitBranchInfo, BranchEntry } from '../../types/workspace'
+import type { GitOps, GitBranchInfo, BranchEntry, StashEntry } from '../../types/workspace'
 import { showToast } from '../Toast'
 import ContextMenu from '../ContextMenu'
 import type { MenuItem } from '../ContextMenu'
@@ -18,6 +18,7 @@ export default function WorkspaceGitBranches({
   onRefresh,
 }: WorkspaceGitBranchesProps) {
   const [branches, setBranches] = useState<BranchEntry[]>([])
+  const [stashes, setStashes] = useState<StashEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [showNewBranch, setShowNewBranch] = useState(false)
   const [newBranchName, setNewBranchName] = useState('')
@@ -28,10 +29,15 @@ export default function WorkspaceGitBranches({
   const fetchBranches = useCallback(async () => {
     setLoading(true)
     try {
-      const result = await gitOps.listBranches()
-      setBranches(result)
+      const [branchResult, stashResult] = await Promise.all([
+        gitOps.listBranches(),
+        gitOps.listStashes(),
+      ])
+      setBranches(branchResult)
+      setStashes(stashResult)
     } catch {
       setBranches([])
+      setStashes([])
     } finally {
       setLoading(false)
     }
@@ -126,6 +132,27 @@ export default function WorkspaceGitBranches({
       showToast(`Merge failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     }
   }, [gitOps, onRefresh, fetchBranches, currentBranch])
+
+  const handleStashPop = useCallback(async (index: number) => {
+    try {
+      await gitOps.stash('pop', index)
+      onRefresh()
+      fetchBranches()
+      showToast('Changes restored', 'success')
+    } catch (err) {
+      showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefresh, fetchBranches])
+
+  const handleStashDrop = useCallback(async (index: number) => {
+    try {
+      await gitOps.stash('drop', index)
+      fetchBranches()
+      showToast('Stash removed', 'success')
+    } catch (err) {
+      showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, fetchBranches])
 
   const handleBranchContextMenu = useCallback((e: React.MouseEvent, branch: BranchEntry) => {
     e.preventDefault()
@@ -229,6 +256,35 @@ export default function WorkspaceGitBranches({
               >
                 <span className="workspace-git-branches-item-indicator" />
                 <span className="workspace-git-branches-item-name">{b.name}</span>
+              </div>
+            ))}
+          </>
+        )}
+
+        {stashes.length > 0 && (
+          <>
+            <div className="workspace-git-branches-section-label">Saved for Later</div>
+            {stashes.map(s => (
+              <div key={s.index} className="workspace-git-branches-item" style={{ justifyContent: 'space-between' }}>
+                <span className="workspace-git-branches-item-name" style={{ fontSize: 12 }} title={s.message}>
+                  {s.message || `stash@{${s.index}}`}
+                </span>
+                <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+                  <button
+                    style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: 11, padding: '0 4px', fontFamily: 'var(--font-family)' }}
+                    onClick={() => handleStashPop(s.index)}
+                    title="Restore these changes"
+                  >
+                    Restore
+                  </button>
+                  <button
+                    style={{ background: 'none', border: 'none', color: 'var(--color-text-secondary)', cursor: 'pointer', fontSize: 11, padding: '0 4px', fontFamily: 'var(--font-family)' }}
+                    onClick={() => handleStashDrop(s.index)}
+                    title="Discard these changes"
+                  >
+                    Discard
+                  </button>
+                </div>
               </div>
             ))}
           </>
