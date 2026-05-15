@@ -1,0 +1,530 @@
+import { useState, useCallback, useEffect, useRef } from 'react'
+import FileIcon from './FileIcon'
+import type { FileOps, WorkspaceFileEntry, WorkspaceMode, GitBranchInfo, GitFileStatus, GitStatusCode, GitOps } from '../../types/workspace'
+import { showToast } from '../Toast'
+import ContextMenu from '../ContextMenu'
+import type { MenuItem } from '../ContextMenu'
+import { getFileExplorerMenuItems } from './fileExplorerMenuItems'
+
+interface WorkspaceFileExplorerProps {
+  rootPath: string
+  mode: WorkspaceMode
+  fileOps: FileOps
+  expandedDirs: Set<string>
+  selectedPath: string | null
+  gitBranch: GitBranchInfo | null
+  gitStatuses: GitFileStatus[]
+  isGitRepo: boolean
+  onToggleDir: (path: string) => void
+  onSelectPath: (path: string | null) => void
+  onOpenFile: (filePath: string, fileName: string) => void
+  onRefreshGit: () => void
+  getFileStatus: (path: string) => GitFileStatus | undefined
+  gitOps: GitOps | null
+  onViewDiff: (filePath: string) => void
+  onViewBlame: (filePath: string) => void
+}
+
+interface DirContents {
+  entries: WorkspaceFileEntry[]
+  loading: boolean
+  error: string | null
+}
+
+interface ContextMenuState {
+  position: { x: number; y: number }
+  items: MenuItem[]
+}
+
+type InlineInputMode =
+  | { type: 'new-file'; parentDir: string }
+  | { type: 'new-folder'; parentDir: string }
+  | { type: 'rename'; entry: WorkspaceFileEntry; parentDir: string }
+  | null
+
+const GIT_STATUS_LABELS: Record<GitStatusCode, string> = {
+  modified: 'M',
+  added: 'A',
+  deleted: 'D',
+  untracked: 'U',
+  renamed: 'R',
+  copied: 'C',
+  clean: '',
+}
+
+export default function WorkspaceFileExplorer({
+  rootPath,
+  mode,
+  fileOps,
+  expandedDirs,
+  selectedPath,
+  gitBranch,
+  gitStatuses,
+  isGitRepo,
+  onToggleDir,
+  onSelectPath,
+  onOpenFile,
+  onRefreshGit,
+  getFileStatus,
+  gitOps,
+  onViewDiff,
+  onViewBlame,
+}: WorkspaceFileExplorerProps) {
+  const [dirContents, setDirContents] = useState<Map<string, DirContents>>(new Map())
+  const [filter, setFilter] = useState('')
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [inlineInput, setInlineInput] = useState<InlineInputMode>(null)
+  const [inlineValue, setInlineValue] = useState('')
+  const [deleteConfirm, setDeleteConfirm] = useState<WorkspaceFileEntry | null>(null)
+  const inlineInputRef = useRef<HTMLInputElement>(null)
+
+  const loadDir = useCallback(async (path: string) => {
+    setDirContents(prev => {
+      const next = new Map(prev)
+      next.set(path, { entries: prev.get(path)?.entries || [], loading: true, error: null })
+      return next
+    })
+    try {
+      const entries = await fileOps.readDir(path)
+      setDirContents(prev => {
+        const next = new Map(prev)
+        next.set(path, { entries, loading: false, error: null })
+        return next
+      })
+    } catch (err) {
+      setDirContents(prev => {
+        const next = new Map(prev)
+        next.set(path, { entries: [], loading: false, error: err instanceof Error ? err.message : 'Failed to read directory' })
+        return next
+      })
+    }
+  }, [fileOps])
+
+  useEffect(() => {
+    loadDir(rootPath)
+  }, [rootPath, loadDir])
+
+  useEffect(() => {
+    for (const dir of expandedDirs) {
+      if (!dirContents.has(dir)) {
+        loadDir(dir)
+      }
+    }
+  }, [expandedDirs, dirContents, loadDir])
+
+  useEffect(() => {
+    if (inlineInput && inlineInputRef.current) {
+      inlineInputRef.current.focus()
+      if (inlineInput.type === 'rename') {
+        const name = inlineInput.entry.name
+        const dotIdx = name.lastIndexOf('.')
+        inlineInputRef.current.setSelectionRange(0, dotIdx > 0 ? dotIdx : name.length)
+      } else {
+        inlineInputRef.current.select()
+      }
+    }
+  }, [inlineInput])
+
+
+  const getParentDir = useCallback((filePath: string): string => {
+    const sep = filePath.includes('/') ? '/' : '\\'
+    const parts = filePath.split(sep)
+    parts.pop()
+    return parts.join(sep) || rootPath
+  }, [rootPath])
+
+  const refreshDir = useCallback((dirPath: string) => {
+    loadDir(dirPath)
+  }, [loadDir])
+
+  const refreshAll = useCallback(() => {
+    setDirContents(new Map())
+    loadDir(rootPath)
+    onRefreshGit()
+  }, [rootPath, loadDir, onRefreshGit])
+
+  // CRUD operations
+  const handleNewFile = useCallback((parentDir: string) => {
+    if (!expandedDirs.has(parentDir) && parentDir !== rootPath) {
+      onToggleDir(parentDir)
+    }
+    setInlineInput({ type: 'new-file', parentDir })
+    setInlineValue('')
+    setContextMenu(null)
+  }, [expandedDirs, rootPath, onToggleDir])
+
+  const handleNewFolder = useCallback((parentDir: string) => {
+    if (!expandedDirs.has(parentDir) && parentDir !== rootPath) {
+      onToggleDir(parentDir)
+    }
+    setInlineInput({ type: 'new-folder', parentDir })
+    setInlineValue('')
+    setContextMenu(null)
+  }, [expandedDirs, rootPath, onToggleDir])
+
+  const handleRename = useCallback((entry: WorkspaceFileEntry) => {
+    setInlineInput({ type: 'rename', entry, parentDir: getParentDir(entry.path) })
+    setInlineValue(entry.name)
+    setContextMenu(null)
+  }, [getParentDir])
+
+  const handleDelete = useCallback((entry: WorkspaceFileEntry) => {
+    setDeleteConfirm(entry)
+    setContextMenu(null)
+  }, [])
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleteConfirm) return
+    try {
+      await fileOps.delete(deleteConfirm.path, deleteConfirm.isDir)
+      refreshDir(getParentDir(deleteConfirm.path))
+      showToast(`Deleted ${deleteConfirm.name}`, 'success')
+    } catch (err) {
+      showToast(`Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+    setDeleteConfirm(null)
+  }, [deleteConfirm, fileOps, refreshDir, getParentDir])
+
+  const handleInlineSubmit = useCallback(async () => {
+    if (!inlineInput || !inlineValue.trim()) {
+      setInlineInput(null)
+      return
+    }
+
+    const name = inlineValue.trim()
+    const sep = rootPath.includes('/') ? '/' : '\\'
+
+    try {
+      if (inlineInput.type === 'new-file') {
+        const path = `${inlineInput.parentDir}${sep}${name}`
+        await fileOps.writeFile(path, '')
+        refreshDir(inlineInput.parentDir)
+        showToast(`Created ${name}`, 'success')
+        onOpenFile(path, name)
+      } else if (inlineInput.type === 'new-folder') {
+        const path = `${inlineInput.parentDir}${sep}${name}`
+        await fileOps.mkdir(path)
+        refreshDir(inlineInput.parentDir)
+        showToast(`Created folder ${name}`, 'success')
+      } else if (inlineInput.type === 'rename') {
+        const parentDir = inlineInput.parentDir
+        const newPath = `${parentDir}${sep}${name}`
+        await fileOps.rename(inlineInput.entry.path, newPath)
+        refreshDir(parentDir)
+        showToast(`Renamed to ${name}`, 'success')
+      }
+    } catch (err) {
+      showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+    setInlineInput(null)
+  }, [inlineInput, inlineValue, rootPath, fileOps, refreshDir, onOpenFile])
+
+  const handleInlineKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleInlineSubmit()
+    } else if (e.key === 'Escape') {
+      setInlineInput(null)
+    }
+  }, [handleInlineSubmit])
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, entry: WorkspaceFileEntry) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const parentDir = entry.isDir ? entry.path : getParentDir(entry.path)
+    const items = getFileExplorerMenuItems(
+      {
+        entry,
+        parentDir,
+        isGitRepo,
+        gitStatus: getFileStatus(entry.path),
+        rootPath,
+      },
+      {
+        onOpen: onOpenFile,
+        onNewFile: handleNewFile,
+        onNewFolder: handleNewFolder,
+        onRename: handleRename,
+        onDelete: handleDelete,
+        onCopyPath: handleCopyPath,
+        onCopyRelativePath: handleCopyRelativePath,
+        onStage: handleStage,
+        onUnstage: handleUnstage,
+        onRevert: handleRevert,
+        onViewDiff: onViewDiff,
+        onViewBlame: onViewBlame,
+      },
+    )
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
+  }, [getParentDir, isGitRepo, getFileStatus, rootPath, onOpenFile, handleNewFile, handleNewFolder, handleRename, handleDelete, handleCopyPath, handleCopyRelativePath, handleStage, handleUnstage, handleRevert, onViewDiff, onViewBlame])
+
+  const handleTreeContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const entry: WorkspaceFileEntry = { name: '', path: rootPath, isDir: true, size: 0, modified: null }
+    const items = getFileExplorerMenuItems(
+      { entry, parentDir: rootPath, isGitRepo, gitStatus: undefined, rootPath },
+      {
+        onOpen: onOpenFile,
+        onNewFile: handleNewFile,
+        onNewFolder: handleNewFolder,
+        onRename: handleRename,
+        onDelete: handleDelete,
+        onCopyPath: handleCopyPath,
+        onCopyRelativePath: handleCopyRelativePath,
+        onStage: handleStage,
+        onUnstage: handleUnstage,
+        onRevert: handleRevert,
+        onViewDiff: onViewDiff,
+        onViewBlame: onViewBlame,
+      },
+    )
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
+  }, [rootPath, isGitRepo, onOpenFile, handleNewFile, handleNewFolder, handleRename, handleDelete, handleCopyPath, handleCopyRelativePath, handleStage, handleUnstage, handleRevert, onViewDiff, onViewBlame])
+
+  const handleCopyPath = useCallback((path: string) => {
+    navigator.clipboard.writeText(path)
+    showToast('Path copied', 'info', 1500)
+    setContextMenu(null)
+  }, [])
+
+  const handleCopyRelativePath = useCallback((relativePath: string) => {
+    navigator.clipboard.writeText(relativePath)
+    showToast('Relative path copied', 'info', 1500)
+  }, [])
+
+  const handleStage = useCallback(async (paths: string[]) => {
+    if (!gitOps) return
+    try {
+      await gitOps.stage(paths)
+      onRefreshGit()
+      showToast('Staged', 'success', 1500)
+    } catch (err) {
+      showToast(`Stage failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefreshGit])
+
+  const handleUnstage = useCallback(async (paths: string[]) => {
+    if (!gitOps) return
+    try {
+      await gitOps.unstage(paths)
+      onRefreshGit()
+      showToast('Unstaged', 'success', 1500)
+    } catch (err) {
+      showToast(`Unstage failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefreshGit])
+
+  const handleRevert = useCallback(async (paths: string[]) => {
+    if (!gitOps) return
+    try {
+      await gitOps.revert(paths)
+      onRefreshGit()
+      refreshDir(getParentDir(paths[0]))
+      showToast('Reverted', 'success', 1500)
+    } catch (err) {
+      showToast(`Revert failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefreshGit, refreshDir, getParentDir])
+
+  const handleFileClick = useCallback((entry: WorkspaceFileEntry) => {
+    onSelectPath(entry.path)
+    if (entry.isDir) {
+      onToggleDir(entry.path)
+    }
+  }, [onSelectPath, onToggleDir])
+
+  const handleFileDoubleClick = useCallback((entry: WorkspaceFileEntry) => {
+    if (!entry.isDir) {
+      onOpenFile(entry.path, entry.name)
+    }
+  }, [onOpenFile])
+
+  const rootName = rootPath.split('/').pop() || rootPath
+
+  const renderInlineInput = (depth: number, isFolder: boolean) => (
+    <div className="workspace-file-entry" style={{ paddingLeft: depth * 16 + 4 }}>
+      <span className="workspace-dir-toggle" />
+      <span className="workspace-file-entry-icon">{isFolder ? '📁' : '📄'}</span>
+      <input
+        ref={inlineInputRef}
+        className="workspace-inline-input"
+        value={inlineValue}
+        onChange={e => setInlineValue(e.target.value)}
+        onKeyDown={handleInlineKeyDown}
+        onBlur={handleInlineSubmit}
+        placeholder={isFolder ? 'folder name' : 'filename'}
+      />
+    </div>
+  )
+
+  const renderEntry = (entry: WorkspaceFileEntry, depth: number, parentDir: string) => {
+    const isExpanded = expandedDirs.has(entry.path)
+    const isSelected = selectedPath === entry.path
+    const gitStatus = getFileStatus(entry.path)
+    const statusLabel = gitStatus ? GIT_STATUS_LABELS[gitStatus.status] : ''
+    const isRenaming = inlineInput?.type === 'rename' && inlineInput.entry.path === entry.path
+
+    if (filter && !entry.name.toLowerCase().includes(filter.toLowerCase())) {
+      if (!entry.isDir) return null
+    }
+
+    if (isRenaming) {
+      return (
+        <div key={entry.path}>
+          <div className="workspace-file-entry selected" style={{ paddingLeft: depth * 16 + 4 }}>
+            {entry.isDir ? (
+              <span className="workspace-dir-toggle">{isExpanded ? '▾' : '▸'}</span>
+            ) : (
+              <span className="workspace-dir-toggle" />
+            )}
+            <FileIcon name={entry.name} isDir={entry.isDir} isExpanded={isExpanded} />
+            <input
+              ref={inlineInputRef}
+              className="workspace-inline-input"
+              value={inlineValue}
+              onChange={e => setInlineValue(e.target.value)}
+              onKeyDown={handleInlineKeyDown}
+              onBlur={handleInlineSubmit}
+            />
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div key={entry.path}>
+        <div
+          className={`workspace-file-entry ${isSelected ? 'selected' : ''} ${gitStatus?.status === 'deleted' ? 'deleted' : ''}`}
+          style={{ paddingLeft: depth * 16 + 4 }}
+          onClick={() => handleFileClick(entry)}
+          onDoubleClick={() => handleFileDoubleClick(entry)}
+          onContextMenu={(e) => handleContextMenu(e, entry)}
+        >
+          {entry.isDir ? (
+            <span className="workspace-dir-toggle">{isExpanded ? '▾' : '▸'}</span>
+          ) : (
+            <span className="workspace-dir-toggle" />
+          )}
+          <FileIcon name={entry.name} isDir={entry.isDir} isExpanded={isExpanded} />
+          <span className="workspace-file-entry-name">{entry.name}</span>
+          {statusLabel && (
+            <span className={`workspace-file-entry-git ${gitStatus?.status || ''}`}>
+              {statusLabel}
+            </span>
+          )}
+        </div>
+        {entry.isDir && isExpanded && renderDirChildren(entry.path, depth + 1)}
+      </div>
+    )
+  }
+
+  const renderDirChildren = (dirPath: string, depth: number) => {
+    const contents = dirContents.get(dirPath)
+
+    const showNewFileInput = inlineInput?.type === 'new-file' && inlineInput.parentDir === dirPath
+    const showNewFolderInput = inlineInput?.type === 'new-folder' && inlineInput.parentDir === dirPath
+
+    if (!contents || contents.loading) {
+      return (
+        <div className="workspace-file-entry" style={{ paddingLeft: depth * 16 + 4 }}>
+          <span className="workspace-file-entry-name" style={{ color: 'var(--color-text-secondary)' }}>
+            Loading...
+          </span>
+        </div>
+      )
+    }
+    if (contents.error) {
+      return (
+        <div className="workspace-file-entry" style={{ paddingLeft: depth * 16 + 4 }}>
+          <span className="workspace-file-entry-name" style={{ color: 'var(--color-error)' }}>
+            {contents.error}
+          </span>
+        </div>
+      )
+    }
+    return (
+      <>
+        {showNewFolderInput && renderInlineInput(depth, true)}
+        {showNewFileInput && renderInlineInput(depth, false)}
+        {contents.entries.map(entry => renderEntry(entry, depth, dirPath))}
+      </>
+    )
+  }
+
+  const modifiedCount = gitStatuses.filter(s => s.status !== 'clean').length
+  const stagedCount = gitStatuses.filter(s => s.staged).length
+
+  return (
+    <>
+      <div className="workspace-explorer-header">
+        <span>{rootName}</span>
+        <div className="workspace-explorer-header-actions">
+          <button
+            className="workspace-explorer-header-btn"
+            onClick={() => handleNewFile(selectedPath && expandedDirs.has(selectedPath) ? selectedPath : rootPath)}
+            title="New File"
+          >
+            +
+          </button>
+          <button
+            className="workspace-explorer-header-btn"
+            onClick={() => handleNewFolder(selectedPath && expandedDirs.has(selectedPath) ? selectedPath : rootPath)}
+            title="New Folder"
+          >
+            📁+
+          </button>
+          <button className="workspace-explorer-header-btn" onClick={refreshAll} title="Refresh">
+            ⟳
+          </button>
+        </div>
+      </div>
+
+      {isGitRepo && gitBranch && (
+        <div className="workspace-git-branch">
+          <span>⎇</span>
+          <span className="workspace-git-branch-name">{gitBranch.name}</span>
+          {(gitBranch.ahead > 0 || gitBranch.behind > 0) && (
+            <span className="workspace-git-ahead-behind">
+              {gitBranch.ahead > 0 && `↑${gitBranch.ahead}`}
+              {gitBranch.behind > 0 && ` ↓${gitBranch.behind}`}
+            </span>
+          )}
+          {modifiedCount > 0 && (
+            <span className="workspace-git-ahead-behind">
+              {modifiedCount}M{stagedCount > 0 && ` ${stagedCount}S`}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="workspace-file-tree" onContextMenu={handleTreeContextMenu}>
+        {renderDirChildren(rootPath, 0)}
+      </div>
+
+      <ContextMenu
+        position={contextMenu?.position ?? null}
+        items={contextMenu?.items ?? []}
+        onClose={() => setContextMenu(null)}
+      />
+
+      {/* Delete Confirmation */}
+      {deleteConfirm && (
+        <div className="workspace-new-dialog-overlay" onClick={() => setDeleteConfirm(null)}>
+          <div className="workspace-new-dialog" onClick={e => e.stopPropagation()} style={{ width: 360 }}>
+            <h3>Delete {deleteConfirm.isDir ? 'Folder' : 'File'}</h3>
+            <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-small)', margin: '0 0 16px' }}>
+              Are you sure you want to delete <strong style={{ color: 'var(--color-text-primary)' }}>{deleteConfirm.name}</strong>?
+              {deleteConfirm.isDir && ' This will delete all contents.'}
+            </p>
+            <div className="workspace-new-dialog-actions">
+              <button className="workspace-new-dialog-btn" onClick={() => setDeleteConfirm(null)}>Cancel</button>
+              <button className="workspace-new-dialog-btn" style={{ background: 'var(--color-error)', borderColor: 'var(--color-error)', color: 'white' }} onClick={confirmDelete}>
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
