@@ -18,6 +18,7 @@ import PanelSettingsPanel from './PanelSettings'
 import SettingsTroubleshooting from './SettingsTroubleshooting'
 import JumpHostsTab from './JumpHostsTab'
 import ApiResourcesTab from './ApiResourcesTab'
+import GitAccountsSettingsTab from './GitAccountsSettingsTab'
 import { useKeyboard } from '../hooks/useKeyboard'
 import { useSettings, type AppSettings } from '../hooks/useSettings'
 import { TERMINAL_THEMES } from '../lib/terminalThemes'
@@ -38,7 +39,7 @@ interface Setting {
   options?: { label: string; value: string }[]
 }
 
-export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts'
+export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'gitAccounts'
 
 interface SettingsPanelProps {
   onSettingChange?: (id: string, value: unknown) => void
@@ -67,6 +68,7 @@ const TAB_SEARCH_INDEX: { tab: SettingsTab; label: string; keywords: string[] }[
   { tab: 'account', label: 'Account', keywords: ['account', 'controller', 'username', 'sign out', 'logout'] },
   { tab: 'myCredentials', label: 'My Credentials', keywords: ['credential', 'password', 'secret'] },
   { tab: 'sshCerts', label: 'SSH Certificates', keywords: ['ssh', 'certificate', 'cert', 'ca', 'public key'] },
+  { tab: 'gitAccounts', label: 'Git Accounts', keywords: ['git', 'accounts', 'github', 'gitlab', 'gitea', 'bitbucket', 'pat', 'token', 'oauth'] },
 ]
 
 // Default settings configuration - only includes settings that are actually functional
@@ -388,6 +390,14 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
             Security
           </button>
         )}
+        {!isEnterprise && (
+          <button
+            className={`settings-nav-item ${activeTab === 'gitAccounts' ? 'active' : ''}${matchingTabs && !matchingTabs.has('gitAccounts') ? ' dimmed' : ''}`}
+            onClick={() => setActiveTab('gitAccounts')}
+          >
+            Git Accounts
+          </button>
+        )}
         {!isEnterprise && hasFeature('local_integrations') && (
           <button
             className={`settings-nav-item ${activeTab === 'integrations' ? 'active' : ''}${matchingTabs && !matchingTabs.has('integrations') ? ' dimmed' : ''}`}
@@ -543,6 +553,11 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         {/* Security settings tab */}
         {activeTab === 'security' && (
           <VaultSettings />
+        )}
+
+        {/* Git Accounts settings tab */}
+        {activeTab === 'gitAccounts' && (
+          <GitAccountsSettingsTab />
         )}
 
         {/* Integrations settings tab */}
