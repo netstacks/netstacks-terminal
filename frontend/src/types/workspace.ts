@@ -7,7 +7,7 @@ export interface AiToolConfig {
   customCommand?: string
 }
 
-export type InnerTabType = 'code-editor' | 'browser' | 'diff' | 'image' | 'markdown'
+export type InnerTabType = 'code-editor' | 'browser' | 'diff' | 'blame' | 'image' | 'markdown'
 
 export interface InnerTab {
   id: string
