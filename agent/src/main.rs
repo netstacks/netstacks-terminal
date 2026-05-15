@@ -54,6 +54,7 @@ mod terminal;
 mod tls;
 mod tracked_router;
 mod git;
+mod git_accounts;
 mod git_api;
 mod tunnels;
 mod utf8_decoder;
@@ -1008,6 +1009,12 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/workspace/git/rebase/plan", post(git_api::git_rebase_plan))
         .route("/workspace/git/rebase/apply", post(git_api::git_rebase_apply))
         .route("/workspace/git/rebase/abort", post(git_api::git_rebase_abort))
+        // Git accounts
+        .route("/workspace/git/accounts", get(git_accounts::list_accounts))
+        .route("/workspace/git/accounts/create", post(git_accounts::create_account))
+        .route("/workspace/git/accounts/update", post(git_accounts::update_account))
+        .route("/workspace/git/accounts/delete", post(git_accounts::delete_account))
+        .route("/workspace/git/accounts/test", post(git_accounts::test_connection))
         .with_state(app_state.clone());
 
     // Dev-only route introspection (cfg-gated; absent from release builds).

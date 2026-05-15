@@ -117,6 +117,7 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), DbError> {
     migrate_credential_profile_jump_host(pool).await?;
     migrate_jump_session_id_columns(pool).await?;
     migrate_topology_folders(pool).await?;
+    migrate_git_accounts_table(pool).await?;
     seed_default_settings(pool).await?;
 
     Ok(())
@@ -1956,6 +1957,31 @@ async fn migrate_ai_memory_table(pool: &SqlitePool) -> Result<(), DbError> {
             .map_err(|e| DbError::Migration(format!("Failed to create ai_memory created_at index: {}", e)))?;
     }
 
+    Ok(())
+}
+
+/// Migrate git_accounts table - create if it doesn't exist
+async fn migrate_git_accounts_table(pool: &SqlitePool) -> Result<(), DbError> {
+    if !table_exists(pool, "git_accounts").await? {
+        sqlx::query(
+            r#"CREATE TABLE git_accounts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                host TEXT,
+                auth_method TEXT NOT NULL DEFAULT 'pat',
+                credential TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"#,
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| DbError::Migration(format!("Failed to create git_accounts table: {}", e)))?;
+
+        tracing::info!("Created git_accounts table");
+    }
     Ok(())
 }
 
