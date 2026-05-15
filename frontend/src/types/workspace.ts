@@ -9,6 +9,9 @@ export interface AiToolConfig {
 
 export type InnerTabType = 'code-editor' | 'browser' | 'diff' | 'blame' | 'image' | 'markdown'
 
+export type Zone1Tab = 'files' | 'git'
+export type GitPanelTab = 'changes' | 'history' | 'branches'
+
 export interface InnerTab {
   id: string
   type: InnerTabType
@@ -92,6 +95,8 @@ export interface WorkspaceState {
   fileExplorerWidth: number
   expandedDirs: Set<string>
   selectedPath: string | null
+  zone1Tab: Zone1Tab
+  gitPanelTab: GitPanelTab
 
   // Zone 2
   innerTabs: InnerTab[]
@@ -124,6 +129,8 @@ export interface WorkspaceConfig {
   terminalPanelCollapsed: boolean
   expandedDirs: string[]
   selectedPath: string | null
+  zone1Tab?: Zone1Tab
+  gitPanelTab?: GitPanelTab
 
   // Open files (restored on reopen)
   openFiles: SavedInnerTab[]

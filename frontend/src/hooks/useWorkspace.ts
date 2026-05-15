@@ -9,6 +9,8 @@ import type {
   InnerTabType,
   FileOps,
   GitOps,
+  Zone1Tab,
+  GitPanelTab,
 } from '../types/workspace'
 
 interface UseWorkspaceOptions {
@@ -23,6 +25,8 @@ interface UseWorkspaceReturn {
   setFileExplorerWidth: (width: number) => void
   toggleDir: (path: string) => void
   setSelectedPath: (path: string | null) => void
+  setZone1Tab: (tab: Zone1Tab) => void
+  setGitPanelTab: (tab: GitPanelTab) => void
 
   openInnerTab: (type: InnerTabType, opts: { filePath?: string; url?: string; title: string }) => void
   closeInnerTab: (id: string) => void
@@ -85,6 +89,8 @@ function createInitialState(config: WorkspaceConfig): WorkspaceState {
     fileExplorerWidth: config.fileExplorerWidth || 220,
     expandedDirs: new Set(config.expandedDirs || []),
     selectedPath: config.selectedPath || null,
+    zone1Tab: config.zone1Tab || 'files',
+    gitPanelTab: config.gitPanelTab || 'changes',
     innerTabs,
     activeInnerTabId,
     terminalPanelHeight: config.terminalPanelHeight || 250,
@@ -110,6 +116,8 @@ function stateToConfig(state: WorkspaceState): WorkspaceConfig {
     terminalPanelCollapsed: state.terminalPanelCollapsed,
     expandedDirs: Array.from(state.expandedDirs),
     selectedPath: state.selectedPath,
+    zone1Tab: state.zone1Tab,
+    gitPanelTab: state.gitPanelTab,
     openFiles: state.innerTabs.map(t => ({
       type: t.type,
       title: t.title,
@@ -170,6 +178,8 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     state.fileExplorerWidth,
     state.terminalPanelHeight,
     state.terminalPanelCollapsed,
+    state.zone1Tab,
+    state.gitPanelTab,
   ])
 
   // Save immediately on unmount
@@ -195,6 +205,14 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
 
   const setSelectedPath = useCallback((path: string | null) => {
     setState(s => ({ ...s, selectedPath: path }))
+  }, [])
+
+  const setZone1Tab = useCallback((tab: Zone1Tab) => {
+    setState(s => ({ ...s, zone1Tab: tab }))
+  }, [])
+
+  const setGitPanelTab = useCallback((tab: GitPanelTab) => {
+    setState(s => ({ ...s, gitPanelTab: tab }))
   }, [])
 
   const openInnerTab = useCallback((
@@ -292,6 +310,8 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     setFileExplorerWidth,
     toggleDir,
     setSelectedPath,
+    setZone1Tab,
+    setGitPanelTab,
     openInnerTab,
     closeInnerTab,
     setActiveInnerTab,
