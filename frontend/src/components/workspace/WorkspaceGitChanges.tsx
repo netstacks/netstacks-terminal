@@ -1,6 +1,8 @@
 import { useState, useCallback } from 'react'
 import type { GitOps, GitFileStatus, GitBranchInfo, GitStatusCode } from '../../types/workspace'
 import { showToast } from '../Toast'
+import ContextMenu from '../ContextMenu'
+import type { MenuItem } from '../ContextMenu'
 
 interface WorkspaceGitChangesProps {
   gitOps: GitOps
@@ -29,6 +31,7 @@ export default function WorkspaceGitChanges({
 }: WorkspaceGitChangesProps) {
   const [commitMsg, setCommitMsg] = useState('')
   const [isCommitting, setIsCommitting] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
 
   const staged = statuses.filter(s => s.staged)
   const unstaged = statuses.filter(s => !s.staged && s.status !== 'clean')
@@ -73,6 +76,48 @@ export default function WorkspaceGitChanges({
     }
   }, [gitOps, onRefresh])
 
+  const handleRevertFile = useCallback(async (path: string) => {
+    try {
+      await gitOps.revert([path])
+      onRefresh()
+      showToast('Reverted', 'success', 1500)
+    } catch (err) {
+      showToast(`Revert failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    }
+  }, [gitOps, onRefresh])
+
+  const handleFileContextMenu = useCallback((e: React.MouseEvent, file: GitFileStatus, isStaged: boolean) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const items: MenuItem[] = [
+      {
+        id: 'view-diff',
+        label: 'View Diff',
+        action: () => onViewDiff(file.path),
+      },
+      { id: 'divider-1', label: '', divider: true, action: () => {} },
+    ]
+    if (isStaged) {
+      items.push({
+        id: 'unstage',
+        label: 'Unstage',
+        action: () => handleUnstageFile(file.path),
+      })
+    } else {
+      items.push({
+        id: 'stage',
+        label: 'Stage',
+        action: () => handleStageFile(file.path),
+      })
+      items.push({
+        id: 'revert',
+        label: 'Revert Changes',
+        action: () => handleRevertFile(file.path),
+      })
+    }
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
+  }, [onViewDiff, handleStageFile, handleUnstageFile, handleRevertFile])
+
   const handleCommit = useCallback(async (andPush: boolean) => {
     if (!commitMsg.trim()) return
     setIsCommitting(true)
@@ -98,6 +143,7 @@ export default function WorkspaceGitChanges({
       key={`${isStaged ? 's' : 'u'}-${file.path}`}
       className="workspace-git-changes-file"
       onClick={() => onViewDiff(file.path)}
+      onContextMenu={(e) => handleFileContextMenu(e, file, isStaged)}
     >
       <span className={`workspace-git-changes-file-status ${file.status}`}>
         {STATUS_LABELS[file.status]}
@@ -198,6 +244,12 @@ export default function WorkspaceGitChanges({
           </button>
         </div>
       </div>
+
+      <ContextMenu
+        position={contextMenu?.position ?? null}
+        items={contextMenu?.items ?? []}
+        onClose={() => setContextMenu(null)}
+      />
     </div>
   )
 }
