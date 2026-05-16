@@ -74,7 +74,6 @@
   border-top: none;
   border-right: none;
   border-bottom: none;
-  position: relative;
 }
 
 .activity-bar-item:hover {
@@ -89,42 +88,6 @@
 .activity-bar-item svg {
   width: 24px;
   height: 24px;
-}
-
-.activity-bar-item--reordering {
-  cursor: grab;
-  outline: 1px dashed var(--color-border-strong, #555);
-  outline-offset: -2px;
-}
-
-.activity-bar-item--reordering:active {
-  cursor: grabbing;
-}
-
-.activity-bar-item.dragging {
-  opacity: 0.4;
-}
-
-.activity-bar-item.drag-over-top::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 2px;
-  background: var(--color-accent);
-  z-index: 10;
-}
-
-.activity-bar-item.drag-over-bottom::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  background: var(--color-accent);
-  z-index: 10;
 }
 
 /* Sidebar */
