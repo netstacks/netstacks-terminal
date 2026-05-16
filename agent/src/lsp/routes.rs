@@ -55,6 +55,7 @@ pub fn ws_router(state: LspState) -> Router {
 }
 
 /// Convenience: merged router used by integration tests.
+#[allow(dead_code)] // used by tests/lsp_integration.rs only
 pub fn router(state: LspState) -> Router {
     http_router(state.clone()).merge(ws_router(state))
 }

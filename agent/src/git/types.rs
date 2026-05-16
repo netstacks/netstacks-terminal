@@ -66,6 +66,7 @@ pub struct RebasePlanItem {
 
 #[derive(Debug)]
 pub enum GitError {
+    #[allow(dead_code)] // surfaced by Display; constructors land with the next git-status caller
     NotARepo,
     CommandFailed(String),
     Io(std::io::Error),

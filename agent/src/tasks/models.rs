@@ -89,7 +89,13 @@ pub struct AgentTask {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateTaskRequest {
     pub prompt: String,
+    /// Per-task failure-handling policy. Accepted from the wire so the
+    /// frontend's `failure_policy` field round-trips, but not yet read by
+    /// any downstream consumer — wiring this to the executor is a separate
+    /// task (see fix-plan P3-area). Silencing the dead-code lint here so
+    /// we don't lose the field accidentally.
     #[serde(default)]
+    #[allow(dead_code)]
     pub failure_policy: Option<serde_json::Value>,
 }
 

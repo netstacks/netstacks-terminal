@@ -125,11 +125,6 @@ impl LspSession {
         self.inbound_tx.clone()
     }
 
-    /// How many WebSocket clients are currently attached.
-    pub fn client_count(&self) -> usize {
-        self.outbound_tx.receiver_count()
-    }
-
     /// Gracefully shut down the session: send `shutdown` then `exit` LSP
     /// requests, wait up to SHUTDOWN_GRACE_MS, then SIGKILL if still alive.
     pub async fn shutdown(&self) {
