@@ -771,6 +771,11 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -
                 .delete(api::delete_netbox_source),
         )
         .route("/netbox-sources/:id/test", post(api::test_netbox_source))
+        .route("/netbox-sources/:id/devices", get(api::netbox_source_list_devices))
+        .route(
+            "/netbox-sources/:id/devices/:device_id/neighbors",
+            get(api::netbox_source_device_neighbors),
+        )
         .route("/netbox/test", post(api::test_netbox_direct))
         .route("/netbox-sources/:id/sync-complete", post(api::sync_complete_netbox_source))
         .route("/netbox-sources/:id/token", get(api::get_netbox_token))

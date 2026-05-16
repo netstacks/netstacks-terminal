@@ -2140,6 +2140,143 @@ pub async fn netbox_proxy_devices(
     Ok(Json(all_devices))
 }
 
+/// GET /netbox-sources/:id/devices — list all devices for a saved NetBox source.
+/// Returns the raw NetBox paginated payload so the frontend can read `data.results`
+/// the same way it does when talking to NetBox directly.
+pub async fn netbox_source_list_devices(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = state.provider.get_netbox_source(&id).await?;
+    let token = state
+        .provider
+        .get_netbox_token(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "No API token stored for this NetBox source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| ApiError { error: format!("HTTP client init failed: {}", e), code: "HTTP_INIT".to_string() })?;
+
+    let api_url = format!(
+        "{}/api/dcim/devices/?limit=1000",
+        source.url.trim_end_matches('/')
+    );
+    let response = client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| ApiError { error: format!("Request failed: {}", e), code: "REQUEST_ERROR".to_string() })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("NetBox API error: {}", response.status()),
+            code: "NETBOX_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse NetBox response: {}", e),
+        code: "PARSE_ERROR".to_string(),
+    })?;
+
+    Ok(Json(data))
+}
+
+/// GET /netbox-sources/:id/devices/:device_id/neighbors — derive connected
+/// neighbors for a NetBox device by walking its interfaces and reading the
+/// `connected_endpoints` populated by NetBox when cables exist.
+///
+/// Returns `{ "neighbors": [{ deviceId, deviceName, localInterface, remoteInterface, cableId?, cableLabel? }, ...] }`
+/// to match the frontend's `NetBoxNeighbor` shape (frontend/src/api/netbox.ts:77).
+pub async fn netbox_source_device_neighbors(
+    State(state): State<Arc<AppState>>,
+    Path((id, device_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = state.provider.get_netbox_source(&id).await?;
+    let token = state
+        .provider
+        .get_netbox_token(&id)
+        .await?
+        .ok_or_else(|| ApiError {
+            error: "No API token stored for this NetBox source".to_string(),
+            code: "VALIDATION".to_string(),
+        })?;
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| ApiError { error: format!("HTTP client init failed: {}", e), code: "HTTP_INIT".to_string() })?;
+
+    let api_url = format!(
+        "{}/api/dcim/interfaces/?device_id={}&limit=1000",
+        source.url.trim_end_matches('/'),
+        device_id
+    );
+    let response = client
+        .get(&api_url)
+        .header("Authorization", format!("Token {}", token))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| ApiError { error: format!("Request failed: {}", e), code: "REQUEST_ERROR".to_string() })?;
+
+    if !response.status().is_success() {
+        return Err(ApiError {
+            error: format!("NetBox API error: {}", response.status()),
+            code: "NETBOX_ERROR".to_string(),
+        });
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| ApiError {
+        error: format!("Failed to parse NetBox response: {}", e),
+        code: "PARSE_ERROR".to_string(),
+    })?;
+
+    // Walk interfaces, extract connected_endpoints into NetBoxNeighbor shape.
+    // Matches Approach 1 from frontend/src/api/netbox.ts:445-469.
+    let mut neighbors = Vec::new();
+    let mut seen_pairs = std::collections::HashSet::new();
+    if let Some(interfaces) = data.get("results").and_then(|v| v.as_array()) {
+        for iface in interfaces {
+            let local_name = iface.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let cable_id = iface.get("cable").and_then(|c| c.get("id")).and_then(|v| v.as_i64());
+            let cable_label = iface.get("cable").and_then(|c| c.get("label")).and_then(|v| v.as_str()).map(String::from);
+            if let Some(endpoints) = iface.get("connected_endpoints").and_then(|v| v.as_array()) {
+                for endpoint in endpoints {
+                    let device = endpoint.get("device");
+                    let (Some(dev_id), Some(dev_name)) = (
+                        device.and_then(|d| d.get("id")).and_then(|v| v.as_i64()),
+                        device.and_then(|d| d.get("name")).and_then(|v| v.as_str()),
+                    ) else { continue };
+                    let remote_name = endpoint.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let pair_key = format!("{}-{}-{}-{}", device_id, dev_id, local_name, remote_name);
+                    if !seen_pairs.insert(pair_key) { continue; }
+                    let mut n = serde_json::json!({
+                        "deviceId": dev_id,
+                        "deviceName": dev_name,
+                        "localInterface": local_name,
+                        "remoteInterface": remote_name,
+                    });
+                    if let Some(cid) = cable_id { n["cableId"] = serde_json::json!(cid); }
+                    if let Some(cl) = &cable_label { n["cableLabel"] = serde_json::json!(cl); }
+                    neighbors.push(n);
+                }
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "neighbors": neighbors })))
+}
+
 /// Request body for NetBox IP address search
 #[derive(Debug, Deserialize)]
 pub struct NetBoxSearchIpRequest {
