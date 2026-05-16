@@ -392,6 +392,7 @@ export default function QuickActionDialog({
                 aiPlaceholder="Name for this quick action"
                 aiContext={{ description, method, path }}
                 onAIValue={(v) => setName(v)}
+                autoFocus
               />
             </div>
 
@@ -503,7 +504,12 @@ export default function QuickActionDialog({
             </button>
             <div className="qad-footer-right">
               <button className="qad-btn-secondary" onClick={onClose}>Cancel</button>
-              <button className="qad-btn-primary" onClick={handleSave} disabled={saving}>
+              <button
+                className="qad-btn-primary"
+                onClick={handleSave}
+                disabled={saving || !name.trim() || !apiResourceId}
+                title={!name.trim() ? 'Name is required' : !apiResourceId ? 'Pick an API resource' : undefined}
+              >
                 {saving ? 'Saving...' : isEdit ? 'Update' : 'Create'}
               </button>
             </div>

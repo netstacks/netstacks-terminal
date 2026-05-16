@@ -1146,7 +1146,24 @@ export default function NetBoxSourceDialog({
           <button className="btn-secondary" onClick={handleCloseGuarded}>
             Cancel
           </button>
-          <button className="btn-primary" onClick={handleSave} disabled={saving}>
+          <button
+            className="btn-primary"
+            onClick={handleSave}
+            disabled={
+              saving ||
+              !name.trim() ||
+              !url.trim() ||
+              // Token is required for new sources; in edit mode the stored
+              // token covers the empty-input case.
+              (!isEditing && !apiToken.trim())
+            }
+            title={
+              !name.trim() ? 'Name is required'
+              : !url.trim() ? 'URL is required'
+              : (!isEditing && !apiToken.trim()) ? 'API token is required for new sources'
+              : undefined
+            }
+          >
             {saving ? 'Saving...' : 'Save'}
           </button>
         </div>

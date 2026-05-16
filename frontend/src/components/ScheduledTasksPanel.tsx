@@ -359,6 +359,7 @@ function ScheduleTaskDialog({ task, onClose, onSave }: ScheduleTaskDialogProps) 
               aiPlaceholder="Name for this scheduled task"
               aiContext={{ prompt }}
               onAIValue={(v) => setName(v)}
+              autoFocus
             />
           </div>
 
@@ -412,7 +413,12 @@ function ScheduleTaskDialog({ task, onClose, onSave }: ScheduleTaskDialogProps) 
             <button type="button" onClick={handleClose} disabled={saving}>
               Cancel
             </button>
-            <button type="submit" className="primary" disabled={saving}>
+            <button
+              type="submit"
+              className="primary"
+              disabled={saving || !name.trim() || !prompt.trim()}
+              title={!name.trim() || !prompt.trim() ? 'Name and prompt are required' : undefined}
+            >
               {saving ? 'Saving...' : task ? 'Update' : 'Create'}
             </button>
           </div>
