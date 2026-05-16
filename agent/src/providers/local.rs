@@ -2656,6 +2656,40 @@ impl DataProvider for LocalDataProvider {
         self.delete_by_id("snippets", "id", id, "Snippet").await
     }
 
+    async fn update_snippet(
+        &self,
+        id: &str,
+        update: UpdateSnippet,
+    ) -> Result<Snippet, ProviderError> {
+        // Fetch current row, apply Option-Some fields, write back. Snippets
+        // are single-user / single-writer so the read-modify-write race is
+        // acceptable here.
+        let row: SnippetRow = sqlx::query_as("SELECT * FROM snippets WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?
+            .ok_or_else(|| ProviderError::NotFound(format!("Snippet {} not found", id)))?;
+
+        let mut snippet = row.into_snippet()?;
+        if let Some(name) = update.name { snippet.name = name; }
+        if let Some(command) = update.command { snippet.command = command; }
+        if let Some(order) = update.sort_order { snippet.sort_order = order; }
+
+        sqlx::query(
+            "UPDATE snippets SET name = ?, command = ?, sort_order = ? WHERE id = ?",
+        )
+        .bind(&snippet.name)
+        .bind(&snippet.command)
+        .bind(snippet.sort_order)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        Ok(snippet)
+    }
+
     // === Connection Mode ===
 
     fn connection_mode(&self) -> ConnectionMode {

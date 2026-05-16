@@ -18,8 +18,15 @@ export interface NewGlobalSnippet {
   shared?: boolean;
 }
 
-const api = createCrudApi<GlobalSnippet, NewGlobalSnippet>('/snippets');
+export interface UpdateGlobalSnippet {
+  name?: string;
+  command?: string;
+  sort_order?: number;
+}
+
+const api = createCrudApi<GlobalSnippet, NewGlobalSnippet, UpdateGlobalSnippet>('/snippets');
 
 export const listGlobalSnippets = api.list;
 export const createGlobalSnippet = api.create;
+export const updateGlobalSnippet = api.update;
 export const deleteGlobalSnippet = api.delete;

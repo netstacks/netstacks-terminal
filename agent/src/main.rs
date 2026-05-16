@@ -681,7 +681,10 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -
             "/snippets",
             get(api::list_global_snippets).post(api::create_global_snippet),
         )
-        .route("/snippets/:id", delete(api::delete_global_snippet))
+        .route(
+            "/snippets/:id",
+            put(api::update_snippet).delete(api::delete_global_snippet),
+        )
         // Connection History
         .route(
             "/history",

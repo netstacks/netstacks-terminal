@@ -189,6 +189,15 @@ pub trait DataProvider: Send + Sync {
     /// Delete a snippet
     async fn delete_snippet(&self, id: &str) -> Result<(), ProviderError>;
 
+    /// Update an existing snippet's name / command / sort_order.
+    /// Fetch-modify-write so callers can patch just the fields they care
+    /// about without overwriting siblings.
+    async fn update_snippet(
+        &self,
+        id: &str,
+        update: UpdateSnippet,
+    ) -> Result<Snippet, ProviderError>;
+
     // === Connection Mode ===
 
     /// Get the connection mode (Local or Controller)

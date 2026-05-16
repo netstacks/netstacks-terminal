@@ -392,6 +392,15 @@ pub struct NewSnippet {
     pub sort_order: i32,
 }
 
+/// Request to update an existing snippet. Every field optional — only
+/// fields that are `Some` will be written.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateSnippet {
+    pub name: Option<String>,
+    pub command: Option<String>,
+    pub sort_order: Option<i32>,
+}
+
 // === Custom Commands ===
 
 /// Custom right-click command (static quick test or dynamic detection command)

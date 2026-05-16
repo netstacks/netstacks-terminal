@@ -794,6 +794,16 @@ pub async fn delete_global_snippet(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Update a snippet (global or session-scoped — id is unique either way)
+pub async fn update_snippet(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(update): Json<UpdateSnippet>,
+) -> Result<Json<Snippet>, ApiError> {
+    let snippet = state.provider.update_snippet(&id, update).await?;
+    Ok(Json(snippet))
+}
+
 // === Connection History Endpoints ===
 
 /// List recent connection history
