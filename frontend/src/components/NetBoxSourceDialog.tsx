@@ -26,6 +26,7 @@ import {
   type NetBoxTag,
 } from '../api/netbox';
 import { PasswordInput } from './PasswordInput';
+import { useDirtyGuard } from '../hooks/useDirtyGuard';
 import './NetBoxSourceDialog.css';
 
 interface NetBoxSourceDialogProps {
@@ -224,6 +225,27 @@ export default function NetBoxSourceDialog({
   // Token resolved for API calls (typed token, or stored token in edit mode)
   const [resolvedToken, setResolvedToken] = useState<string>('');
 
+  // Dirty guard — NetBox source dialogs collect a lot of mapping +
+  // filter state, so silently dropping it on a stray backdrop click was
+  // painful. confirmDiscard prompts before tearing down the form.
+  // Note: we don't include apiToken because in edit mode it's loaded
+  // from the vault out-of-band and we don't want a stale value vs
+  // user input to look "dirty".
+  const dirtySnapshot = {
+    name, url, defaultProfileId,
+    siteMappings, roleMappings,
+    manufacturerFlavorMappings, platformFlavorMappings,
+    filterSites, filterRoles, filterManufacturers, filterPlatforms,
+    filterStatuses, filterTags,
+  };
+  const { confirmDiscard, reset: resetDirty } = useDirtyGuard(dirtySnapshot, {
+    resetKey: `${source?.id ?? 'new'}:${isOpen ? '1' : '0'}`,
+  });
+  const handleCloseGuarded = async () => {
+    if (!(await confirmDiscard())) return;
+    onClose();
+  };
+
   // Load profiles on mount
   useEffect(() => {
     listProfiles()
@@ -317,9 +339,16 @@ export default function NetBoxSourceDialog({
 
       setError(null);
 
+      // Re-snapshot the dirty baseline after the form fields have been
+      // populated from `source`, so edit mode doesn't open as "dirty".
+      // Microtask delay (Promise.resolve) lets the setX calls above flush
+      // before we take the new baseline.
+      Promise.resolve().then(() => resetDirty());
+
       // Focus name input after delay
       setTimeout(() => nameInputRef.current?.focus(), 50);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, source]);
 
   // Auto-load filter options when editing an existing source
@@ -363,16 +392,18 @@ export default function NetBoxSourceDialog({
     loadFilterOptions();
   }, [isOpen, isEditing, source, sitesLoaded]);
 
-  // Handle escape key
+  // Handle escape key — route through the dirty guard so a half-typed
+  // form isn't dropped silently.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
-        onClose();
+        void handleCloseGuarded();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   // Update device count when filters change
   useEffect(() => {
@@ -645,11 +676,11 @@ export default function NetBoxSourceDialog({
   const dialogTitle = isEditing ? `Edit NetBox Source: ${source?.name}` : 'Add NetBox Source';
 
   return (
-    <div className="netbox-dialog-overlay" onClick={onClose}>
+    <div className="netbox-dialog-overlay" onClick={handleCloseGuarded}>
       <div className="netbox-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="netbox-dialog-header">
           <h2>{dialogTitle}</h2>
-          <button className="netbox-dialog-close" onClick={onClose} title="Close">
+          <button className="netbox-dialog-close" onClick={handleCloseGuarded} title="Close">
             {Icons.close}
           </button>
         </div>
@@ -1112,7 +1143,7 @@ export default function NetBoxSourceDialog({
         </div>
 
         <div className="netbox-dialog-actions">
-          <button className="btn-secondary" onClick={onClose}>
+          <button className="btn-secondary" onClick={handleCloseGuarded}>
             Cancel
           </button>
           <button className="btn-primary" onClick={handleSave} disabled={saving}>

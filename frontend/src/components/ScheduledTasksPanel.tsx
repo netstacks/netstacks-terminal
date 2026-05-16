@@ -14,6 +14,7 @@ import type { MenuItem } from './ContextMenu';
 import { useContextMenu } from '../hooks/useContextMenu';
 import AITabInput from './AITabInput';
 import { confirmDialog } from './ConfirmDialog';
+import { useDirtyGuard } from '../hooks/useDirtyGuard';
 
 interface ScheduledTasksPanelProps {
   /** Callback when user wants to view execution history for a task */
@@ -293,6 +294,24 @@ function ScheduleTaskDialog({ task, onClose, onSave }: ScheduleTaskDialogProps) 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Guard against silent loss of a half-typed schedule. The X button and
+  // the backdrop click both used to drop the form without confirming.
+  const initialSnapshot = {
+    name: task?.name || '',
+    prompt: task?.prompt || '',
+    cronExpression: task?.cron_expression || '0 9 * * *',
+    timezone: task?.timezone || 'UTC',
+  };
+  const currentSnapshot = { name, prompt, cronExpression, timezone };
+  const { confirmDiscard } = useDirtyGuard(currentSnapshot, {
+    initial: initialSnapshot,
+    resetKey: task?.id ?? 'new',
+  });
+  const handleClose = async () => {
+    if (!(await confirmDiscard())) return;
+    onClose();
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !prompt.trim()) {
@@ -317,11 +336,11 @@ function ScheduleTaskDialog({ task, onClose, onSave }: ScheduleTaskDialogProps) 
   };
 
   return (
-    <div className="schedule-dialog-overlay" onClick={onClose}>
+    <div className="schedule-dialog-overlay" onClick={handleClose}>
       <div className="schedule-dialog" onClick={e => e.stopPropagation()}>
         <div className="schedule-dialog-header">
           <h3>{task ? 'Edit Schedule' : 'New Schedule'}</h3>
-          <button className="schedule-dialog-close" onClick={onClose}>
+          <button className="schedule-dialog-close" onClick={handleClose}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -390,7 +409,7 @@ function ScheduleTaskDialog({ task, onClose, onSave }: ScheduleTaskDialogProps) 
           {error && <div className="schedule-dialog-error">{error}</div>}
 
           <div className="schedule-dialog-actions">
-            <button type="button" onClick={onClose} disabled={saving}>
+            <button type="button" onClick={handleClose} disabled={saving}>
               Cancel
             </button>
             <button type="submit" className="primary" disabled={saving}>

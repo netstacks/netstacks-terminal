@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import type { AgentDefinition, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest } from '../api/agentDefinitions';
 import AITabInput from './AITabInput';
+import { useDirtyGuard } from '../hooks/useDirtyGuard';
 
 interface AgentDefinitionFormProps {
   /** Existing definition for edit mode; null for create mode */
@@ -24,6 +25,32 @@ export function AgentDefinitionForm({ definition, onSave, onCancel, isSaving }: 
   const [maxIterations, setMaxIterations] = useState(definition?.max_iterations ?? 15);
   const [maxTokens, setMaxTokens] = useState(definition?.max_tokens ?? 4096);
   const [enabled, setEnabled] = useState(definition?.enabled ?? true);
+
+  // Dirty guard so Cancel doesn't silently discard a half-typed agent
+  // definition — system prompts in particular can be many minutes of work.
+  const initialSnapshot = {
+    name: definition?.name ?? '',
+    description: definition?.description ?? '',
+    systemPrompt: definition?.system_prompt ?? '',
+    provider: definition?.provider ?? '',
+    model: definition?.model ?? '',
+    temperature: definition?.temperature != null ? String(definition.temperature) : '',
+    maxIterations: definition?.max_iterations ?? 15,
+    maxTokens: definition?.max_tokens ?? 4096,
+    enabled: definition?.enabled ?? true,
+  };
+  const currentSnapshot = {
+    name, description, systemPrompt, provider, model,
+    temperature, maxIterations, maxTokens, enabled,
+  };
+  const { confirmDiscard } = useDirtyGuard(currentSnapshot, {
+    initial: initialSnapshot,
+    resetKey: definition?.id ?? 'new',
+  });
+  const handleCancel = useCallback(async () => {
+    if (!(await confirmDiscard())) return;
+    onCancel();
+  }, [confirmDiscard, onCancel]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -193,7 +220,7 @@ export function AgentDefinitionForm({ definition, onSave, onCancel, isSaving }: 
       )}
 
       <div className="agent-def-form-actions">
-        <button type="button" onClick={onCancel} disabled={isSaving} className="cancel-btn">
+        <button type="button" onClick={handleCancel} disabled={isSaving} className="cancel-btn">
           Cancel
         </button>
         <button
