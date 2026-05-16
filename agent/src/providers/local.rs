@@ -9,7 +9,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
 use sqlx::{FromRow, Row};
-use std::sync::RwLock;
+// parking_lot replaces std::sync for the vault path: a panic inside a
+// critical section won't poison the lock, so one bug doesn't permanently
+// brick credential unlock for the rest of the process lifetime.
+use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::crypto::{self, EncryptedData};
@@ -51,7 +54,7 @@ pub struct LocalDataProvider {
     /// (aes-gcm 0.10 default features), so dropping the cache wipes the key.
     master_vault: RwLock<Option<CredentialVault>>,
     master_salt: RwLock<Option<[u8; 32]>>,
-    unlock_attempts: std::sync::Mutex<UnlockAttempts>,
+    unlock_attempts: Mutex<UnlockAttempts>,
 }
 
 /// Columns to select for SessionRow (avoiding SELECT * which includes deprecated columns)
@@ -1145,7 +1148,7 @@ impl LocalDataProvider {
             pool,
             master_vault: RwLock::new(None),
             master_salt: RwLock::new(None),
-            unlock_attempts: std::sync::Mutex::new(UnlockAttempts::default()),
+            unlock_attempts: Mutex::new(UnlockAttempts::default()),
         }
     }
 
@@ -1156,7 +1159,7 @@ impl LocalDataProvider {
     /// `COOLDOWN_SECS` before checking the password. This bounds offline
     /// brute-force speed even if the attacker has the bearer token.
     fn record_unlock_failure(&self) {
-        let mut attempts = self.unlock_attempts.lock().unwrap();
+        let mut attempts = self.unlock_attempts.lock();
         attempts.failures = attempts.failures.saturating_add(1);
         if attempts.failures >= MAX_FAILS_BEFORE_COOLDOWN {
             attempts.next_allowed_at_epoch = Utc::now().timestamp() + COOLDOWN_SECS;
@@ -1174,7 +1177,6 @@ impl LocalDataProvider {
     fn get_vault(&self) -> Result<CredentialVault, ProviderError> {
         self.master_vault
             .read()
-            .unwrap()
             .clone()
             .ok_or(ProviderError::VaultLocked)
     }
@@ -1183,7 +1185,6 @@ impl LocalDataProvider {
     fn get_salt(&self) -> Result<[u8; 32], ProviderError> {
         self.master_salt
             .read()
-            .unwrap()
             .ok_or(ProviderError::VaultLocked)
     }
 
@@ -1866,7 +1867,7 @@ impl DataProvider for LocalDataProvider {
     // === Credentials ===
 
     fn is_unlocked(&self) -> bool {
-        self.master_vault.read().unwrap().is_some()
+        self.master_vault.read().is_some()
     }
 
     async fn has_master_password(&self) -> Result<bool, ProviderError> {
@@ -1928,7 +1929,7 @@ impl DataProvider for LocalDataProvider {
         // The MutexGuard cannot be held across the .await (Send), so we
         // compute the wait inside a tight scope and release the lock first.
         let wait_secs: i64 = {
-            let attempts = self.unlock_attempts.lock().unwrap();
+            let attempts = self.unlock_attempts.lock();
             let now_epoch = Utc::now().timestamp();
             (attempts.next_allowed_at_epoch - now_epoch).max(0)
         };
@@ -1974,7 +1975,7 @@ impl DataProvider for LocalDataProvider {
 
         // Successful unlock — reset the attempts counter.
         {
-            let mut attempts = self.unlock_attempts.lock().unwrap();
+            let mut attempts = self.unlock_attempts.lock();
             attempts.failures = 0;
             attempts.next_allowed_at_epoch = 0;
         }
@@ -1984,8 +1985,8 @@ impl DataProvider for LocalDataProvider {
         // the key from memory (AUDIT FIX CRYPTO-005).
         let vault = crypto::derive_vault(password, &encrypted.salt)
             .map_err(|e| ProviderError::Encryption(e.to_string()))?;
-        *self.master_vault.write().unwrap() = Some(vault);
-        *self.master_salt.write().unwrap() = Some(encrypted.salt);
+        *self.master_vault.write() = Some(vault);
+        *self.master_salt.write() = Some(encrypted.salt);
 
         Ok(())
     }
@@ -1993,8 +1994,8 @@ impl DataProvider for LocalDataProvider {
     fn lock(&self) {
         // Dropping the cached CredentialVault zeroizes its internal AES key
         // (aes-gcm 0.10 default features include zeroize-on-drop).
-        *self.master_vault.write().unwrap() = None;
-        *self.master_salt.write().unwrap() = None;
+        *self.master_vault.write() = None;
+        *self.master_salt.write() = None;
     }
 
     fn vault_encrypt_string(&self, value: &str) -> Result<Vec<u8>, ProviderError> {

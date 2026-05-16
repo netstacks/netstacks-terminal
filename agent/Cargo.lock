@@ -2259,6 +2259,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
+ "parking_lot",
  "portable-pty",
  "rand 0.8.5",
  "rcgen",

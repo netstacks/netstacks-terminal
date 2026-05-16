@@ -7,7 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+// parking_lot::Mutex doesn't poison on panic — keeps the registry usable
+// after any single token-fetch crash.
+use parking_lot::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -116,14 +119,14 @@ impl OAuth2TokenManager {
     /// is reused for nearly half an hour instead of being re-fetched on
     /// every chat call.
     ///
-    /// The registry uses a sync `std::sync::Mutex` so this stays callable
-    /// from sync constructors. The held critical section is tiny (HashMap
-    /// lookup + clone of an Arc) so the sync lock has no perf cost on the
-    /// hot path. The token cache itself remains `tokio::sync::RwLock`-based
-    /// for the read-heavy `get_token` path.
+    /// The registry uses a sync `parking_lot::Mutex` so this stays
+    /// callable from sync constructors. The held critical section is tiny
+    /// (HashMap lookup + clone of an Arc) so the sync lock has no perf
+    /// cost on the hot path. The token cache itself remains
+    /// `tokio::sync::RwLock`-based for the read-heavy `get_token` path.
     pub fn get_or_create_shared(config: OAuth2Config) -> Arc<Self> {
         let key = config_cache_key(&config);
-        let mut registry = registry().lock().expect("OAuth2 registry mutex poisoned");
+        let mut registry = registry().lock();
         if let Some(existing) = registry.get(&key) {
             return existing.clone();
         }

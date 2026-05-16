@@ -76,6 +76,10 @@ sha2 = { version = "0.10", features = ["oid"] }
 rand = "0.8"
 subtle = "2"
 
+# Poison-free sync primitives — used on the vault hot path so a single
+# panic doesn't permanently brick credential unlock (std::sync poisons).
+parking_lot = "0.12"
+
 # Async trait
 async-trait = "0.1"
 
