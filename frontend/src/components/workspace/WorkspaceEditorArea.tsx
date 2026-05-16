@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import WorkspaceCodeEditor from './WorkspaceCodeEditor'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import WorkspaceDiffViewer from './WorkspaceDiffViewer'
 import WorkspaceBlameViewer from './WorkspaceBlameViewer'
 import WorkspaceMarkdownPreview from './WorkspaceMarkdownPreview'
+import ContextMenu from '../ContextMenu'
+import type { MenuItem } from '../ContextMenu'
 import type { InnerTab, FileOps, GitOps } from '../../types/workspace'
 
 const RUNNABLE_EXTS = new Set(['py', 'sh', 'bash', 'zsh', 'js', 'ts'])
@@ -32,6 +34,69 @@ export default function WorkspaceEditorArea({
   onCollapse,
 }: WorkspaceEditorAreaProps) {
   const [previewTabs, setPreviewTabs] = useState<Set<string>>(new Set())
+  const [tabContextMenu, setTabContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
+
+  const handleTabContextMenu = useCallback((e: React.MouseEvent, tab: InnerTab) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const ext = tab.filePath?.split('.').pop()?.toLowerCase() || ''
+    const isMd = tab.type === 'code-editor' && (ext === 'md' || ext === 'markdown')
+    const inPreview = previewTabs.has(tab.id)
+    const isRunnable = tab.type === 'code-editor' && tab.filePath && RUNNABLE_EXTS.has(ext)
+
+    const items: MenuItem[] = []
+
+    if (isMd) {
+      items.push({
+        id: 'toggle-preview',
+        label: inPreview ? 'Edit Markdown' : 'Preview Markdown',
+        action: () => setPreviewTabs(prev => {
+          const next = new Set(prev)
+          if (next.has(tab.id)) next.delete(tab.id)
+          else next.add(tab.id)
+          return next
+        }),
+      })
+    }
+
+    if (isRunnable) {
+      items.push({
+        id: 'run-file',
+        label: 'Run File',
+        action: () => onRunFile(tab.filePath!),
+      })
+    }
+
+    if (tab.filePath) {
+      items.push({
+        id: 'copy-path',
+        label: 'Copy Path',
+        action: () => { navigator.clipboard.writeText(tab.filePath!) },
+      })
+    }
+
+    if (items.length > 0) {
+      items.push({ id: 'divider-actions', label: '', divider: true, action: () => {} })
+    }
+
+    items.push({
+      id: 'close-tab',
+      label: 'Close',
+      action: () => onCloseTab(tab.id),
+    })
+    items.push({
+      id: 'close-others',
+      label: 'Close Others',
+      action: () => innerTabs.filter(t => t.id !== tab.id).forEach(t => onCloseTab(t.id)),
+    })
+    items.push({
+      id: 'close-all',
+      label: 'Close All',
+      action: () => innerTabs.forEach(t => onCloseTab(t.id)),
+    })
+
+    setTabContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
+  }, [previewTabs, innerTabs, onCloseTab, onRunFile])
 
   if (innerTabs.length === 0) {
     return (
@@ -45,13 +110,11 @@ export default function WorkspaceEditorArea({
   const activeTab = innerTabs.find(t => t.id === activeInnerTabId) || innerTabs[0]
   const activeExt = activeTab.filePath?.split('.').pop()?.toLowerCase() || ''
   const canRun = activeTab.type === 'code-editor' && activeTab.filePath && RUNNABLE_EXTS.has(activeExt)
-  const isMdFile = activeTab.type === 'code-editor' && activeTab.filePath && (activeExt === 'md' || activeExt === 'markdown')
-  const isPreview = previewTabs.has(activeTab.id)
 
   const renderTabContent = (tab: InnerTab) => {
     switch (tab.type) {
       case 'code-editor':
-        if (isPreview && tab.id === activeTab.id && tab.filePath) {
+        if (previewTabs.has(tab.id) && tab.filePath) {
           return (
             <WorkspaceMarkdownPreview
               key={`preview-${tab.id}`}
@@ -109,6 +172,7 @@ export default function WorkspaceEditorArea({
               key={tab.id}
               className={`workspace-inner-tab ${tab.id === activeTab.id ? 'active' : ''}`}
               onClick={() => onSetActiveTab(tab.id)}
+              onContextMenu={(e) => handleTabContextMenu(e, tab)}
             >
               {tab.isModified && <span className="workspace-inner-tab-modified" />}
               <span>{tab.title}</span>
@@ -132,21 +196,6 @@ export default function WorkspaceEditorArea({
             </svg>
           </button>
         )}
-        {isMdFile && (
-          <button
-            className="workspace-terminal-action-btn"
-            onClick={() => setPreviewTabs(prev => {
-              const next = new Set(prev)
-              if (next.has(activeTab.id)) next.delete(activeTab.id)
-              else next.add(activeTab.id)
-              return next
-            })}
-            title={isPreview ? 'Edit' : 'Preview'}
-            style={{ fontSize: 12, padding: '0 6px' }}
-          >
-            {isPreview ? '✏️' : '👁'}
-          </button>
-        )}
         {onCollapse && (
           <button
             className="workspace-terminal-action-btn"
@@ -160,6 +209,11 @@ export default function WorkspaceEditorArea({
       <div className="workspace-inner-tab-content">
         {renderTabContent(activeTab)}
       </div>
+      <ContextMenu
+        position={tabContextMenu?.position ?? null}
+        items={tabContextMenu?.items ?? []}
+        onClose={() => setTabContextMenu(null)}
+      />
     </>
   )
 }
