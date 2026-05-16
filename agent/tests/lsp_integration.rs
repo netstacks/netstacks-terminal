@@ -81,7 +81,8 @@ async fn end_to_end_ws_initialize_round_trip() {
     .unwrap();
 
     // Build the state + router
-    let host = Arc::new(LspHost::new(pool));
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let host = Arc::new(LspHost::new(pool, data_dir.path().to_path_buf()));
     let state = LspState {
         host,
         auth_token: "test-token".to_string(),
@@ -100,8 +101,10 @@ async fn end_to_end_ws_initialize_round_trip() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let arr = body.as_array().expect("array");
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["id"], "fake");
+    assert_eq!(arr.len(), 2, "should have Pyrefly + fake");
+    // Find the fake plugin
+    let fake = arr.iter().find(|p| p["id"] == "fake").expect("fake plugin");
+    assert_eq!(fake["displayName"], "Fake LSP");
 
     // Connect WebSocket: /ws/fake?token=test-token
     let url = format!("ws://{}/ws/fake?token=test-token", addr);
@@ -144,8 +147,9 @@ async fn ws_rejects_invalid_token() {
     .await
     .unwrap();
 
+    let data_dir = tempfile::TempDir::new().unwrap();
     let state = LspState {
-        host: Arc::new(LspHost::new(pool)),
+        host: Arc::new(LspHost::new(pool, data_dir.path().to_path_buf())),
         auth_token: "correct-token".to_string(),
     };
     let app = router(state);

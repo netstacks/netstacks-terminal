@@ -415,7 +415,8 @@ async fn async_main() {
     // LSP plugin host (per-plugin merged registry + active sessions).
     // Built-in plugins are added in Phase 4 (Pyrefly); v1 ships with an
     // empty registry plus whatever the user has added via Settings.
-    let lsp_host = Arc::new(LspHost::new(pool.clone()));
+    let lsp_data_dir = tls::data_dir(); // Same base as TLS cert
+    let lsp_host = Arc::new(LspHost::new(pool.clone(), lsp_data_dir));
     let lsp_state = LspState {
         host: lsp_host.clone(),
         auth_token: auth_token.clone(),

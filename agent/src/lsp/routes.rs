@@ -6,21 +6,24 @@
 //! time.
 
 use crate::lsp::host::{LspHost, WorkspaceKey};
-use crate::lsp::types::{InstallStatus, InstallationKind, LspPlugin};
+use crate::lsp::types::{InstallStatus, LspPlugin};
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
     Path, Query, State,
 };
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
+use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 /// Axum state for LSP routes.
@@ -36,8 +39,9 @@ pub fn http_router(state: LspState) -> Router {
         .route("/plugins", get(list_plugins))
         .route("/plugins", post(create_plugin_stub))
         .route("/plugins/:id", put(update_plugin_stub))
-        .route("/plugins/:id", delete(delete_plugin_stub))
-        .route("/plugins/:id/install", post(install_plugin_stub))
+        .route("/plugins/:id", delete(delete_plugin))
+        .route("/plugins/:id/install", post(install_plugin))
+        .route("/plugins/:id/install-progress", get(install_progress))
         .route("/plugins/test", post(test_plugin_stub))
         .with_state(state)
 }
@@ -70,7 +74,7 @@ async fn list_plugins(State(state): State<LspState>) -> impl IntoResponse {
             let items: Vec<PluginListItem> = plugins
                 .into_iter()
                 .map(|p| {
-                    let install_status = compute_install_status(&p);
+                    let install_status = state.host.compute_install_status(&p);
                     PluginListItem {
                         plugin: p,
                         install_status,
@@ -86,23 +90,6 @@ async fn list_plugins(State(state): State<LspState>) -> impl IntoResponse {
     }
 }
 
-/// Compute install status for a plugin descriptor. Cheap stub for Phase 2:
-/// SystemPath/Bundled = always Installed (we trust them).
-/// OnDemandDownload = NotInstalled if the binary file is missing; Installed otherwise.
-/// Phase 4 will replace this with a proper InstallRegistry check including
-/// Installing/InstalledButUnusable states.
-fn compute_install_status(plugin: &LspPlugin) -> InstallStatus {
-    match &plugin.installation {
-        InstallationKind::SystemPath { .. } | InstallationKind::Bundled { .. } => {
-            InstallStatus::Installed
-        }
-        InstallationKind::OnDemandDownload { .. } => {
-            // Phase 4 replaces this with actual on-disk presence check.
-            InstallStatus::NotInstalled
-        }
-    }
-}
-
 // ===== CRUD stubs (Phase 5 implements) =====
 
 async fn create_plugin_stub() -> impl IntoResponse {
@@ -113,12 +100,82 @@ async fn update_plugin_stub(Path(_id): Path<String>) -> impl IntoResponse {
     (StatusCode::NOT_IMPLEMENTED, "update plugin: Phase 5")
 }
 
-async fn delete_plugin_stub(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "delete plugin: Phase 5")
+async fn delete_plugin(
+    State(state): State<LspState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // For built-in on-demand plugins: uninstall (delete binary).
+    // For user-added plugins: Phase 5 will implement full deletion from SQLite.
+    match state.host.uninstall_plugin(&id).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::warn!(plugin_id = %id, error = %e, "uninstall failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
 }
 
-async fn install_plugin_stub(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "install plugin: Phase 4")
+async fn install_plugin(
+    State(state): State<LspState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Kick off the install asynchronously and return 202 Accepted.
+    match state.host.install_plugin(id.clone()) {
+        Ok(_rx) => {
+            tracing::info!(plugin_id = %id, "install started");
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(e) => {
+            let status = if e.to_string().contains("already in progress") {
+                StatusCode::CONFLICT
+            } else if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, e.to_string()).into_response()
+        }
+    }
+}
+
+async fn install_progress(
+    State(state): State<LspState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Subscribe to the install progress channel for SSE streaming.
+    let rx = match state.host.installs.get(&id) {
+        Some(tx) => tx.subscribe(),
+        None => {
+            // No install in progress; check if plugin exists
+            match state.host.get_plugin(&id).await {
+                Ok(_) => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        "no install in progress for this plugin",
+                    )
+                        .into_response()
+                }
+                Err(_) => {
+                    return (StatusCode::NOT_FOUND, "plugin not found").into_response()
+                }
+            }
+        }
+    };
+
+    let stream = BroadcastStream::new(rx);
+    let event_stream = stream.filter_map(|result| async move {
+        match result {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).ok()?;
+                Some(Ok::<_, Infallible>(Event::default().data(json)))
+            }
+            Err(_) => None, // Lagged or closed; skip
+        }
+    });
+
+    Sse::new(event_stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn test_plugin_stub() -> impl IntoResponse {

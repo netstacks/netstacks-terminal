@@ -5,14 +5,16 @@
 //! Session lifecycle is owned by `LspSession` (added in P2T5). This struct
 //! is the public surface used by HTTP/WS routes.
 
+use crate::lsp::install::{install_plugin as do_install, InstallError, InstallEvent};
 use crate::lsp::plugins::built_in_plugins;
 use crate::lsp::session::LspSession;
-use crate::lsp::types::{InstallationKind, LspPlugin, PluginSource, RuntimeConfig};
+use crate::lsp::types::{InstallationKind, InstallStatus, LspPlugin, PluginSource, RuntimeConfig};
 use dashmap::DashMap;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 #[derive(Debug, Error)]
 pub enum LspHostError {
@@ -22,6 +24,10 @@ pub enum LspHostError {
     Database(#[from] sqlx::Error),
     #[error("invalid plugin config: {0}")]
     InvalidConfig(String),
+    #[error("install error: {0}")]
+    Install(#[from] InstallError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Session key: a plugin id paired with its workspace root. A loose-file
@@ -38,15 +44,21 @@ pub type SessionKey = (String, WorkspaceKey);
 /// The agent-wide LSP host. Held inside AppState as `Arc<LspHost>`.
 pub struct LspHost {
     pool: SqlitePool,
+    /// Base data directory for LSP plugin binaries.
+    data_dir: PathBuf,
     /// Active sessions. Phase 2 only declares the map; LspSession is added in P2T5.
     pub(crate) sessions: DashMap<SessionKey, Arc<LspSession>>,
+    /// In-progress installs. Maps plugin_id → broadcast channel for SSE subscribers.
+    pub(crate) installs: DashMap<String, broadcast::Sender<InstallEvent>>,
 }
 
 impl LspHost {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: SqlitePool, data_dir: PathBuf) -> Self {
         Self {
             pool,
+            data_dir,
             sessions: DashMap::new(),
+            installs: DashMap::new(),
         }
     }
 
@@ -140,14 +152,152 @@ impl LspHost {
             return Ok(s.clone());
         }
         let plugin = self.get_plugin(plugin_id).await?;
+
+        // For on-demand plugins, use the installed binary path instead of
+        // the placeholder runtime command.
+        let runtime = if let InstallationKind::OnDemandDownload { version, .. } = &plugin.installation {
+            let binary_path = self.installed_binary_path(&plugin.id, version);
+            if binary_path.exists() {
+                RuntimeConfig {
+                    command: binary_path.to_string_lossy().to_string(),
+                    args: plugin.runtime.args.clone(),
+                }
+            } else {
+                return Err(LspHostError::InvalidConfig(format!(
+                    "plugin {} is not installed; binary not found at {}",
+                    plugin.id,
+                    binary_path.display()
+                )));
+            }
+        } else {
+            plugin.runtime.clone()
+        };
+
         let workspace_path = match &workspace {
             WorkspaceKey::Path(p) => Some(p.as_path()),
             WorkspaceKey::Scratch(_) => None,
         };
-        let session = LspSession::spawn(&plugin.runtime, workspace_path)
+        let session = LspSession::spawn(&runtime, workspace_path)
             .map_err(|e| LspHostError::InvalidConfig(format!("spawn LSP for {}: {}", plugin_id, e)))?;
         self.sessions.insert(key, session.clone());
         Ok(session)
+    }
+
+    /// Install a plugin from its on-demand download source.
+    ///
+    /// Returns a broadcast receiver for progress events. The install runs
+    /// asynchronously in the background.
+    ///
+    /// Returns `InstallError::InProgress` if an install is already running
+    /// for this plugin.
+    pub fn install_plugin(
+        &self,
+        plugin_id: String,
+    ) -> Result<broadcast::Receiver<InstallEvent>, LspHostError> {
+        // Check if already installing
+        if self.installs.contains_key(&plugin_id) {
+            return Err(InstallError::InProgress.into());
+        }
+
+        // Create progress channel (buffer 100 events)
+        let (tx, rx) = broadcast::channel(100);
+        self.installs.insert(plugin_id.clone(), tx.clone());
+
+        // Spawn the install task
+        let data_dir = self.data_dir.clone();
+        let pool = self.pool.clone();
+        let installs = self.installs.clone();
+        tokio::spawn(async move {
+            let result = async {
+                // Look up the plugin descriptor
+                let host_temp = LspHost::new(pool, data_dir.clone());
+                let plugin = host_temp.get_plugin(&plugin_id).await?;
+
+                // Run the installer
+                do_install(&plugin, &data_dir, tx.clone()).await?;
+
+                Ok::<_, LspHostError>(())
+            }
+            .await;
+
+            // Send final event on error
+            if let Err(e) = result {
+                let _ = tx.send(InstallEvent {
+                    phase: crate::lsp::install::InstallPhase::Error,
+                    bytes_downloaded: 0,
+                    total_bytes: None,
+                    error: Some(e.to_string()),
+                });
+            }
+
+            // Remove from in-progress map
+            installs.remove(&plugin_id);
+        });
+
+        Ok(rx)
+    }
+
+    /// Uninstall a plugin by deleting its binary directory.
+    ///
+    /// For built-in plugins, this removes the on-demand downloaded binary.
+    /// For user-added plugins, this is a no-op (Phase 5 will implement).
+    pub async fn uninstall_plugin(&self, plugin_id: &str) -> Result<(), LspHostError> {
+        let plugin = self.get_plugin(plugin_id).await?;
+
+        // Only on-demand plugins can be uninstalled
+        let InstallationKind::OnDemandDownload { .. } = &plugin.installation else {
+            return Ok(()); // No-op for system path / bundled plugins
+        };
+
+        // Kill any active sessions for this plugin
+        self.sessions.retain(|key, _| key.0 != plugin_id);
+
+        // Delete the plugin directory
+        let plugin_dir = self.data_dir.join("lsp").join(plugin_id);
+        if plugin_dir.exists() {
+            tokio::fs::remove_dir_all(&plugin_dir).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Compute install status for a plugin.
+    ///
+    /// Used by routes.rs to populate the `installStatus` field in plugin list responses.
+    pub fn compute_install_status(&self, plugin: &LspPlugin) -> InstallStatus {
+        match &plugin.installation {
+            InstallationKind::SystemPath { .. } | InstallationKind::Bundled { .. } => {
+                InstallStatus::Installed
+            }
+            InstallationKind::OnDemandDownload { version, .. } => {
+                // Check if currently installing
+                if self.installs.contains_key(&plugin.id) {
+                    return InstallStatus::Installing;
+                }
+
+                // Check if binary exists on disk
+                let binary_path = self.installed_binary_path(&plugin.id, version);
+                if binary_path.exists() {
+                    InstallStatus::Installed
+                } else {
+                    InstallStatus::NotInstalled
+                }
+            }
+        }
+    }
+
+    /// Get the expected path to an installed binary.
+    fn installed_binary_path(&self, plugin_id: &str, version: &str) -> PathBuf {
+        #[cfg(target_os = "windows")]
+        let binary_name = format!("{}.exe", plugin_id);
+        #[cfg(not(target_os = "windows"))]
+        let binary_name = plugin_id.to_string();
+
+        self.data_dir
+            .join("lsp")
+            .join(plugin_id)
+            .join(format!("v{}", version))
+            .join(binary_name)
     }
 }
 
@@ -214,11 +364,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_registry_returns_no_plugins() {
+    async fn pyrefly_appears_in_built_in_list() {
         let pool = fresh_pool().await;
-        let host = LspHost::new(pool);
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
         let plugins = host.list_plugins().await.unwrap();
-        assert!(plugins.is_empty(), "v1 built-ins are empty (Pyrefly added in Phase 4)");
+        assert_eq!(plugins.len(), 1, "Phase 4 adds Pyrefly as the only built-in");
+        assert_eq!(plugins[0].id, "pyrefly");
+        assert_eq!(plugins[0].language, "python");
     }
 
     #[tokio::test]
@@ -232,11 +385,11 @@ mod tests {
         .await
         .unwrap();
 
-        let host = LspHost::new(pool);
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
         let plugins = host.list_plugins().await.unwrap();
-        assert_eq!(plugins.len(), 1);
-        let go = &plugins[0];
-        assert_eq!(go.id, "go");
+        assert_eq!(plugins.len(), 2, "Pyrefly + gopls");
+        let go = plugins.iter().find(|p| p.id == "go").unwrap();
         assert_eq!(go.display_name, "gopls");
         assert_eq!(go.language, "go");
         assert_eq!(go.file_extensions, vec![".go".to_string()]);
@@ -249,7 +402,8 @@ mod tests {
     #[tokio::test]
     async fn get_plugin_returns_not_found_for_unknown_id() {
         let pool = fresh_pool().await;
-        let host = LspHost::new(pool);
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
         let err = host.get_plugin("nope").await.unwrap_err();
         assert!(matches!(err, LspHostError::PluginNotFound(_)));
     }
