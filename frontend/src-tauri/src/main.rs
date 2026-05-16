@@ -422,6 +422,122 @@ async fn fetch_controller_cert(controller_url: String) -> Result<serde_json::Val
 ///   1. Ignore the caller-supplied `filename` and use a fixed name.
 ///   2. Reject obviously-non-PEM content before writing it.
 ///   3. Place the temp file in a per-process subdir of the temp dir.
+/// Open the given file in macOS Quick Look (spacebar preview).
+/// Markdown files are rendered to HTML first and previewed as HTML — Quick
+/// Look's built-in HTML renderer makes them look like a real document
+/// instead of raw `#` syntax. No-op with an informative error on
+/// Linux/Windows for now.
+#[tauri::command]
+async fn open_quicklook(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        let target = render_markdown_if_needed(&path).unwrap_or_else(|_| path.clone());
+
+        Command::new("qlmanage")
+            .args(["-p", &target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to launch qlmanage: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Err("Quick Look is only available on macOS".into())
+    }
+}
+
+/// If `path` is a markdown file, render it to a styled HTML temp file and
+/// return that path. Otherwise return the original path.
+#[cfg(target_os = "macos")]
+fn render_markdown_if_needed(path: &str) -> std::io::Result<String> {
+    use std::io::Write;
+
+    let lower = path.to_lowercase();
+    if !(lower.ends_with(".md") || lower.ends_with(".markdown")) {
+        return Ok(path.to_string());
+    }
+
+    let source = std::fs::read_to_string(path)?;
+    let parser = pulldown_cmark::Parser::new_ext(&source, pulldown_cmark::Options::all());
+    let mut body = String::new();
+    pulldown_cmark::html::push_html(&mut body, parser);
+
+    let title = std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Preview".to_string());
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  body {{ font: 14px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          color: #1d1d1f; background: #fff; max-width: 760px; margin: 32px auto; padding: 0 24px; }}
+  h1, h2, h3, h4, h5, h6 {{ margin-top: 1.6em; margin-bottom: 0.4em; color: #1d1d1f; }}
+  h1 {{ font-size: 1.9em; border-bottom: 1px solid #e2e2e6; padding-bottom: 0.3em; }}
+  h2 {{ font-size: 1.45em; border-bottom: 1px solid #ececf0; padding-bottom: 0.25em; }}
+  code, pre {{ font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 12.5px; }}
+  code {{ background: #f5f5f7; padding: 0.1em 0.4em; border-radius: 4px; }}
+  pre {{ background: #f5f5f7; padding: 12px 14px; border-radius: 6px; overflow: auto; }}
+  pre code {{ background: transparent; padding: 0; }}
+  a {{ color: #0066cc; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  blockquote {{ border-left: 4px solid #e2e2e6; margin: 0; padding: 0.4em 1em; color: #555; }}
+  table {{ border-collapse: collapse; }}
+  th, td {{ border: 1px solid #e2e2e6; padding: 6px 10px; }}
+  th {{ background: #f5f5f7; }}
+  img {{ max-width: 100%; }}
+  hr {{ border: 0; border-top: 1px solid #e2e2e6; margin: 1.6em 0; }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ color: #f5f5f7; background: #1d1d1f; }}
+    code, pre {{ background: #2c2c2e; }}
+    blockquote {{ border-left-color: #3a3a3c; color: #aaa; }}
+    th {{ background: #2c2c2e; }}
+    th, td {{ border-color: #3a3a3c; }}
+    hr {{ border-top-color: #3a3a3c; }}
+    a {{ color: #66b3ff; }}
+  }}
+</style>
+</head>
+<body>
+{body}
+</body>
+</html>
+"#
+    );
+
+    let dir = std::env::temp_dir().join("netstacks-quicklook");
+    std::fs::create_dir_all(&dir)?;
+
+    // Hash the path so re-previewing the same file reuses the same temp
+    // (qlmanage caches by filename, so a stable name avoids stale renders).
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    path.hash(&mut hasher);
+    let temp_name = format!("{:x}-{}.html", hasher.finish(), sanitize_filename(&title));
+    let temp_path = dir.join(temp_name);
+
+    let mut f = std::fs::File::create(&temp_path)?;
+    f.write_all(html.as_bytes())?;
+    drop(f);
+
+    Ok(temp_path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 #[tauri::command]
 async fn install_ca_certificate(pem_content: String, filename: String) -> Result<String, String> {
     use std::io::Write;
@@ -606,7 +722,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SidecarToken(Mutex::new(None)))
         .manage(SidecarChild(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window])
+        .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window, open_quicklook])
         .setup(|app| {
             // Build the native menu bar (macOS/Windows/Linux)
             let menu = build_menu(app.handle())?;

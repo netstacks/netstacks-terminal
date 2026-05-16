@@ -77,6 +77,35 @@ export default function WorkspaceFileExplorer({
   const [deleteConfirm, setDeleteConfirm] = useState<WorkspaceFileEntry | null>(null)
   const inlineInputRef = useRef<HTMLInputElement>(null)
 
+  // Spacebar → macOS Quick Look for the selected file. Skipped while an
+  // input/textarea/editor has focus so we don't intercept normal typing.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.metaKey || e.ctrlKey || e.altKey) return
+      if (!selectedPath) return
+      const active = document.activeElement
+      const tag = active?.tagName
+      if (
+        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+        (active as HTMLElement | null)?.isContentEditable
+      ) {
+        return
+      }
+      e.preventDefault()
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('open_quicklook', { path: selectedPath }).catch((err) => {
+          // Silently swallow on non-macOS — the command returns an error
+          // string there. Other failures are worth surfacing as a toast.
+          if (typeof err === 'string' && !err.includes('only available on macOS')) {
+            showToast(`Quick Look failed: ${err}`, 'error')
+          }
+        })
+      }).catch(() => { /* not in Tauri (dev outside the shell) */ })
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [selectedPath])
+
   const loadDir = useCallback(async (path: string) => {
     setDirContents(prev => {
       const next = new Map(prev)
