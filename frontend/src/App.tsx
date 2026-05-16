@@ -97,6 +97,7 @@ import ConnectionDetailsOverlay from './components/ConnectionDetailsOverlay'
 // SessionQuickLook removed - double-click now directly opens terminal
 import ContextMenu, { getDeviceMenuItems, type MenuItem } from './components/ContextMenu'
 import { ToastContainer, showToast } from './components/Toast'
+import { ConfirmDialogHost } from './components/ConfirmDialog'
 import UpdateChecker from './components/UpdateChecker'
 import type { Connection } from './types/topology'
 import { loadPanelSettings, PANEL_SETTINGS_CHANGED, type PanelSettings } from './api/panelSettings'
@@ -7380,6 +7381,9 @@ def main(command: str = "show version"):
 
       {/* Toast notifications */}
       <ToastContainer />
+
+      {/* Confirmation dialog host (imperative API: confirmDialog({...})) */}
+      <ConfirmDialogHost />
 
       {/* Auto-update checker (Tauri only) */}
       {isTauri && <UpdateChecker />}
