@@ -1,13 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine as _;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{
-    menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     Emitter, Manager,
 };
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+
+/// Live handles to every custom menu item, keyed by the menu item id
+/// used in `build_menu`. The frontend's MenuBridge pushes
+/// enable/disable updates here via `set_menu_enabled_batch` so menu
+/// items reflect the current ActiveContext (e.g. Reconnect greys out
+/// when no terminal tab is active).
+///
+/// Predefined items (cut/copy/paste/quit/etc.) are not tracked — the
+/// OS handles their enabled state natively based on focus.
+pub struct MenuItemRegistry(pub Mutex<HashMap<String, MenuItem<tauri::Wry>>>);
 
 /// Stores the sidecar auth token so the frontend can retrieve it via IPC command.
 /// The token event may fire before the webview JS loads, so this provides a
@@ -722,10 +733,18 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SidecarToken(Mutex::new(None)))
         .manage(SidecarChild(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window, open_quicklook])
+        .manage(MenuItemRegistry(Mutex::new(HashMap::new())))
+        .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window, open_quicklook, set_menu_enabled_batch])
         .setup(|app| {
-            // Build the native menu bar (macOS/Windows/Linux)
-            let menu = build_menu(app.handle())?;
+            // Build the native menu bar (macOS/Windows/Linux) and
+            // stash the per-id MenuItem handles so the frontend's
+            // MenuBridge can later toggle enable/disable state.
+            let (menu, item_registry) = build_menu(app.handle())?;
+            {
+                let state: tauri::State<MenuItemRegistry> = app.state();
+                let mut guard = state.0.lock().expect("MenuItemRegistry mutex poisoned");
+                *guard = item_registry;
+            }
             app.set_menu(menu)?;
 
             // Spawn the netstacks-agent sidecar
@@ -888,18 +907,34 @@ fn main() {
 /// On macOS: NetStacks app menu + File/Edit/View/Session/Window/Help
 /// On Windows/Linux: File (with Settings/Exit) + Edit/View/Session/Window/Help (with About)
 #[allow(unused_mut)] // mut needed on Windows/Linux for conditional menu items
-fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> {
+/// Build the native menu bar and return both the assembled menu AND
+/// a registry of every custom MenuItem keyed by its id. The registry
+/// lets the frontend's MenuBridge enable/disable items in response to
+/// ActiveContext changes via the `set_menu_enabled_batch` command.
+fn build_menu(
+    handle: &tauri::AppHandle,
+) -> Result<(Menu<tauri::Wry>, HashMap<String, MenuItem<tauri::Wry>>), tauri::Error> {
     let mut menu_builder = MenuBuilder::new(handle);
+    let mut items: HashMap<String, MenuItem<tauri::Wry>> = HashMap::new();
+    // Tiny helper so each item registration is one line and we can't
+    // forget to clone into the registry.
+    macro_rules! track {
+        ($id:expr, $item:expr) => {{
+            let item = $item;
+            items.insert($id.to_string(), item.clone());
+            item
+        }};
+    }
 
     // === macOS App Menu ===
     // On macOS, the first submenu becomes the system app menu
     #[cfg(target_os = "macos")]
     {
-        let about = MenuItemBuilder::with_id("about", "About NetStacks")
-            .build(handle)?;
-        let settings = MenuItemBuilder::with_id("settings", "Settings\u{2026}")
+        let about = track!("about", MenuItemBuilder::with_id("about", "About NetStacks")
+            .build(handle)?);
+        let settings = track!("settings", MenuItemBuilder::with_id("settings", "Settings\u{2026}")
             .accelerator("CmdOrCtrl+,")
-            .build(handle)?;
+            .build(handle)?);
 
         let app_menu = SubmenuBuilder::new(handle, "NetStacks")
             .item(&about)
@@ -918,24 +953,24 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
     }
 
     // === File Menu ===
-    let new_session = MenuItemBuilder::with_id("new-session", "New Session")
+    let new_session = track!("new-session", MenuItemBuilder::with_id("new-session", "New Session")
         .accelerator("CmdOrCtrl+N")
-        .build(handle)?;
-    let new_terminal = MenuItemBuilder::with_id("new-terminal", "New Terminal Tab")
+        .build(handle)?);
+    let new_terminal = track!("new-terminal", MenuItemBuilder::with_id("new-terminal", "New Terminal Tab")
         .accelerator("CmdOrCtrl+T")
-        .build(handle)?;
-    let new_document = MenuItemBuilder::with_id("new-document", "New Document")
+        .build(handle)?);
+    let new_document = track!("new-document", MenuItemBuilder::with_id("new-document", "New Document")
         .accelerator("CmdOrCtrl+Shift+N")
-        .build(handle)?;
-    let quick_connect = MenuItemBuilder::with_id("quick-connect", "Quick Connect\u{2026}")
+        .build(handle)?);
+    let quick_connect = track!("quick-connect", MenuItemBuilder::with_id("quick-connect", "Quick Connect\u{2026}")
         .accelerator("CmdOrCtrl+Shift+Q")
-        .build(handle)?;
-    let save = MenuItemBuilder::with_id("save", "Save")
+        .build(handle)?);
+    let save = track!("save", MenuItemBuilder::with_id("save", "Save")
         .accelerator("CmdOrCtrl+S")
-        .build(handle)?;
-    let close_tab = MenuItemBuilder::with_id("close-tab", "Close Tab")
+        .build(handle)?);
+    let close_tab = track!("close-tab", MenuItemBuilder::with_id("close-tab", "Close Tab")
         .accelerator("CmdOrCtrl+W")
-        .build(handle)?;
+        .build(handle)?);
 
     let mut file_builder = SubmenuBuilder::new(handle, "File")
         .item(&new_session)
@@ -951,9 +986,9 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
     // On Windows/Linux, add Settings and Exit to File menu
     #[cfg(not(target_os = "macos"))]
     {
-        let settings = MenuItemBuilder::with_id("settings", "Settings\u{2026}")
+        let settings = track!("settings", MenuItemBuilder::with_id("settings", "Settings\u{2026}")
             .accelerator("CmdOrCtrl+,")
-            .build(handle)?;
+            .build(handle)?);
         file_builder = file_builder
             .separator()
             .item(&settings)
@@ -964,9 +999,9 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
     let file_menu = file_builder.build()?;
 
     // === Edit Menu ===
-    let find = MenuItemBuilder::with_id("find", "Find\u{2026}")
+    let find = track!("find", MenuItemBuilder::with_id("find", "Find\u{2026}")
         .accelerator("CmdOrCtrl+F")
-        .build(handle)?;
+        .build(handle)?);
 
     let edit_menu = SubmenuBuilder::new(handle, "Edit")
         .item(&PredefinedMenuItem::undo(handle, None)?)
@@ -981,24 +1016,24 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
         .build()?;
 
     // === View Menu ===
-    let command_palette = MenuItemBuilder::with_id("command-palette", "Command Palette\u{2026}")
+    let command_palette = track!("command-palette", MenuItemBuilder::with_id("command-palette", "Command Palette\u{2026}")
         .accelerator("CmdOrCtrl+Shift+P")
-        .build(handle)?;
-    let toggle_sidebar = MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar")
+        .build(handle)?);
+    let toggle_sidebar = track!("toggle-sidebar", MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar")
         .accelerator("CmdOrCtrl+B")
-        .build(handle)?;
-    let toggle_ai_panel = MenuItemBuilder::with_id("toggle-ai-panel", "Toggle AI Panel")
+        .build(handle)?);
+    let toggle_ai_panel = track!("toggle-ai-panel", MenuItemBuilder::with_id("toggle-ai-panel", "Toggle AI Panel")
         .accelerator("CmdOrCtrl+I")
-        .build(handle)?;
-    let zoom_reset = MenuItemBuilder::with_id("zoom-reset", "Actual Size")
+        .build(handle)?);
+    let zoom_reset = track!("zoom-reset", MenuItemBuilder::with_id("zoom-reset", "Actual Size")
         .accelerator("CmdOrCtrl+0")
-        .build(handle)?;
-    let zoom_in = MenuItemBuilder::with_id("zoom-in", "Zoom In")
+        .build(handle)?);
+    let zoom_in = track!("zoom-in", MenuItemBuilder::with_id("zoom-in", "Zoom In")
         .accelerator("CmdOrCtrl+=")
-        .build(handle)?;
-    let zoom_out = MenuItemBuilder::with_id("zoom-out", "Zoom Out")
+        .build(handle)?);
+    let zoom_out = track!("zoom-out", MenuItemBuilder::with_id("zoom-out", "Zoom Out")
         .accelerator("CmdOrCtrl+-")
-        .build(handle)?;
+        .build(handle)?);
 
     let view_menu = SubmenuBuilder::new(handle, "View")
         .item(&command_palette)
@@ -1014,19 +1049,19 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
         .build()?;
 
     // === Session Menu ===
-    let reconnect = MenuItemBuilder::with_id("reconnect", "Reconnect")
+    let reconnect = track!("reconnect", MenuItemBuilder::with_id("reconnect", "Reconnect")
         .accelerator("CmdOrCtrl+Shift+R")
-        .build(handle)?;
-    let toggle_multi_send = MenuItemBuilder::with_id("toggle-multi-send", "Toggle Multi-Send")
+        .build(handle)?);
+    let toggle_multi_send = track!("toggle-multi-send", MenuItemBuilder::with_id("toggle-multi-send", "Toggle Multi-Send")
         .accelerator("CmdOrCtrl+Shift+M")
-        .build(handle)?;
-    let connect_selected = MenuItemBuilder::with_id("connect-selected", "Connect Selected Sessions")
+        .build(handle)?);
+    let connect_selected = track!("connect-selected", MenuItemBuilder::with_id("connect-selected", "Connect Selected Sessions")
         .accelerator("CmdOrCtrl+Shift+Return")
-        .build(handle)?;
-    let start_troubleshooting =
+        .build(handle)?);
+    let start_troubleshooting = track!("start-troubleshooting",
         MenuItemBuilder::with_id("start-troubleshooting", "Start Troubleshooting\u{2026}")
             .accelerator("CmdOrCtrl+Shift+K")
-            .build(handle)?;
+            .build(handle)?);
 
     let session_menu = SubmenuBuilder::new(handle, "Session")
         .item(&reconnect)
@@ -1038,15 +1073,15 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
         .build()?;
 
     // === Window Menu ===
-    let new_window = MenuItemBuilder::with_id("new-window", "New Window")
+    let new_window = track!("new-window", MenuItemBuilder::with_id("new-window", "New Window")
         .accelerator("CmdOrCtrl+Shift+N")
-        .build(handle)?;
-    let next_tab = MenuItemBuilder::with_id("next-tab", "Show Next Tab")
+        .build(handle)?);
+    let next_tab = track!("next-tab", MenuItemBuilder::with_id("next-tab", "Show Next Tab")
         .accelerator("CmdOrCtrl+Shift+]")
-        .build(handle)?;
-    let prev_tab = MenuItemBuilder::with_id("previous-tab", "Show Previous Tab")
+        .build(handle)?);
+    let prev_tab = track!("previous-tab", MenuItemBuilder::with_id("previous-tab", "Show Previous Tab")
         .accelerator("CmdOrCtrl+Shift+[")
-        .build(handle)?;
+        .build(handle)?);
 
     let window_menu = SubmenuBuilder::new(handle, "Window")
         .item(&new_window)
@@ -1059,8 +1094,8 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
         .build()?;
 
     // === Help Menu ===
-    let open_docs = MenuItemBuilder::with_id("open-docs", "NetStacks Documentation")
-        .build(handle)?;
+    let open_docs = track!("open-docs", MenuItemBuilder::with_id("open-docs", "NetStacks Documentation")
+        .build(handle)?);
 
     let mut help_builder = SubmenuBuilder::new(handle, "Help")
         .item(&open_docs);
@@ -1068,8 +1103,8 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
     // On Windows/Linux, add About to Help menu (on macOS it's in the app menu)
     #[cfg(not(target_os = "macos"))]
     {
-        let about = MenuItemBuilder::with_id("about", "About NetStacks")
-            .build(handle)?;
+        let about = track!("about", MenuItemBuilder::with_id("about", "About NetStacks")
+            .build(handle)?);
         help_builder = help_builder
             .separator()
             .item(&about);
@@ -1078,12 +1113,43 @@ fn build_menu(handle: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
     let help_menu = help_builder.build()?;
 
     // Build the complete menu bar
-    menu_builder
+    let menu = menu_builder
         .item(&file_menu)
         .item(&edit_menu)
         .item(&view_menu)
         .item(&session_menu)
         .item(&window_menu)
         .item(&help_menu)
-        .build()
+        .build()?;
+
+    Ok((menu, items))
+}
+
+/// Frontend → backend: set the enabled state on a batch of menu items
+/// by id. Unknown ids are silently skipped so the frontend can ship
+/// command updates for items that may not exist in this build.
+///
+/// The frontend (MenuBridge) calls this every time the ActiveContext
+/// changes or a new command registers — so the menu reflects what's
+/// actually available right now.
+#[tauri::command]
+fn set_menu_enabled_batch(
+    state: tauri::State<'_, MenuItemRegistry>,
+    items: Vec<MenuEnabledUpdate>,
+) -> Result<(), String> {
+    let registry = state.0.lock().map_err(|e| e.to_string())?;
+    for update in items {
+        if let Some(item) = registry.get(&update.id) {
+            // Tauri's set_enabled returns Result; we ignore individual
+            // failures so one bad item doesn't break the whole batch.
+            let _ = item.set_enabled(update.enabled);
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct MenuEnabledUpdate {
+    id: String,
+    enabled: bool,
 }

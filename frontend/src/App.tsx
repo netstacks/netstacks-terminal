@@ -113,6 +113,8 @@ import DeviceEditDialog from './components/DeviceEditDialog'
 import WorkspaceTab from './components/workspace/WorkspaceTab'
 import WorkspaceNewDialog from './components/workspace/WorkspaceNewDialog'
 import WorkspacesPanel, { addSavedWorkspace } from './components/workspace/WorkspacesPanel'
+import { MenuBridge } from './commands/menuBridge'
+import { useActiveContextStore, type ActiveContext } from './commands'
 import type { WorkspaceConfig } from './types/workspace'
 import { useTroubleshootingSession, type OnTimeoutCallback } from './hooks/useTroubleshootingSession'
 import { useCertRenewal } from './hooks/useCertRenewal'
@@ -5786,9 +5788,40 @@ def main(command: str = "show version"):
     }
   }, [closeTerminal, handleTerminalAIAction, handleTerminalAIFloatingChat, updateTerminalStatus, updateTabSessionId, broadcast, registerListener, handleVisualizeTraceroute, handleTopologyDeviceDoubleClick, handleDeviceContextMenu, handleAIDiscover, handleSaveTopology, handleOpenDeviceDetailTab, handleOpenLinkDetailTab, handleSaveDeviceToDocs, handleSaveLinkToDocs, documentCache, handleDocumentSave, handleDocumentModified, tabs, topologyRefreshKeys, deviceEnrichments, getLinkEnrichment, profiles, isTroubleshootingActive, isTroubleshootingCapturing, handleTroubleshootingCapture, aiCopilotActive])
 
+  // ── CommandRegistry: keep ActiveContext in sync with React state ──
+  // Tracks active tab type + connection status + sidebar view + enterprise
+  // mode so registered Commands can gate themselves via `when` predicates.
+  // Runs whenever any of these inputs change; the store does its own
+  // shallow-equality check before notifying subscribers, so a no-op
+  // setContext call is cheap.
+  useEffect(() => {
+    const activeTab = tabs.find(t => t.id === activeTabId)
+    const next: ActiveContext = {
+      activeTabType: (activeTab?.type ?? null) as ActiveContext['activeTabType'],
+      activeTabId: activeTabId ?? null,
+      terminalStatus: activeTab?.type === 'terminal'
+        ? (activeTab.status as ActiveContext['terminalStatus']) ?? null
+        : null,
+      // Per-tab dirty state isn't tracked in App.tsx yet — surfaces that
+      // own dirty state (DocumentTabEditor, MopWorkspace, ScriptEditor)
+      // will overwrite this via setContext when they mount/update.
+      isDirty: false,
+      activeSidebarView: activeView,
+      // Selection count — for now read from sessions selection. Other
+      // sidebar panels will need to push their own selection counts
+      // when commands gate on them.
+      selectionCount: 0,
+      isEnterprise,
+    }
+    useActiveContextStore.getState().setContext(next)
+  }, [activeTabId, tabs, activeView, isEnterprise])
+
   return (
     <AuthProvider>
       <div className="app" onContextMenu={handleGlobalContextMenu}>
+        {/* CommandRegistry ↔ native menu bridge. Mounted at the root so
+            it stays alive for the whole session. Doesn't render anything. */}
+        <MenuBridge />
         <div className="app-body" data-testid="app-body">
         {/* Activity Bar */}
         <div className="activity-bar" data-testid="activity-bar">
