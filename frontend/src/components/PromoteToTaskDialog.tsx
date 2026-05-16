@@ -5,6 +5,7 @@
 import { useState, useMemo } from 'react';
 import './PromoteToTaskDialog.css';
 import type { AgentMessage } from '../hooks/useAIAgent';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 
 interface PromoteToTaskDialogProps {
   /** Current chat messages to extract context from */
@@ -78,9 +79,11 @@ export function PromoteToTaskDialog({
     }
   };
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onClose });
+
   return (
-    <div className="promote-dialog-overlay" onClick={onClose}>
-      <div className="promote-dialog" onClick={e => e.stopPropagation()}>
+    <div className="promote-dialog-overlay" {...backdropProps}>
+      <div className="promote-dialog" {...contentProps}>
         <div className="promote-dialog-header">
           <h3>Promote to Background Task</h3>
           <button className="promote-dialog-close" onClick={onClose}>

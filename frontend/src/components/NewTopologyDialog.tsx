@@ -3,6 +3,7 @@ import { listSessions, type Session } from '../api/sessions';
 import { listEnterpriseDevices, type DeviceSummary } from '../api/enterpriseDevices';
 import { getCurrentMode } from '../api/client';
 import { useSubmitting } from '../hooks/useSubmitting';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './NewTopologyDialog.css';
 import AITabInput from './AITabInput';
 
@@ -125,16 +126,18 @@ export default function NewTopologyDialog({
       )
     : enterpriseDevices;
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onClose, enabled: !submitting });
+
   if (!isOpen) return null;
 
   const totalCount = isEnterprise ? enterpriseDevices.length : sessions.length;
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog new-topology-dialog" onClick={e => e.stopPropagation()}>
+    <div className="dialog-overlay" {...backdropProps}>
+      <div className="dialog new-topology-dialog" {...contentProps}>
         <div className="dialog-header">
           <h3>New Topology</h3>
-          <button className="dialog-close" onClick={onClose}>x</button>
+          <button className="dialog-close" onClick={onClose} disabled={submitting}>x</button>
         </div>
 
         <div className="dialog-body">

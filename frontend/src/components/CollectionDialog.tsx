@@ -11,6 +11,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { NeighborParser } from '../lib/neighborParser';
 import type { DeviceType } from '../types/topology';
 import { getClient } from '../api/client';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './CollectionDialog.css';
 
 /** Props for CollectionDialog */
@@ -540,9 +541,11 @@ export default function CollectionDialog({
   const selectedDeviceCount = discoveredDevices.filter(d => d.selected).length;
   const selectedConnectionCount = discoveredConnections.filter(c => c.selected).length;
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onClose });
+
   return (
-    <div className="collection-dialog-overlay" onClick={onClose}>
-      <div className="collection-dialog" onClick={e => e.stopPropagation()}>
+    <div className="collection-dialog-overlay" {...backdropProps}>
+      <div className="collection-dialog" {...contentProps}>
         {/* Header */}
         <div className="collection-dialog-header">
           <h2>Collect Topology Data</h2>

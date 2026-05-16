@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import './DiscoveryModal.css';
 import { runBatchDiscovery, getDiscoveryCapabilities } from '../api/discovery';
 import type { DiscoveredNeighbor, NmapResult, BatchDiscoveryRequest, DiscoveryCapabilities } from '../types/discovery';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 
 export interface DiscoveryLogEntry {
   timestamp: Date;
@@ -241,11 +242,13 @@ export default function DiscoveryModal({
     return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onClose });
+
   if (!isOpen) return null;
 
   return (
-    <div className="discovery-modal-overlay" onClick={onClose}>
-      <div className="discovery-modal" data-testid="discovery-modal" onClick={e => e.stopPropagation()}>
+    <div className="discovery-modal-overlay" {...backdropProps}>
+      <div className="discovery-modal" data-testid="discovery-modal" {...contentProps}>
         <div className="discovery-modal-header">
           <h2>Topology Discovery</h2>
           <span className="discovery-modal-group">{groupName}</span>

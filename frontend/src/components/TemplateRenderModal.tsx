@@ -3,6 +3,7 @@ import { extractJinjaVariables, inferVariableType } from '../lib/jinjaVariableEx
 import type { ExtractedVariable } from '../lib/jinjaVariableExtractor';
 import { renderTemplate } from '../api/docs';
 import type { RenderTemplateResponse } from '../api/docs';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './TemplateRenderModal.css';
 
 interface TemplateRenderModalProps {
@@ -153,11 +154,13 @@ export function TemplateRenderModal({
     onClose();
   };
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: handleClose, enabled: isOpen });
+
   if (!isOpen) return null;
 
   return (
-    <div className="template-render-overlay" onClick={handleClose}>
-      <div className="template-render-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="template-render-overlay" {...backdropProps}>
+      <div className="template-render-modal" {...contentProps}>
         <div className="template-render-header">
           <h2>Render Template</h2>
           <span className="template-render-name">{documentName}</span>

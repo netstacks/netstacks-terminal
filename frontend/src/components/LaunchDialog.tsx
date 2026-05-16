@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './LaunchDialog.css';
 
 // Concrete user choice. Distinct from `LaunchAction` (which adds 'ask' as a preference value).
@@ -29,9 +30,11 @@ export default function LaunchDialog({
     onConfirm(action, dontAskAgain);
   };
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onCancel });
+
   return (
-    <div className="launch-dialog-backdrop" onClick={onCancel}>
-      <div className="launch-dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="launch-dialog-backdrop" {...backdropProps}>
+      <div className="launch-dialog" {...contentProps}>
         <div className="launch-dialog-title">Launch &ldquo;{groupName}&rdquo;</div>
         <div className="launch-dialog-sub">
           {tabCount} {tabCount === 1 ? 'tab' : 'tabs'} · {tabSummary}

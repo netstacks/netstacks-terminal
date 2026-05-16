@@ -15,6 +15,7 @@ import type {
 import { extractActionVariables } from '../lib/quickActionVariables'
 import './QuickActionDialog.css'
 import AITabInput from './AITabInput'
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss'
 
 const Icons = {
   x: (
@@ -367,10 +368,12 @@ export default function QuickActionDialog({
 
   const showBody = method === 'POST' || method === 'PUT' || method === 'PATCH'
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onClose })
+
   return (
     <div className="quick-action-dialog-wrapper">
-      <div className="qad-overlay" onClick={onClose}>
-        <div className="qad-content" onClick={(e) => e.stopPropagation()}>
+      <div className="qad-overlay" {...backdropProps}>
+        <div className="qad-content" {...contentProps}>
           <div className="qad-header">
             <h3>{isEdit ? 'Edit Quick Action' : 'New Quick Action'}</h3>
             <button className="qad-close" onClick={onClose}>{Icons.x}</button>

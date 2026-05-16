@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { listAccessibleCredentials, getUserDefaultCredential } from '../api/enterpriseCredentials';
 import type { AccessibleCredential } from '../types/enterpriseCredential';
 import type { EnterpriseSession } from '../api/enterpriseSessions';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './EnterpriseConnectDialog.css';
 
 interface EnterpriseConnectDialogProps {
@@ -130,9 +131,11 @@ export default function EnterpriseConnectDialog({
     return parts.join(' ');
   };
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onCancel });
+
   return (
-    <div className="enterprise-connect-dialog-overlay" onClick={onCancel}>
-      <div className="enterprise-connect-dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="enterprise-connect-dialog-overlay" {...backdropProps}>
+      <div className="enterprise-connect-dialog" {...contentProps}>
         <div className="enterprise-connect-dialog-header">
           <h3>Connect to {deviceName || session.name}</h3>
           <button

@@ -5,6 +5,7 @@ import { AgentGitOps } from '../../lib/gitOps'
 import { LocalFileOps } from '../../lib/fileOps'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
+import { useOverlayDismiss } from '../../hooks/useOverlayDismiss'
 import type { WorkspaceConfig, AiToolType } from '../../types/workspace'
 
 type DialogMode = 'local' | 'remote' | 'clone'
@@ -182,9 +183,11 @@ export default function WorkspaceNewDialog({
     ? (remotePath.trim().length > 0 && remoteSessionId)
     : (cloneUrl.trim().length > 0 && clonePath.trim().length > 0)
 
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onCancel })
+
   return (
-    <div className="workspace-new-dialog-overlay" onClick={onCancel}>
-      <div className="workspace-new-dialog" onClick={e => e.stopPropagation()}>
+    <div className="workspace-new-dialog-overlay" {...backdropProps}>
+      <div className="workspace-new-dialog" {...contentProps}>
         <h3>New Workspace</h3>
 
         <div className="workspace-new-dialog-field">
