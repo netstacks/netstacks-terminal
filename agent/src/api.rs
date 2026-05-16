@@ -2086,13 +2086,26 @@ pub async fn netbox_proxy_devices(
     let initial_url = build_netbox_url(&req.url, "/dcim/devices/", &params);
     let token = req.token.clone();
 
-    // Collect all devices across all pages
+    // Collect all devices across all pages. Cap pagination so a NetBox
+    // that returns a self-referential `next` chain (misconfigured or
+    // malicious) can't OOM the agent. At limit=1000 per page, 200 pages =
+    // 200k devices — well past anything a real network ops user has.
+    const MAX_NETBOX_PAGES: u32 = 200;
     let mut all_devices: Vec<NetBoxDevice> = vec![];
     let mut next_url: Option<String> = Some(initial_url);
-    let mut page_count = 0;
+    let mut page_count: u32 = 0;
 
     while let Some(api_url) = next_url {
         page_count += 1;
+        if page_count > MAX_NETBOX_PAGES {
+            return Err(ApiError {
+                error: format!(
+                    "NetBox returned more than {} pages of devices — aborting to prevent runaway memory use",
+                    MAX_NETBOX_PAGES,
+                ),
+                code: "NETBOX_TOO_MANY_PAGES".to_string(),
+            });
+        }
         eprintln!("[DEBUG] Fetching NetBox devices page {} from: {}", page_count, api_url);
 
         let response = client
@@ -3737,21 +3750,69 @@ pub async fn sftp_download(
     let session = sftp_session.lock().await;
     let data = session.download(&query.path).await?;
 
-    // Get filename for Content-Disposition
+    // Get filename for Content-Disposition. Filename is user-controlled
+    // (the SFTP path basename), so it can contain quotes, CR/LF, or
+    // non-ASCII characters. Build a safe header value: sanitized ASCII for
+    // the legacy `filename=` parameter plus an RFC 6266 `filename*=UTF-8''`
+    // percent-encoded form for full fidelity.
     let filename = std::path::Path::new(&query.path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "download".to_string());
 
+    let ascii_fallback: String = filename
+        .chars()
+        .map(|c| {
+            // Allow visible ASCII except characters that would break a quoted
+            // header value or attempt header injection. Everything else
+            // becomes an underscore.
+            if c.is_ascii_graphic() && !matches!(c, '"' | '\\' | '\r' | '\n') {
+                c
+            } else if c == ' ' {
+                ' '
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ascii_fallback = if ascii_fallback.trim().is_empty() {
+        "download".to_string()
+    } else {
+        ascii_fallback
+    };
+
+    // Percent-encode the full UTF-8 filename per RFC 5987 (filename*).
+    // Allowed unreserved chars: ALPHA / DIGIT / "-" / "." / "_" / "~"
+    let mut utf8_encoded = String::with_capacity(filename.len());
+    for byte in filename.as_bytes() {
+        let b = *byte;
+        let unreserved = b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'.' | b'_' | b'~');
+        if unreserved {
+            utf8_encoded.push(b as char);
+        } else {
+            utf8_encoded.push_str(&format!("%{:02X}", b));
+        }
+    }
+
+    let header_value_str = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii_fallback, utf8_encoded
+    );
+
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
-        "application/octet-stream".parse().unwrap(),
+        axum::http::HeaderValue::from_static("application/octet-stream"),
     );
-    headers.insert(
-        axum::http::header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
-    );
+    // The sanitization above guarantees a valid header value; treat any
+    // residual parse failure as a server-side bug and serve the file with
+    // a generic disposition rather than panicking the request thread.
+    let disposition = axum::http::HeaderValue::from_str(&header_value_str)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static(
+            "attachment; filename=\"download\"",
+        ));
+    headers.insert(axum::http::header::CONTENT_DISPOSITION, disposition);
 
     Ok((headers, data))
 }
