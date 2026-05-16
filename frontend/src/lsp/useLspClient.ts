@@ -33,7 +33,7 @@ const RECONNECT_MAX_ATTEMPTS = 5;
 const RECONNECT_BACKOFF_MS = 1000;
 
 export function useLspClient(args: UseLspClientArgs) {
-  const { monaco, editor, model, language, workspace } = args;
+  const { monaco, editor: _editor, model, language, workspace } = args;
   const [status, setStatus] = useState<Status>('idle');
 
   // Refs hold mutable state across renders without triggering re-renders

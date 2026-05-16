@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
 import type { editor } from 'monaco-editor'
 import type { FileOps } from '../../types/workspace'
 import { showToast } from '../Toast'
 import { useMonacoCopilot } from '../../hooks/useMonacoCopilot'
 import MonacoCopilotWidget from '../MonacoCopilotWidget'
+import { LspBridge } from '../../lsp/LspBridge'
 
 interface WorkspaceCodeEditorProps {
   filePath: string
+  workspaceRoot: string
   fileOps: FileOps
   isModified: boolean
   onModifiedChange: (modified: boolean) => void
@@ -42,6 +45,7 @@ const RUNNABLE_EXTS = new Set(['py', 'sh', 'bash', 'zsh', 'js', 'ts'])
 
 export default function WorkspaceCodeEditor({
   filePath,
+  workspaceRoot,
   fileOps,
   onModifiedChange,
   onRunFile,
@@ -51,6 +55,7 @@ export default function WorkspaceCodeEditor({
   const [error, setError] = useState<string | null>(null)
   const savedContentRef = useRef<string>('')
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const modelRef = useRef<editor.ITextModel | null>(null)
   const fileOpsRef = useRef(fileOps)
   const filePathRef = useRef(filePath)
   const onModifiedChangeRef = useRef(onModifiedChange)
@@ -72,6 +77,7 @@ export default function WorkspaceCodeEditor({
     setLoading(true)
     setError(null)
     editorRef.current = null
+    modelRef.current = null
     fileOps.readFile(filePath).then(text => {
       if (cancelled) return
       savedContentRef.current = text
@@ -86,8 +92,9 @@ export default function WorkspaceCodeEditor({
     return () => { cancelled = true }
   }, [filePath])
 
-  const handleEditorMount: OnMount = useCallback((ed, monaco) => {
+  const handleEditorMount: OnMount = useCallback((ed) => {
     editorRef.current = ed
+    modelRef.current = ed.getModel()
     copilot.register(ed)
 
     // Cmd+S: Save
@@ -173,6 +180,15 @@ export default function WorkspaceCodeEditor({
           padding: { top: 4 },
         }}
       />
+      {editorRef.current && modelRef.current && (
+        <LspBridge
+          monaco={monaco}
+          editor={editorRef.current}
+          model={modelRef.current}
+          language={language}
+          workspace={workspaceRoot}
+        />
+      )}
       {copilot.isOpen && copilot.widgetPosition && editorRef.current && (
         <MonacoCopilotWidget
           position={copilot.widgetPosition}

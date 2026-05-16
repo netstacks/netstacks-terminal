@@ -13,6 +13,7 @@ const RUNNABLE_EXTS = new Set(['py', 'sh', 'bash', 'zsh', 'js', 'ts'])
 interface WorkspaceEditorAreaProps {
   innerTabs: InnerTab[]
   activeInnerTabId: string | null
+  workspaceRoot: string
   fileOps: FileOps
   gitOps: GitOps | null
   onSetActiveTab: (id: string) => void
@@ -25,6 +26,7 @@ interface WorkspaceEditorAreaProps {
 export default function WorkspaceEditorArea({
   innerTabs,
   activeInnerTabId,
+  workspaceRoot,
   fileOps,
   gitOps,
   onSetActiveTab,
@@ -127,6 +129,7 @@ export default function WorkspaceEditorArea({
           <WorkspaceCodeEditor
             key={tab.id}
             filePath={tab.filePath!}
+            workspaceRoot={workspaceRoot}
             fileOps={fileOps}
             isModified={tab.isModified || false}
             onModifiedChange={(modified) => onMarkModified(tab.id, modified)}

@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useImperativeHandle, forwardRef } from 'react';
 import Editor from '@monaco-editor/react';
+import * as monaco from 'monaco-editor';
+import type { editor } from 'monaco-editor';
 import './ScriptEditor.css';
 import { useMonacoCopilot } from '../hooks/useMonacoCopilot';
 import MonacoCopilotWidget from './MonacoCopilotWidget';
 import AITabInput from './AITabInput';
+import { LspBridge } from '../lsp/LspBridge';
 import {
   createScript,
   updateScript,
@@ -141,6 +144,10 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
 
   // Cmd+I inline AI copilot
   const copilot = useMonacoCopilot();
+
+  // LSP client state
+  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const modelRef = useRef<editor.ITextModel | null>(null);
 
   // Streaming execution state
   const [streamStatus, setStreamStatus] = useState<string | null>(null);
@@ -817,7 +824,11 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
               defaultLanguage="python"
               value={content}
               onChange={handleContentChange}
-              onMount={(editor) => copilot.register(editor)}
+              onMount={(editor) => {
+                editorRef.current = editor;
+                modelRef.current = editor.getModel();
+                copilot.register(editor);
+              }}
               theme="vs-dark"
               options={{
                 minimap: { enabled: false },
@@ -832,6 +843,17 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
             />
           </div>
         </div>
+
+        {/* LSP client bridge */}
+        {editorRef.current && modelRef.current && (
+          <LspBridge
+            monaco={monaco}
+            editor={editorRef.current}
+            model={modelRef.current}
+            language="python"
+            workspace={null}
+          />
+        )}
 
         {/* Cmd+I Copilot Widget */}
         {copilot.isOpen && copilot.widgetPosition && (

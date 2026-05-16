@@ -200,6 +200,7 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
               <WorkspaceEditorArea
                 innerTabs={state.innerTabs}
                 activeInnerTabId={state.activeInnerTabId}
+                workspaceRoot={state.rootPath}
                 fileOps={fileOps}
                 gitOps={gitOps}
                 onSetActiveTab={workspace.setActiveInnerTab}
