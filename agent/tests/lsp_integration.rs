@@ -165,3 +165,169 @@ async fn ws_rejects_invalid_token() {
     // Connection should fail with 401
     assert!(result.is_err(), "expected WS upgrade to fail with wrong token");
 }
+
+#[tokio::test]
+async fn crud_endpoints_create_update_delete() {
+    let pool = fresh_pool().await;
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let state = LspState {
+        host: Arc::new(LspHost::new(pool, data_dir.path().to_path_buf())),
+        auth_token: "test-token".to_string(),
+    };
+    let app = router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{}", addr);
+
+    // Create a new user-added plugin
+    let create_body = serde_json::json!({
+        "id": "my-go-lsp",
+        "display_name": "My Go LSP",
+        "language": "go",
+        "file_extensions": [".go"],
+        "command": "gopls",
+        "args": ["serve"],
+        "env_vars": {}
+    });
+
+    let resp = client
+        .post(format!("{}/plugins", base_url))
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create should return 201 Created");
+    let plugin: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(plugin["id"], "my-go-lsp");
+    assert_eq!(plugin["displayName"], "My Go LSP");
+    assert_eq!(plugin["source"], "user-added");
+
+    // Update the plugin
+    let update_body = serde_json::json!({
+        "display_name": "Updated Go LSP",
+        "args": ["serve", "-verbose"]
+    });
+
+    let resp = client
+        .put(format!("{}/plugins/my-go-lsp", base_url))
+        .json(&update_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let updated: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(updated["displayName"], "Updated Go LSP");
+    assert_eq!(updated["runtime"]["args"], serde_json::json!(["serve", "-verbose"]));
+
+    // List plugins (should have Pyrefly + my-go-lsp)
+    let resp = client.get(format!("{}/plugins", base_url)).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let list: serde_json::Value = resp.json().await.unwrap();
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "should have Pyrefly + my-go-lsp");
+
+    // Delete the user-added plugin
+    let resp = client
+        .delete(format!("{}/plugins/my-go-lsp", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "delete should return 204 No Content");
+
+    // Verify it's gone
+    let resp = client.get(format!("{}/plugins", base_url)).send().await.unwrap();
+    let list: serde_json::Value = resp.json().await.unwrap();
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "should only have Pyrefly after delete");
+}
+
+#[tokio::test]
+async fn crud_create_rejects_duplicate_id() {
+    let pool = fresh_pool().await;
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let state = LspState {
+        host: Arc::new(LspHost::new(pool, data_dir.path().to_path_buf())),
+        auth_token: "test-token".to_string(),
+    };
+    let app = router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{}", addr);
+
+    let create_body = serde_json::json!({
+        "id": "my-go-lsp",
+        "display_name": "My Go LSP",
+        "language": "go",
+        "file_extensions": [".go"],
+        "command": "gopls",
+        "args": ["serve"],
+        "env_vars": {}
+    });
+
+    // First create succeeds
+    let resp = client
+        .post(format!("{}/plugins", base_url))
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Second create with same id fails
+    let resp = client
+        .post(format!("{}/plugins", base_url))
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409, "duplicate id should return 409 Conflict");
+}
+
+#[tokio::test]
+async fn crud_update_built_in_writes_override() {
+    let pool = fresh_pool().await;
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let state = LspState {
+        host: Arc::new(LspHost::new(pool, data_dir.path().to_path_buf())),
+        auth_token: "test-token".to_string(),
+    };
+    let app = router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{}", addr);
+
+    // Update built-in Pyrefly
+    let update_body = serde_json::json!({
+        "command": "/custom/pyrefly",
+        "enabled": false
+    });
+
+    let resp = client
+        .put(format!("{}/plugins/pyrefly", base_url))
+        .json(&update_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let updated: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(updated["runtime"]["command"], "/custom/pyrefly");
+    assert_eq!(updated["defaultEnabled"], false);
+}

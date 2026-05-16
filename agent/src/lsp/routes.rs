@@ -5,7 +5,8 @@
 //! REST endpoints are protected by the existing auth_middleware at mount
 //! time.
 
-use crate::lsp::host::{LspHost, WorkspaceKey};
+use crate::lsp::host::{LspHost, LspHostError, PluginUpdateInput, UserPluginInput, WorkspaceKey};
+use crate::lsp::test_cmd::{test_lsp_command, TestCommandInput};
 use crate::lsp::types::{InstallStatus, LspPlugin};
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
@@ -37,12 +38,12 @@ pub struct LspState {
 pub fn http_router(state: LspState) -> Router {
     Router::new()
         .route("/plugins", get(list_plugins))
-        .route("/plugins", post(create_plugin_stub))
-        .route("/plugins/:id", put(update_plugin_stub))
+        .route("/plugins", post(create_plugin))
+        .route("/plugins/:id", put(update_plugin))
         .route("/plugins/:id", delete(delete_plugin))
         .route("/plugins/:id/install", post(install_plugin))
         .route("/plugins/:id/install-progress", get(install_progress))
-        .route("/plugins/test", post(test_plugin_stub))
+        .route("/plugins/test", post(test_plugin_command))
         .with_state(state)
 }
 
@@ -90,28 +91,51 @@ async fn list_plugins(State(state): State<LspState>) -> impl IntoResponse {
     }
 }
 
-// ===== CRUD stubs (Phase 5 implements) =====
+// ===== CRUD endpoints (Phase 5) =====
 
-async fn create_plugin_stub() -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "create custom plugin: Phase 5")
+async fn create_plugin(
+    State(state): State<LspState>,
+    axum::Json(input): axum::Json<UserPluginInput>,
+) -> impl IntoResponse {
+    match state.host.create_user_plugin(input).await {
+        Ok(plugin) => (StatusCode::CREATED, axum::Json(plugin)).into_response(),
+        Err(LspHostError::InvalidConfig(msg)) => (StatusCode::CONFLICT, msg).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
-async fn update_plugin_stub(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "update plugin: Phase 5")
+async fn update_plugin(
+    State(state): State<LspState>,
+    Path(id): Path<String>,
+    axum::Json(input): axum::Json<PluginUpdateInput>,
+) -> impl IntoResponse {
+    match state.host.update_plugin(&id, input).await {
+        Ok(plugin) => (StatusCode::OK, axum::Json(plugin)).into_response(),
+        Err(LspHostError::PluginNotFound(_)) => {
+            (StatusCode::NOT_FOUND, "plugin not found").into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
 }
 
 async fn delete_plugin(
     State(state): State<LspState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    // For built-in on-demand plugins: uninstall (delete binary).
-    // For user-added plugins: Phase 5 will implement full deletion from SQLite.
-    match state.host.uninstall_plugin(&id).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            tracing::warn!(plugin_id = %id, error = %e, "uninstall failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+    // Try user-added removal first; if that errs with "built-in", fall through to uninstall (Phase 4).
+    match state.host.delete_user_plugin(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(LspHostError::InvalidConfig(_)) => {
+            // It's a built-in; route to uninstall (Phase 4 added this)
+            match state.host.uninstall_plugin(&id).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
         }
+        Err(LspHostError::PluginNotFound(_)) => {
+            (StatusCode::NOT_FOUND, "plugin not found").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -185,8 +209,11 @@ async fn install_progress(
         .into_response()
 }
 
-async fn test_plugin_stub() -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "test plugin: Phase 5")
+async fn test_plugin_command(
+    axum::Json(input): axum::Json<TestCommandInput>,
+) -> impl IntoResponse {
+    let result = test_lsp_command(input).await;
+    (StatusCode::OK, axum::Json(result)).into_response()
 }
 
 // ===== WebSocket: LSP JSON-RPC bridge =====

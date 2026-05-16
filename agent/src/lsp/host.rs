@@ -11,6 +11,7 @@ use crate::lsp::session::LspSession;
 use crate::lsp::types::{InstallationKind, InstallStatus, LspPlugin, PluginSource, RuntimeConfig};
 use dashmap::DashMap;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -299,6 +300,181 @@ impl LspHost {
             .join(format!("v{}", version))
             .join(binary_name)
     }
+
+    /// Create a new user-added plugin. Returns conflict error if id collides.
+    pub async fn create_user_plugin(&self, input: UserPluginInput) -> Result<LspPlugin, LspHostError> {
+        // Check id collision against built-ins AND user-added entries
+        if built_in_plugins().iter().any(|p| p.id == input.id) {
+            return Err(LspHostError::InvalidConfig(format!(
+                "id '{}' is reserved by a built-in plugin",
+                input.id
+            )));
+        }
+        let existing: Option<i64> = sqlx::query_scalar("SELECT 1 FROM lsp_plugins WHERE id = ?1")
+            .bind(&input.id)
+            .fetch_optional(&self.pool)
+            .await?;
+        if existing.is_some() {
+            return Err(LspHostError::InvalidConfig(format!(
+                "plugin id '{}' already exists",
+                input.id
+            )));
+        }
+
+        let file_extensions_json = serde_json::to_string(&input.file_extensions)
+            .map_err(|e| LspHostError::InvalidConfig(e.to_string()))?;
+        let args_json = serde_json::to_string(&input.args)
+            .map_err(|e| LspHostError::InvalidConfig(e.to_string()))?;
+        let env_vars_json = serde_json::to_string(&input.env_vars)
+            .map_err(|e| LspHostError::InvalidConfig(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO lsp_plugins (id, display_name, language, file_extensions, command, args, env_vars, enabled) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+        )
+        .bind(&input.id)
+        .bind(&input.display_name)
+        .bind(&input.language)
+        .bind(&file_extensions_json)
+        .bind(&input.command)
+        .bind(&args_json)
+        .bind(&env_vars_json)
+        .execute(&self.pool)
+        .await?;
+
+        self.get_plugin(&input.id).await
+    }
+
+    /// Update an existing plugin. Built-in: writes to lsp_plugin_overrides
+    /// (only enabled + custom_command + custom_args can be changed).
+    /// User-added: updates the row in lsp_plugins (all fields).
+    pub async fn update_plugin(&self, id: &str, input: PluginUpdateInput) -> Result<LspPlugin, LspHostError> {
+        let is_built_in = built_in_plugins().iter().any(|p| p.id == id);
+        if is_built_in {
+            // Upsert into overrides table
+            let custom_args_json = match &input.args {
+                Some(a) => serde_json::to_string(a)
+                    .map_err(|e| LspHostError::InvalidConfig(e.to_string()))?,
+                None => "[]".to_string(),
+            };
+            sqlx::query(
+                "INSERT INTO lsp_plugin_overrides (plugin_id, enabled, custom_command, custom_args) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(plugin_id) DO UPDATE SET \
+                   enabled = COALESCE(?2, enabled), \
+                   custom_command = COALESCE(?3, custom_command), \
+                   custom_args = ?4, \
+                   updated_at = datetime('now')",
+            )
+            .bind(id)
+            .bind(input.enabled.unwrap_or(true))
+            .bind(input.command.as_deref())
+            .bind(custom_args_json)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            // Update user-added row. Build dynamic SET clause based on fields present.
+            // Simplest: fetch row, apply updates, write back.
+            let row: Option<(String, String, String, String, String, bool)> = sqlx::query_as(
+                "SELECT display_name, language, file_extensions, command, args, enabled FROM lsp_plugins WHERE id = ?1"
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let (mut dn, mut lang, mut fext, mut cmd, mut args, mut enabled) = row
+                .ok_or_else(|| LspHostError::PluginNotFound(id.to_string()))?;
+
+            if let Some(v) = input.display_name { dn = v; }
+            if let Some(v) = input.language { lang = v; }
+            if let Some(v) = input.file_extensions {
+                fext = serde_json::to_string(&v)
+                    .map_err(|e| LspHostError::InvalidConfig(e.to_string()))?;
+            }
+            if let Some(v) = input.command { cmd = v; }
+            if let Some(v) = input.args {
+                args = serde_json::to_string(&v)
+                    .map_err(|e| LspHostError::InvalidConfig(e.to_string()))?;
+            }
+            if let Some(v) = input.enabled { enabled = v; }
+
+            sqlx::query(
+                "UPDATE lsp_plugins SET display_name = ?2, language = ?3, file_extensions = ?4, \
+                 command = ?5, args = ?6, enabled = ?7, updated_at = datetime('now') WHERE id = ?1"
+            )
+            .bind(id)
+            .bind(dn)
+            .bind(lang)
+            .bind(fext)
+            .bind(cmd)
+            .bind(args)
+            .bind(enabled)
+            .execute(&self.pool)
+            .await?;
+        }
+        self.get_plugin(id).await
+    }
+
+    /// Delete a plugin. Built-in: errors (built-ins can only be uninstalled via the install module).
+    /// User-added: deletes the SQLite row.
+    pub async fn delete_user_plugin(&self, id: &str) -> Result<(), LspHostError> {
+        let is_built_in = built_in_plugins().iter().any(|p| p.id == id);
+        if is_built_in {
+            return Err(LspHostError::InvalidConfig(format!(
+                "'{}' is a built-in plugin; use uninstall_plugin to remove its binary",
+                id
+            )));
+        }
+
+        let affected = sqlx::query("DELETE FROM lsp_plugins WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        if affected == 0 {
+            return Err(LspHostError::PluginNotFound(id.to_string()));
+        }
+
+        // Also kill any active sessions for this plugin
+        let keys_to_remove: Vec<_> = self.sessions
+            .iter()
+            .filter(|e| e.key().0 == id)
+            .map(|e| e.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            if let Some((_, session)) = self.sessions.remove(&key) {
+                session.shutdown().await;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Input for creating a new user-added plugin.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UserPluginInput {
+    pub id: String,                    // unique, kebab-case
+    pub display_name: String,
+    pub language: String,              // Monaco language id
+    pub file_extensions: Vec<String>,  // e.g. [".go", ".mod"]
+    pub command: String,               // absolute path or PATH name
+    pub args: Vec<String>,             // e.g. ["serve"]
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>, // optional, default empty
+}
+
+/// Input for updating a plugin (built-in or user-added).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PluginUpdateInput {
+    pub display_name: Option<String>,
+    pub language: Option<String>,
+    pub file_extensions: Option<Vec<String>>,
+    pub command: Option<String>,           // for user-added; OR override for built-in
+    pub args: Option<Vec<String>>,
+    pub enabled: Option<bool>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -406,5 +582,174 @@ mod tests {
         let host = LspHost::new(pool, temp_dir.path().to_path_buf());
         let err = host.get_plugin("nope").await.unwrap_err();
         assert!(matches!(err, LspHostError::PluginNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_user_plugin_succeeds_for_unique_id() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
+
+        let input = UserPluginInput {
+            id: "custom-rust".to_string(),
+            display_name: "Custom Rust Analyzer".to_string(),
+            language: "rust".to_string(),
+            file_extensions: vec![".rs".to_string()],
+            command: "rust-analyzer".to_string(),
+            args: vec![],
+            env_vars: HashMap::new(),
+        };
+
+        let plugin = host.create_user_plugin(input).await.unwrap();
+        assert_eq!(plugin.id, "custom-rust");
+        assert_eq!(plugin.display_name, "Custom Rust Analyzer");
+        assert_eq!(plugin.language, "rust");
+        assert_eq!(plugin.file_extensions, vec![".rs".to_string()]);
+        assert!(matches!(plugin.source, PluginSource::UserAdded));
+    }
+
+    #[tokio::test]
+    async fn create_user_plugin_rejects_duplicate_id() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
+
+        let input = UserPluginInput {
+            id: "custom-rust".to_string(),
+            display_name: "Custom Rust Analyzer".to_string(),
+            language: "rust".to_string(),
+            file_extensions: vec![".rs".to_string()],
+            command: "rust-analyzer".to_string(),
+            args: vec![],
+            env_vars: HashMap::new(),
+        };
+
+        host.create_user_plugin(input.clone()).await.unwrap();
+        let err = host.create_user_plugin(input).await.unwrap_err();
+        assert!(matches!(err, LspHostError::InvalidConfig(_)));
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn create_user_plugin_rejects_built_in_id_collision() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
+
+        let input = UserPluginInput {
+            id: "pyrefly".to_string(), // collides with built-in
+            display_name: "Custom Pyrefly".to_string(),
+            language: "python".to_string(),
+            file_extensions: vec![".py".to_string()],
+            command: "pyrefly".to_string(),
+            args: vec![],
+            env_vars: HashMap::new(),
+        };
+
+        let err = host.create_user_plugin(input).await.unwrap_err();
+        assert!(matches!(err, LspHostError::InvalidConfig(_)));
+        assert!(err.to_string().contains("reserved by a built-in"));
+    }
+
+    #[tokio::test]
+    async fn update_plugin_updates_user_added() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
+
+        let input = UserPluginInput {
+            id: "custom-rust".to_string(),
+            display_name: "Custom Rust Analyzer".to_string(),
+            language: "rust".to_string(),
+            file_extensions: vec![".rs".to_string()],
+            command: "rust-analyzer".to_string(),
+            args: vec![],
+            env_vars: HashMap::new(),
+        };
+
+        host.create_user_plugin(input).await.unwrap();
+
+        let update = PluginUpdateInput {
+            display_name: Some("Updated Rust".to_string()),
+            language: None,
+            file_extensions: None,
+            command: None,
+            args: Some(vec!["--log".to_string(), "trace".to_string()]),
+            enabled: Some(false),
+        };
+
+        let plugin = host.update_plugin("custom-rust", update).await.unwrap();
+        assert_eq!(plugin.display_name, "Updated Rust");
+        assert_eq!(plugin.runtime.args, vec!["--log", "trace"]);
+        assert!(!plugin.default_enabled);
+    }
+
+    #[tokio::test]
+    async fn update_plugin_writes_override_for_built_in() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool.clone(), temp_dir.path().to_path_buf());
+
+        let update = PluginUpdateInput {
+            display_name: None, // ignored for built-ins
+            language: None,
+            file_extensions: None,
+            command: Some("/custom/pyrefly".to_string()),
+            args: Some(vec!["--verbose".to_string()]),
+            enabled: Some(false),
+        };
+
+        let plugin = host.update_plugin("pyrefly", update).await.unwrap();
+        assert_eq!(plugin.runtime.command, "/custom/pyrefly");
+        assert_eq!(plugin.runtime.args, vec!["--verbose"]);
+        assert!(!plugin.default_enabled);
+
+        // Verify override was written to DB
+        let row: Option<(String, bool, Option<String>, String)> = sqlx::query_as(
+            "SELECT plugin_id, enabled, custom_command, custom_args FROM lsp_plugin_overrides WHERE plugin_id = 'pyrefly'"
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+
+        let (pid, enabled, cmd, args) = row.unwrap();
+        assert_eq!(pid, "pyrefly");
+        assert!(!enabled);
+        assert_eq!(cmd.unwrap(), "/custom/pyrefly");
+        assert_eq!(args, r#"["--verbose"]"#);
+    }
+
+    #[tokio::test]
+    async fn delete_user_plugin_removes_row() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
+
+        let input = UserPluginInput {
+            id: "custom-rust".to_string(),
+            display_name: "Custom Rust Analyzer".to_string(),
+            language: "rust".to_string(),
+            file_extensions: vec![".rs".to_string()],
+            command: "rust-analyzer".to_string(),
+            args: vec![],
+            env_vars: HashMap::new(),
+        };
+
+        host.create_user_plugin(input).await.unwrap();
+        host.delete_user_plugin("custom-rust").await.unwrap();
+
+        let err = host.get_plugin("custom-rust").await.unwrap_err();
+        assert!(matches!(err, LspHostError::PluginNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_user_plugin_rejects_built_in() {
+        let pool = fresh_pool().await;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let host = LspHost::new(pool, temp_dir.path().to_path_buf());
+
+        let err = host.delete_user_plugin("pyrefly").await.unwrap_err();
+        assert!(matches!(err, LspHostError::InvalidConfig(_)));
+        assert!(err.to_string().contains("built-in plugin"));
     }
 }
