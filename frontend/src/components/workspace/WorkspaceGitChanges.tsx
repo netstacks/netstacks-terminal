@@ -124,6 +124,12 @@ export default function WorkspaceGitChanges({
     if (!commitMsg.trim()) return
     setIsCommitting(true)
     try {
+      // Smart-commit: if the user has changes but hasn't staged anything,
+      // stage them all first (matches VSCode's git.smartCommit default).
+      if (staged.length === 0 && unstaged.length > 0) {
+        const paths = unstaged.map(s => s.path)
+        await gitOps.stage(paths)
+      }
       await gitOps.commit(commitMsg.trim())
       if (andPush) {
         await gitOps.push()
@@ -136,7 +142,7 @@ export default function WorkspaceGitChanges({
     } finally {
       setIsCommitting(false)
     }
-  }, [gitOps, commitMsg, onRefresh])
+  }, [gitOps, commitMsg, staged, unstaged, onRefresh])
 
   const fileName = (path: string) => path.split('/').pop() || path
 
@@ -176,7 +182,9 @@ export default function WorkspaceGitChanges({
   )
 
   const hasChanges = staged.length > 0 || unstaged.length > 0
-  const canCommit = commitMsg.trim().length > 0 && staged.length > 0
+  // Smart-commit: enabled when there's a message AND any kind of change
+  // (handleCommit auto-stages unstaged changes if nothing is staged yet).
+  const canCommit = commitMsg.trim().length > 0 && hasChanges
 
   return (
     <div className="workspace-git-changes">
