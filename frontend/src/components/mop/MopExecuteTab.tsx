@@ -430,6 +430,23 @@ export default function MopExecuteTab(props: MopExecuteTabProps) {
       {/* AI Pilot panels */}
       {controlMode === 'ai_pilot' && aiPilot.state.active && execution && (
         <>
+          {/* AI Pilot header — shows active level + emergency off switch.
+              Critical for L4 (Autopilot) where the only off-switch otherwise
+              is to close the tab. */}
+          <div className="mop-ai-pilot-header">
+            <div className="mop-ai-pilot-header-status">
+              <span className="mop-ai-pilot-header-dot" />
+              <span>AI Pilot active · L{aiPilot.state.level}</span>
+            </div>
+            <button
+              className="mop-workspace-header-btn"
+              onClick={aiPilot.deactivate}
+              title="Deactivate AI Pilot — execution stays running, AI stops driving"
+            >
+              Stop AI Pilot
+            </button>
+          </div>
+
           {/* L4 plan approval gate */}
           {aiPilot.state.level === 4 && !aiPilot.state.planApproved && (
             <div className="mop-ai-pilot-gate">

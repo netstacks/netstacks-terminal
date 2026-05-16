@@ -1887,6 +1887,41 @@
 
 /* === Phase 33: AI Pilot Mode Styles === */
 
+/* Active-pilot header — always visible while pilot runs, hosts the
+   emergency "Stop AI Pilot" button. Critical for L4 (Autopilot). */
+.mop-ai-pilot-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: rgba(197, 134, 192, 0.08);
+  border-bottom: 1px solid rgba(197, 134, 192, 0.3);
+  font-size: 12px;
+}
+
+.mop-ai-pilot-header-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary, #cccccc);
+  font-weight: 500;
+}
+
+.mop-ai-pilot-header-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c586c0;
+  box-shadow: 0 0 6px rgba(197, 134, 192, 0.6);
+  animation: mop-ai-pilot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes mop-ai-pilot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 /* Gate/escalation panels */
 .mop-ai-pilot-gate,
 .mop-ai-pilot-escalation {
