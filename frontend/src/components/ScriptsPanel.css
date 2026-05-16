@@ -180,14 +180,15 @@
 
 /* Context Menu */
 .scripts-context-menu {
+  /* Aligned with the canonical menu surface (see index.css menu-* tokens). */
   position: fixed;
-  z-index: 1000;
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  min-width: 160px;
-  padding: 4px;
+  z-index: var(--menu-z);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
+  min-width: var(--menu-min-width);
+  padding: var(--menu-padding);
 }
 
 .scripts-context-menu .context-menu-item {

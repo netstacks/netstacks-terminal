@@ -418,14 +418,17 @@
 
 /* Context Menu */
 .enterprise-context-menu {
+  /* Aligned with the canonical menu surface (see index.css menu-* tokens).
+   * Keeps the column/gap layout this panel uses to stack items with a
+   * small visual break between them. */
   position: fixed;
-  min-width: 180px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  padding: 4px;
-  z-index: 10000;
+  min-width: var(--menu-min-width);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
+  padding: var(--menu-padding);
+  z-index: var(--menu-z);
   display: flex;
   flex-direction: column;
   gap: 2px;

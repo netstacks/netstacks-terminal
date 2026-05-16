@@ -47,6 +47,29 @@
   /* Transitions */
   --transition-fast: 0.1s ease;
   --transition-normal: 0.2s ease;
+
+  /* ── Canonical menu tokens ─────────────────────────────────────
+   * Every right-click context menu, tab menu, popover menu, etc.
+   * should consume these so theming stays uniform. The shared
+   * .context-menu class (ContextMenu.css) uses them directly;
+   * bespoke menus that need richer behavior should still reference
+   * the same tokens for radius / shadow / z-index / min-width so
+   * they sit at the same visual layer with matching corners.
+   *
+   * Don't redefine these per-component. If a menu needs a different
+   * radius (e.g. a hover popover vs a context menu), add a NEW
+   * token here rather than hardcoding.
+   */
+  --menu-bg: var(--color-bg-secondary);
+  --menu-border: var(--color-border);
+  --menu-radius: 8px;
+  --menu-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --menu-min-width: 200px;
+  --menu-z: 3000;
+  --menu-padding: var(--spacing-xs);
+  --menu-item-padding: var(--spacing-sm) var(--spacing-md);
+  --menu-item-radius: 4px;
+  --menu-divider-margin: var(--spacing-xs) var(--spacing-sm);
 }
 
 /* Reset */

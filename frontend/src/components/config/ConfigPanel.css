@@ -985,14 +985,15 @@
 
 /* Context Menu */
 .stacks-context-menu {
+  /* Aligned with the canonical menu surface (see index.css menu-* tokens). */
   position: fixed;
-  z-index: 1000;
-  min-width: 160px;
-  background: var(--color-bg-secondary, #252526);
-  border: 1px solid var(--color-border, #3c3c3c);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  padding: 4px 0;
+  z-index: var(--menu-z);
+  min-width: var(--menu-min-width);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
+  padding: var(--spacing-xs) 0;
   font-size: 12px;
 }
 

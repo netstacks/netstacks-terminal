@@ -635,14 +635,17 @@
 
 /* AI Context Menu */
 .backup-ai-context-menu {
+  /* Aligned with the canonical menu surface (see index.css menu-* tokens).
+   * Keeps the 220px min-width and slide-in animation specific to this
+   * surface — the AI menu has longer item labels than the generic one. */
   position: fixed;
-  z-index: 1000;
-  background: var(--color-bg-secondary, #181825);
-  border: 1px solid var(--color-border, #313244);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: var(--menu-z);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
   min-width: 220px;
-  padding: 4px 0;
+  padding: var(--spacing-xs) 0;
   animation: backupMenuFadeIn 0.1s ease;
 }
 

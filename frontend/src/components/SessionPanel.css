@@ -441,14 +441,15 @@
 
 /* Context Menu */
 .session-context-menu {
+  /* Aligned with the canonical menu surface (see index.css menu-* tokens). */
   position: fixed;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  padding: var(--spacing-xs);
-  min-width: 180px;
-  z-index: 1000;
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
+  padding: var(--menu-padding);
+  min-width: var(--menu-min-width);
+  z-index: var(--menu-z);
 }
 
 .context-menu-item {

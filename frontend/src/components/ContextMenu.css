@@ -1,12 +1,15 @@
 .context-menu {
+  /* Canonical menu surface — reads the menu-* tokens from index.css.
+   * Other bespoke menus around the app should match this look by
+   * consuming the same tokens (or just use this class directly). */
   position: fixed;
-  z-index: 3000;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  min-width: 200px;
-  padding: var(--spacing-xs);
+  z-index: var(--menu-z);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
+  min-width: var(--menu-min-width);
+  padding: var(--menu-padding);
   animation: contextMenuFadeIn 0.1s ease-out;
 }
 
@@ -167,14 +170,15 @@
   background: rgba(var(--color-error-rgb), 0.1);
 }
 
-/* Split context menu styling */
+/* Split context menu styling — aligned with canonical menu tokens.
+ * 220px min-width is intentional (split labels are longer). */
 .split-context-menu {
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
   min-width: 220px;
-  padding: var(--spacing-xs);
+  padding: var(--menu-padding);
   animation: contextMenuFadeIn 0.1s ease-out;
 }
 

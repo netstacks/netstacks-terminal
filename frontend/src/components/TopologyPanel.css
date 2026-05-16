@@ -298,37 +298,12 @@
   font-size: 11px;
 }
 
-/* Context Menu */
-.context-menu {
-  position: fixed;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  padding: var(--spacing-xs) 0;
-  min-width: 150px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  z-index: 1000;
-}
-
-.context-menu-item {
-  padding: var(--spacing-xs) var(--spacing-md);
-  cursor: pointer;
-  font-size: var(--font-size-small);
-  color: var(--color-text-primary);
-  transition: background var(--transition-fast);
-}
-
-.context-menu-item:hover {
-  background: var(--color-bg-hover);
-}
-
-.context-menu-item.danger {
-  color: #f44336;
-}
-
-.context-menu-item.danger:hover {
-  background: rgba(244, 67, 54, 0.1);
-}
+/* Dead-code removal: previously this file defined .context-menu /
+ * .context-menu-item rules with smaller radius and narrower width that
+ * globally overrode the shared ContextMenu component, causing
+ * inconsistent visuals across the entire app. TopologyPanel actually
+ * uses .topology-context-menu (see below) — the .context-menu rules
+ * were dead and harmful. */
 
 /* Shared badge */
 .topology-shared-badge {
@@ -596,14 +571,15 @@
 
 /* ── Context Menu ── */
 .topology-context-menu {
+  /* Aligned with the canonical menu surface (see index.css menu-* tokens). */
   position: fixed;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  padding: var(--spacing-xs);
-  min-width: 180px;
-  z-index: 1000;
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
+  padding: var(--menu-padding);
+  min-width: var(--menu-min-width);
+  z-index: var(--menu-z);
 }
 
 .topology-context-menu-item {
