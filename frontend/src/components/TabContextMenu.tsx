@@ -25,6 +25,14 @@ interface TabContextMenuProps {
   onRemoveFromGroup: () => void
   onCloseTab: () => void
   onCloseOtherTabs: () => void
+  /** Close every tab in the window. */
+  onCloseAllTabs?: () => void
+  /** Close tabs to the right of this one (in tab strip order). */
+  onCloseTabsToRight?: () => void
+  /** Reopen the most-recently-closed tab. Disabled when the ring buffer is empty. */
+  onReopenLastClosed?: () => void
+  /** Whether a recently-closed tab is available to reopen. */
+  canReopenClosed?: boolean
   onSessionSettings?: () => void
   /** Split this terminal with a new one to the right (horizontal) */
   onSplitRight?: () => void
@@ -65,6 +73,10 @@ export default function TabContextMenu({
   onRemoveFromGroup,
   onCloseTab,
   onCloseOtherTabs,
+  onCloseAllTabs,
+  onCloseTabsToRight,
+  onReopenLastClosed,
+  canReopenClosed,
   onSessionSettings,
   onSplitRight,
   onSplitDown,
@@ -462,6 +474,52 @@ export default function TabContextMenu({
             </span>
             Close Other Tabs
           </button>
+
+          {onCloseTabsToRight && (
+            <button
+              className="tab-context-menu-item tab-context-menu-item-danger"
+              onClick={() => { onCloseTabsToRight(); onClose(); }}
+            >
+              <span className="tab-context-menu-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
+              </span>
+              Close Tabs to the Right
+            </button>
+          )}
+
+          {onCloseAllTabs && (
+            <button
+              className="tab-context-menu-item tab-context-menu-item-danger"
+              onClick={() => { onCloseAllTabs(); onClose(); }}
+            >
+              <span className="tab-context-menu-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                  <path d="M14 2L2 14" />
+                </svg>
+              </span>
+              Close All Tabs
+            </button>
+          )}
+
+          {onReopenLastClosed && (
+            <button
+              className="tab-context-menu-item"
+              onClick={() => { onReopenLastClosed(); onClose(); }}
+              disabled={!canReopenClosed}
+              title={canReopenClosed ? 'Reopen the most recently closed tab' : 'No closed tabs to reopen'}
+            >
+              <span className="tab-context-menu-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="1 4 1 10 7 10" />
+                  <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
+                </svg>
+              </span>
+              Reopen Closed Tab
+            </button>
+          )}
         </>
       )}
     </div>

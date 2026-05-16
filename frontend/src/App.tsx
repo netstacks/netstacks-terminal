@@ -2811,6 +2811,64 @@ def main(command: str = "show version"):
     })
   }, [])
 
+  // Ring buffer of recently-closed terminal tabs so the user can recover
+  // from an accidental Cmd+W. Capped to MAX_CLOSED_TABS — older entries
+  // drop off the back. Only terminal tabs with a sessionId are recoverable
+  // today (open via handleSSHConnect); other tab types are simply ignored.
+  const MAX_CLOSED_TABS = 10
+  const [closedTabs, setClosedTabs] = useState<Array<{ sessionId: string; title: string; closedAt: number }>>([])
+
+  const recordClosedTab = useCallback((tab: Tab | undefined) => {
+    if (!tab || tab.type !== 'terminal' || !tab.sessionId) return
+    const sid = tab.sessionId
+    setClosedTabs(prev => {
+      // Drop duplicate of the same session — keep only the latest.
+      const filtered = prev.filter(c => c.sessionId !== sid)
+      return [{ sessionId: sid, title: tab.title, closedAt: Date.now() }, ...filtered].slice(0, MAX_CLOSED_TABS)
+    })
+  }, [])
+
+  const closeAllTabs = useCallback(() => {
+    setTabs(prev => {
+      prev.forEach(t => recordClosedTab(t))
+      return []
+    })
+    setActiveTabId(null)
+  }, [recordClosedTab])
+
+  const closeTabsToRight = useCallback((anchorId: string) => {
+    setTabs(prev => {
+      const anchorIdx = prev.findIndex(t => t.id === anchorId)
+      if (anchorIdx < 0) return prev
+      const toClose = prev.slice(anchorIdx + 1)
+      toClose.forEach(t => recordClosedTab(t))
+      const remaining = prev.slice(0, anchorIdx + 1)
+      // If active tab was in the closed set, move focus to the anchor.
+      setActiveTabId(curr => (curr && remaining.some(t => t.id === curr)) ? curr : anchorId)
+      return remaining
+    })
+  }, [recordClosedTab])
+
+  const reopenLastClosedTab = useCallback(async () => {
+    let head: { sessionId: string; title: string } | undefined
+    setClosedTabs(prev => {
+      if (prev.length === 0) return prev
+      head = prev[0]
+      return prev.slice(1)
+    })
+    if (!head) return
+    try {
+      const session = (await listSessions()).find(s => s.id === head!.sessionId)
+      if (session) {
+        handleSSHConnect(session)
+      } else {
+        showToast(`Cannot reopen "${head.title}" — session no longer exists`, 'warning')
+      }
+    } catch {
+      showToast('Failed to reopen closed tab', 'error')
+    }
+  }, [])
+
   const createTabGroup = useCallback((name: string) => {
     const newGroup: TabGroup = {
       id: `group-${Date.now()}`,
@@ -6879,6 +6937,10 @@ def main(command: str = "show version"):
           onRemoveFromGroup={removeFromGroup}
           onCloseTab={() => closeTerminal(contextMenuTabId)}
           onCloseOtherTabs={() => closeOtherTabs(contextMenuTabId)}
+          onCloseTabsToRight={() => closeTabsToRight(contextMenuTabId)}
+          onCloseAllTabs={() => closeAllTabs()}
+          onReopenLastClosed={() => reopenLastClosedTab()}
+          canReopenClosed={closedTabs.length > 0}
           onSessionSettings={() => handleOpenSessionSettings(contextMenuTabId)}
           onOpenDeviceDetails={() => handleOpenDeviceDetailsFromTab(contextMenuTabId)}
           onDiscoverTopology={handleDiscoverTopologyFromGroup}
