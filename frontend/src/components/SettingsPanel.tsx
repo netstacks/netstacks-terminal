@@ -11,6 +11,7 @@ import EnterpriseProfileSelector from './EnterpriseProfileSelector'
 import PromptsSettingsTab from './PromptsSettingsTab'
 import SnippetsSettingsTab from './SnippetsSettingsTab'
 import CustomCommandsSettingsTab from './CustomCommandsSettingsTab'
+import QuickActionsPanel from './QuickActionsPanel'
 import SettingsHighlighting from './SettingsHighlighting'
 import StatusBarSettingsPanel from './StatusBarSettings'
 import SettingsMappedKeys from './SettingsMappedKeys'
@@ -39,7 +40,7 @@ interface Setting {
   options?: { label: string; value: string }[]
 }
 
-export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
+export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'quickCalls' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
 
 interface SettingsPanelProps {
   onSettingChange?: (id: string, value: unknown) => void
@@ -54,6 +55,7 @@ const TAB_SEARCH_INDEX: { tab: SettingsTab; label: string; keywords: string[] }[
   { tab: 'prompts', label: 'Prompts', keywords: ['prompt', 'custom prompt', 'system prompt'] },
   { tab: 'snippets', label: 'Snippets', keywords: ['snippet', 'text expansion', 'shortcut'] },
   { tab: 'customCommands', label: 'Custom Actions', keywords: ['custom command', 'custom action', 'alias', 'macro', 'script'] },
+  { tab: 'quickCalls', label: 'Quick Calls', keywords: ['quick', 'call', 'api', 'request', 'action', 'endpoint'] },
   { tab: 'keyboard', label: 'Keyboard', keywords: ['keyboard', 'shortcut', 'keybinding', 'hotkey', 'key'] },
   { tab: 'mappedKeys', label: 'Mapped Keys', keywords: ['mapped key', 'key mapping', 'remap'] },
   { tab: 'profiles', label: 'Profiles', keywords: ['profile', 'connection', 'ssh', 'telnet'] },
@@ -340,6 +342,14 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
           Custom Actions
         </button>
         )}
+        {hasFeature('local_integrations') && (
+        <button
+          className={`settings-nav-item ${activeTab === 'quickCalls' ? 'active' : ''}${matchingTabs && !matchingTabs.has('quickCalls') ? ' dimmed' : ''}`}
+          onClick={() => setActiveTab('quickCalls')}
+        >
+          Quick Calls
+        </button>
+        )}
         <button
           className={`settings-nav-item ${activeTab === 'keyboard' ? 'active' : ''}${matchingTabs && !matchingTabs.has('keyboard') ? ' dimmed' : ''}`}
           onClick={() => setActiveTab('keyboard')}
@@ -518,6 +528,11 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
 
         {activeTab === 'customCommands' && (
           <CustomCommandsSettingsTab />
+        )}
+
+        {/* Quick Calls tab - v1: no-op onOpenResultTab (tab opening requires App.tsx handler) */}
+        {activeTab === 'quickCalls' && (
+          <QuickActionsPanel onOpenResultTab={() => { /* v1: invoked from Settings, no tab handler */ }} />
         )}
 
         {/* Keyboard settings tab */}

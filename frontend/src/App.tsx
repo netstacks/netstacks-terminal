@@ -19,9 +19,7 @@ import TopologyPanel from './components/TopologyPanel'
 import ChangesPanel from './components/ChangesPanel'
 import AgentsPanel from './components/AgentsPanel'
 import ScriptsPanel from './components/ScriptsPanel'
-import QuickActionsPanel from './components/QuickActionsPanel'
 import ApiResponseTab from './components/ApiResponseTab'
-import type { QuickActionResult } from './types/quickAction'
 import ConfigPanel from './components/config/ConfigPanel'
 import { PluginPanel } from './components/PluginPanel'
 import { IncidentsPanel } from './components/IncidentsPanel'
@@ -1184,7 +1182,6 @@ function AppContent() {
       case 'agents': return 'AI Agents'
       case 'scripts': return 'Scripts'
       case 'stacks': return 'Stacks'
-      case 'quickActions': return 'Quick Actions'
       case 'sftp': return 'SFTP Browser'
       case 'workspaces': return 'Workspaces'
       default: {
@@ -1826,26 +1823,6 @@ update_topology_device(
     setTabs(prev => [...prev, newTab])
     setActiveTabId(newTab.id)
   }, [tabs])
-
-  // Handle opening API response in a tab
-  const handleOpenApiResponseTab = useCallback((title: string, result: QuickActionResult) => {
-    const data = result.raw_body !== undefined && result.raw_body !== null
-      ? JSON.stringify(result.raw_body, null, 2)
-      : JSON.stringify(result, null, 2)
-    const newTabId = `api-response-${Date.now()}`
-    const newTab: Tab = {
-      id: newTabId,
-      type: 'api-response',
-      title: `API: ${title}`,
-      status: 'ready' as DetailStatus,
-      apiResponseTitle: title,
-      apiResponseData: data,
-      apiResponseStatus: result.status_code,
-      apiResponseDurationMs: result.duration_ms,
-    }
-    setTabs(prev => [...prev, newTab])
-    setActiveTabId(newTabId)
-  }, [])
 
   // Handle saving device enrichment to docs
   const handleSaveDeviceToDocs = useCallback(async (device: Device) => {
@@ -5793,15 +5770,6 @@ def main(command: str = "show version"):
               {Icons.scripts}
             </button>
             )}
-            {hasFeature('local_integrations') && (
-              <button
-                className={`activity-bar-item ${activeView === 'quickActions' ? 'active' : ''}`}
-                onClick={() => handleActivityClick('quickActions')}
-                title="Quick Actions" data-testid="nav-quick-actions"
-              >
-                {Icons.quickActions}
-              </button>
-            )}
             {canStacks && (
               <button
                 className={`activity-bar-item ${activeView === 'stacks' ? 'active' : ''}`}
@@ -5933,9 +5901,6 @@ def main(command: str = "show version"):
                 onNewScript={handleNewScript}
                 onAIGenerate={() => setAiScriptGeneratorOpen(true)}
               />
-            )}
-            {activeView === 'quickActions' && (
-              <QuickActionsPanel onOpenResultTab={handleOpenApiResponseTab} />
             )}
             {activeView === 'stacks' && canStacks && (
               <ConfigPanel onOpenTemplateTab={handleOpenConfigTemplateTab} onOpenStackTab={handleOpenConfigStackTab} onOpenInstanceTab={handleOpenInstanceTab} onCreateTemplate={handleCreateConfigTemplate} onCreateStack={handleCreateConfigStack} />
