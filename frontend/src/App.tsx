@@ -1106,6 +1106,20 @@ function AppContent() {
     }
   }
 
+  // When a workspace tab becomes active, auto-pin the sidebar and switch to workspaces view
+  const isWorkspaceTabActive = useMemo(() => {
+    const t = tabs.find(tab => tab.id === activeTabId)
+    return t?.type === 'workspace'
+  }, [tabs, activeTabId])
+
+  useEffect(() => {
+    if (isWorkspaceTabActive) {
+      setSidebarPinned(true)
+      setSidebarOpen(true)
+      setActiveView('workspaces')
+    }
+  }, [isWorkspaceTabActive])
+
   // Auto-collapse sidebar when unpinned and clicking main area
   const handleMainAreaClick = useCallback(() => {
     if (!sidebarPinned && sidebarOpen) {
