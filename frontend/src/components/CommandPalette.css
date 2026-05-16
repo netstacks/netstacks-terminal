@@ -1,6 +1,7 @@
 /* Command Palette - VS Code style */
 
 .command-palette-overlay {
+  /* Palette sits above all modals so Cmd+Shift+P always works on top. */
   position: fixed;
   top: 0;
   left: 0;
@@ -10,7 +11,7 @@
   display: flex;
   justify-content: center;
   padding-top: 15vh;
-  z-index: 1000;
+  z-index: var(--z-palette);
 }
 
 .command-palette {

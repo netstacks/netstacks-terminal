@@ -70,6 +70,28 @@
   --menu-item-padding: var(--spacing-sm) var(--spacing-md);
   --menu-item-radius: 4px;
   --menu-divider-margin: var(--spacing-xs) var(--spacing-sm);
+
+  /* ── Canonical z-index layers ──────────────────────────────────
+   * Modals and the Command Palette must sit ABOVE the toast layer
+   * so toasts can't intercept clicks on confirm/cancel buttons
+   * (bottom-right toast container vs bottom-right dialog footers).
+   *
+   *    --z-toast     900   stacked notifications, dismissible
+   *    --z-popover  1000   tooltips, popovers, hover overlays
+   *    --z-modal    2000   ConfirmDialog, CommandWarningDialog,
+   *                        TracerouteDialog, AboutModal, etc.
+   *    --z-palette  2500   Command Palette sits above all modals
+   *                        so Cmd+Shift+P always works on top
+   *    --menu-z     3000   right-click context menus sit above
+   *                        everything else (right-click within a
+   *                        modal should still get a menu)
+   *
+   * Don't redefine per component. If a new layer is genuinely
+   * needed, add a NEW token here rather than picking a number. */
+  --z-toast: 900;
+  --z-popover: 1000;
+  --z-modal: 2000;
+  --z-palette: 2500;
 }
 
 /* Reset */

@@ -1,10 +1,14 @@
 /* Toast notification styles */
 
 .toast-container {
+  /* Toast container intentionally sits BELOW modals (--z-toast 900 vs
+   * --z-modal 2000) so a stack of toasts in the bottom-right can't
+   * intercept clicks on a ConfirmDialog/CommandWarningDialog action
+   * button. See index.css for the canonical layer table. */
   position: fixed;
   bottom: 20px;
   right: 20px;
-  z-index: 10000;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 8px;

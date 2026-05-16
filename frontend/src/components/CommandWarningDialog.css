@@ -1,6 +1,8 @@
 /* CommandWarningDialog - VS Code style warning modal */
 
 .command-warning-overlay {
+  /* Destructive-command warning sits at the modal layer so a toast
+   * stack can't intercept clicks on Proceed Anyway. See index.css. */
   position: fixed;
   top: 0;
   left: 0;
@@ -10,7 +12,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
   animation: warning-fade-in 0.15s ease;
 }
 
