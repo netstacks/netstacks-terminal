@@ -1048,6 +1048,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         .route("/workspace/git/rebase/abort", post(git_api::git_rebase_abort))
         .route("/workspace/git/generate-commit-message", post(git_api::git_generate_commit_message))
         .route("/workspace/git/clone", post(git_api::git_clone))
+        .route("/workspace/open-file", post(git_api::open_file))
         // Git accounts
         .route("/workspace/git/accounts", get(git_accounts::list_accounts))
         .route("/workspace/git/accounts/create", post(git_accounts::create_account))

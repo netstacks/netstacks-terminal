@@ -234,6 +234,58 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Watch for .netstacks/open-request.json — AI tools write this to open files in editor
+  useEffect(() => {
+    if (config.mode !== 'local') return
+
+    const sep = config.rootPath.includes('/') ? '/' : '\\'
+    const signalPath = `${config.rootPath}${sep}.netstacks${sep}open-request.json`
+
+    const poll = setInterval(async () => {
+      try {
+        const content = await fileOps.readFile(signalPath)
+        const request = JSON.parse(content)
+        if (request.path) {
+          const fullPath = request.path.startsWith('/') || request.path.startsWith('\\') || request.path.includes(':')
+            ? request.path
+            : `${config.rootPath}${sep}${request.path}`
+          const fileName = fullPath.split(sep).pop() || 'file'
+
+          setState(s => {
+            const existing = s.innerTabs.find(t => t.filePath === fullPath)
+            if (existing) {
+              return { ...s, activeInnerTabId: existing.id }
+            }
+            const tab: InnerTab = {
+              id: crypto.randomUUID(),
+              type: 'code-editor',
+              title: fileName,
+              filePath: fullPath,
+              isModified: false,
+            }
+            return {
+              ...s,
+              innerTabs: [...s.innerTabs, tab],
+              activeInnerTabId: tab.id,
+            }
+          })
+
+          // Delete the signal file
+          try {
+            await fileOps.delete(signalPath, false)
+          } catch {
+            /* ignore */
+          }
+        }
+      } catch {
+        // File doesn't exist — normal, no open request pending
+      }
+    }, 1000)
+
+    return () => clearInterval(poll)
+  }, [config.mode, config.rootPath, fileOps])
+
+
   // Auto-save: debounced 1s after any state change
   useEffect(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)

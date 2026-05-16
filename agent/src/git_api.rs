@@ -366,3 +366,36 @@ pub async fn git_clone(
     GitOps::clone_repo(&req.url, &req.destination).await.map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+// ── Open File Signal ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct OpenFileRequest {
+    pub workspace_root: String,
+    pub path: String,
+    pub line: Option<usize>,
+}
+
+pub async fn open_file(
+    Json(req): Json<OpenFileRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let sep = if req.workspace_root.contains('/') { "/" } else { "\\" };
+    let ns_dir = format!("{}{}.netstacks", req.workspace_root, sep);
+    let signal_path = format!("{}{}open-request.json", ns_dir, sep);
+
+    let _ = tokio::fs::create_dir_all(&ns_dir).await;
+
+    let signal = serde_json::json!({
+        "path": req.path,
+        "line": req.line,
+    });
+
+    tokio::fs::write(&signal_path, serde_json::to_string_pretty(&signal).unwrap())
+        .await
+        .map_err(|e| ApiError {
+            error: format!("Failed to write open-request signal: {}", e),
+            code: "IO_ERROR".to_string(),
+        })?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
