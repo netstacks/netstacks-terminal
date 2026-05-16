@@ -1120,7 +1120,9 @@ function AppContent() {
     }
   }
 
-  // When a workspace tab becomes active, auto-pin the sidebar and switch to workspaces view
+  // When a workspace tab becomes active, switch the sidebar to the workspaces
+  // view so the file explorer shows. The sidebar's pinned/open state is left
+  // alone — it honors the user's panel settings like every other tab.
   const isWorkspaceTabActive = useMemo(() => {
     const t = tabs.find(tab => tab.id === activeTabId)
     return t?.type === 'workspace'
@@ -1128,8 +1130,6 @@ function AppContent() {
 
   useEffect(() => {
     if (isWorkspaceTabActive) {
-      setSidebarPinned(true)
-      setSidebarOpen(true)
       setActiveView('workspaces')
     }
   }, [isWorkspaceTabActive])
