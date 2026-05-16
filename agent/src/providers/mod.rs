@@ -56,6 +56,31 @@ pub trait DataProvider: Send + Sync {
     /// Delete a session
     async fn delete_session(&self, id: &str) -> Result<(), ProviderError>;
 
+    /// Bulk delete sessions in a single transaction. Returns (deleted,
+    /// failed) counts. If any single delete fails, the transaction is
+    /// rolled back and the function returns the error — callers that
+    /// want partial-success semantics should fall back to looping
+    /// `delete_session` themselves. Default impl delegates to that loop
+    /// so providers without transactional storage don't have to
+    /// implement this.
+    async fn bulk_delete_sessions(
+        &self,
+        ids: &[String],
+    ) -> Result<(usize, usize), ProviderError> {
+        let mut deleted = 0usize;
+        let mut failed = 0usize;
+        for id in ids {
+            match self.delete_session(id).await {
+                Ok(_) => deleted += 1,
+                Err(e) => {
+                    tracing::warn!("Failed to delete session {}: {:?}", id, e);
+                    failed += 1;
+                }
+            }
+        }
+        Ok((deleted, failed))
+    }
+
     /// Update last connected timestamp
     async fn _touch_session(&self, id: &str) -> Result<(), ProviderError>;
 
@@ -714,7 +739,10 @@ pub trait DataProvider: Send + Sync {
     async fn get_mop_execution_step(&self, id: &str) -> Result<MopExecutionStep, ProviderError>;
 
     /// Create a new MOP execution step
-    async fn create_mop_execution_step(&self, step: NewMopExecutionStep) -> Result<MopExecutionStep, ProviderError>;
+    /// Kept for parity with the bulk insert path; no external callers
+    /// today since bulk_create_mop_execution_steps is the wrapped-in-tx
+    /// route the api.rs handler uses.
+    async fn _create_mop_execution_step(&self, step: NewMopExecutionStep) -> Result<MopExecutionStep, ProviderError>;
 
     /// Update an existing MOP execution step
     async fn update_mop_execution_step(&self, id: &str, update: UpdateMopExecutionStep) -> Result<MopExecutionStep, ProviderError>;

@@ -1715,6 +1715,40 @@ impl DataProvider for LocalDataProvider {
         self.delete_by_id("sessions", "id", id, "Session").await
     }
 
+    /// Atomic bulk delete — wraps the loop in a single sqlx transaction
+    /// so a mid-loop failure rolls back everything instead of leaving
+    /// the table half-deleted. The caller (api.rs::bulk_delete_sessions)
+    /// surfaces (deleted, 0) on success or an error on rollback; partial
+    /// failure is not possible here by design.
+    async fn bulk_delete_sessions(
+        &self,
+        ids: &[String],
+    ) -> Result<(usize, usize), ProviderError> {
+        if ids.is_empty() {
+            return Ok((0, 0));
+        }
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let mut deleted = 0usize;
+        for id in ids {
+            let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ProviderError::Database(e.to_string()))?;
+            if result.rows_affected() > 0 {
+                deleted += 1;
+            }
+            // Rows_affected == 0 just means the id wasn't there — we
+            // treat that as a no-op rather than an error since bulk
+            // delete is idempotent (re-clicking shouldn't fail).
+        }
+
+        tx.commit().await.map_err(|e| ProviderError::Database(e.to_string()))?;
+        Ok((deleted, 0))
+    }
+
     async fn _touch_session(&self, id: &str) -> Result<(), ProviderError> {
         let now = format_datetime(&Utc::now());
 
@@ -4792,20 +4826,32 @@ impl DataProvider for LocalDataProvider {
     }
 
     async fn bulk_delete_topologies(&self, ids: &[String]) -> Result<(i32, i32), ProviderError> {
-        let mut deleted: i32 = 0;
-        let mut failed: i32 = 0;
+        if ids.is_empty() {
+            return Ok((0, 0));
+        }
+        // Atomic: single transaction so a mid-batch failure rolls back
+        // the whole set instead of leaving the topologies table
+        // partially deleted. Matches bulk_delete_sessions semantics.
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
 
+        let mut deleted: i32 = 0;
         for id in ids {
-            match self.delete_topology(id).await {
-                Ok(_) => deleted += 1,
-                Err(e) => {
-                    tracing::warn!("Failed to delete topology {}: {:?}", id, e);
-                    failed += 1;
-                }
+            let result = sqlx::query("DELETE FROM topologies WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ProviderError::Database(e.to_string()))?;
+            if result.rows_affected() > 0 {
+                deleted += 1;
             }
+            // Missing ids are no-ops, not failures — bulk delete is
+            // idempotent so re-clicking after a partial UI refresh
+            // doesn't surface false errors.
         }
 
-        Ok((deleted, failed))
+        tx.commit().await.map_err(|e| ProviderError::Database(e.to_string()))?;
+        Ok((deleted, 0))
     }
 
     async fn get_topology_devices(&self, topology_id: &str) -> Result<Vec<TopologyDevice>, ProviderError> {
@@ -6756,7 +6802,7 @@ impl DataProvider for LocalDataProvider {
         })
     }
 
-    async fn create_mop_execution_step(&self, data: NewMopExecutionStep) -> Result<MopExecutionStep, ProviderError> {
+    async fn _create_mop_execution_step(&self, data: NewMopExecutionStep) -> Result<MopExecutionStep, ProviderError> {
         let step = MopExecutionStep::new(data);
 
         let qa_vars_json = step.quick_action_variables.as_ref().map(|v| v.to_string());
@@ -6851,11 +6897,63 @@ impl DataProvider for LocalDataProvider {
     }
 
     async fn bulk_create_mop_execution_steps(&self, steps_data: Vec<NewMopExecutionStep>) -> Result<Vec<MopExecutionStep>, ProviderError> {
-        let mut steps = Vec::new();
+        if steps_data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Atomic: insert all-or-nothing in a single transaction. The old
+        // implementation called create_mop_execution_step in a loop with
+        // independent connections, so a failure on step 5 of 10 left the
+        // first 4 committed and the MOP execution permanently incomplete.
+        // We inline the INSERT here against the tx connection instead of
+        // refactoring the trait method to take &mut Transaction.
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let mut steps = Vec::with_capacity(steps_data.len());
         for data in steps_data {
-            let step = self.create_mop_execution_step(data).await?;
+            let step = MopExecutionStep::new(data);
+            let qa_vars_json = step.quick_action_variables.as_ref().map(|v| v.to_string());
+            let script_args_json = step.script_args.as_ref().map(|v| v.to_string());
+
+            sqlx::query(
+                "INSERT INTO mop_execution_steps (id, execution_device_id, step_order, step_type, command,
+                                                  description, expected_output, mock_enabled, mock_output,
+                                                  status, output, ai_feedback, started_at, completed_at, duration_ms,
+                                                  execution_source, quick_action_id, quick_action_variables,
+                                                  script_id, script_args, paired_step_id, output_format)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(&step.id)
+            .bind(&step.execution_device_id)
+            .bind(step.step_order)
+            .bind(step.step_type.to_string())
+            .bind(&step.command)
+            .bind(&step.description)
+            .bind(&step.expected_output)
+            .bind(if step.mock_enabled { 1 } else { 0 })
+            .bind(&step.mock_output)
+            .bind(step.status.to_string())
+            .bind(&step.output)
+            .bind(&step.ai_feedback)
+            .bind::<Option<String>>(None)
+            .bind::<Option<String>>(None)
+            .bind(&step.duration_ms)
+            .bind(&step.execution_source)
+            .bind(&step.quick_action_id)
+            .bind(&qa_vars_json)
+            .bind(&step.script_id)
+            .bind(&script_args_json)
+            .bind(&step.paired_step_id)
+            .bind(&step.output_format)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
             steps.push(step);
         }
+
+        tx.commit().await.map_err(|e| ProviderError::Database(e.to_string()))?;
         Ok(steps)
     }
 }

@@ -303,24 +303,15 @@ pub struct BulkDeleteResponse {
     pub failed: usize,
 }
 
-/// Bulk delete multiple sessions
+/// Bulk delete multiple sessions. Wrapped in a single DB transaction
+/// (see LocalProvider::bulk_delete_sessions) so a mid-batch failure
+/// rolls back the whole set rather than leaving the table half-deleted
+/// with an opaque (deleted=4, failed=1) response.
 pub async fn bulk_delete_sessions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkDeleteRequest>,
 ) -> Result<Json<BulkDeleteResponse>, ApiError> {
-    let mut deleted = 0;
-    let mut failed = 0;
-
-    for id in req.ids {
-        match state.provider.delete_session(&id).await {
-            Ok(_) => deleted += 1,
-            Err(e) => {
-                tracing::warn!("Failed to delete session {}: {:?}", id, e);
-                failed += 1;
-            }
-        }
-    }
-
+    let (deleted, failed) = state.provider.bulk_delete_sessions(&req.ids).await?;
     Ok(Json(BulkDeleteResponse { deleted, failed }))
 }
 
