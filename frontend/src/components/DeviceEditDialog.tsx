@@ -4,11 +4,13 @@
 
 import { useState, useEffect } from 'react'
 import type { Device, DeviceType, DeviceStatus } from '../types/topology'
+import { useSubmitting } from '../hooks/useSubmitting'
 import './DeviceEditDialog.css'
 
 interface DeviceEditDialogProps {
   device: Device | null
-  onSave: (updates: Partial<Device>) => void
+  /** Sync or async — the dialog tracks pending state if it returns a Promise. */
+  onSave: (updates: Partial<Device>) => void | Promise<void>
   onClose: () => void
 }
 
@@ -55,16 +57,20 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
     }
   }, [device])
 
+  const { submitting, run } = useSubmitting()
+
   if (!device) return null
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    onSave({
-      name,
-      type,
-      status,
-      site: site || undefined,
-      role: role || undefined,
+    run(async () => {
+      await Promise.resolve(onSave({
+        name,
+        type,
+        status,
+        site: site || undefined,
+        role: role || undefined,
+      }))
     })
   }
 
@@ -143,11 +149,11 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
           </div>
 
           <div className="device-edit-dialog-actions">
-            <button type="button" className="device-edit-btn-cancel" onClick={onClose}>
+            <button type="button" className="device-edit-btn-cancel" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="submit" className="device-edit-btn-save">
-              Save Changes
+            <button type="submit" className="device-edit-btn-save" disabled={submitting}>
+              {submitting ? 'Saving…' : 'Save Changes'}
             </button>
           </div>
         </form>

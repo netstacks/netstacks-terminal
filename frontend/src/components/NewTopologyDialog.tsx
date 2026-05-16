@@ -2,13 +2,15 @@ import { useState, useEffect } from 'react';
 import { listSessions, type Session } from '../api/sessions';
 import { listEnterpriseDevices, type DeviceSummary } from '../api/enterpriseDevices';
 import { getCurrentMode } from '../api/client';
+import { useSubmitting } from '../hooks/useSubmitting';
 import './NewTopologyDialog.css';
 import AITabInput from './AITabInput';
 
 interface NewTopologyDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onStartDiscovery: (name: string, sessions: { id: string; name: string; host?: string; profileId?: string; cliFlavor?: string; credentialId?: string; snmpCredentialId?: string }[]) => void;
+  /** Sync or async — the dialog tracks pending state if it returns a Promise. */
+  onStartDiscovery: (name: string, sessions: { id: string; name: string; host?: string; profileId?: string; cliFlavor?: string; credentialId?: string; snmpCredentialId?: string }[]) => void | Promise<void>;
   connectedSessionIds: string[];
 }
 
@@ -53,6 +55,8 @@ export default function NewTopologyDialog({
     setSearchQuery('');
   }, [isOpen, connectedSessionIds, isEnterprise]);
 
+  const { submitting, run } = useSubmitting();
+
   const handleStartDiscovery = () => {
     if (!name.trim()) {
       setError('Please enter a name');
@@ -63,6 +67,12 @@ export default function NewTopologyDialog({
       return;
     }
 
+    run(async () => {
+      await runStartDiscovery();
+    });
+  };
+
+  const runStartDiscovery = async () => {
     if (isEnterprise) {
       const selected = enterpriseDevices
         .filter(d => selectedIds.includes(d.id))
@@ -73,7 +83,7 @@ export default function NewTopologyDialog({
           credentialId: d.default_credential_id || undefined,
           snmpCredentialId: d.snmp_credential_id || undefined,
         }));
-      onStartDiscovery(name.trim(), selected);
+      await Promise.resolve(onStartDiscovery(name.trim(), selected));
     } else {
       const selected = sessions
         .filter(s => selectedIds.includes(s.id))
@@ -84,7 +94,7 @@ export default function NewTopologyDialog({
           profileId: s.profile_id,
           cliFlavor: s.cli_flavor,
         }));
-      onStartDiscovery(name.trim(), selected);
+      await Promise.resolve(onStartDiscovery(name.trim(), selected));
     }
     onClose();
   };
@@ -223,13 +233,13 @@ export default function NewTopologyDialog({
         </div>
 
         <div className="dialog-footer">
-          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary" onClick={onClose} disabled={submitting}>Cancel</button>
           <button
             className="btn-primary"
             onClick={handleStartDiscovery}
-            disabled={!name.trim() || selectedIds.length === 0}
+            disabled={submitting || !name.trim() || selectedIds.length === 0}
           >
-            Discover Topology
+            {submitting ? 'Starting…' : 'Discover Topology'}
           </button>
         </div>
       </div>

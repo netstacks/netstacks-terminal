@@ -13,6 +13,7 @@ import {
   API_KEY_LABELS,
 } from '../api/vault'
 import { confirmDialog } from './ConfirmDialog'
+import { useSubmitting } from '../hooks/useSubmitting'
 import './VaultSettings.css'
 
 export default function VaultSettings() {
@@ -61,6 +62,11 @@ export default function VaultSettings() {
     }
   }
 
+  // Single submitting flag covering set/unlock/lock and API-key save/delete.
+  // The vault is small enough that multiple concurrent submits don't add
+  // value — disabling the whole form during any one is fine.
+  const { submitting, run } = useSubmitting()
+
   const handleSetMasterPassword = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -76,15 +82,17 @@ export default function VaultSettings() {
       return
     }
 
-    try {
-      await setMasterPassword(newPassword)
-      setSuccess('Master password set successfully')
-      setNewPassword('')
-      setConfirmPassword('')
-      await fetchStatus()
-    } catch (err) {
-      setError('Failed to set master password')
-    }
+    await run(async () => {
+      try {
+        await setMasterPassword(newPassword)
+        setSuccess('Master password set successfully')
+        setNewPassword('')
+        setConfirmPassword('')
+        await fetchStatus()
+      } catch (err) {
+        setError('Failed to set master password')
+      }
+    })
   }
 
   const handleUnlock = async (e: React.FormEvent) => {
@@ -97,27 +105,31 @@ export default function VaultSettings() {
       return
     }
 
-    try {
-      await unlockVault(unlockPassword)
-      setSuccess('Vault unlocked successfully')
-      setUnlockPassword('')
-      await fetchStatus()
-    } catch (err) {
-      setError('Incorrect password')
-    }
+    await run(async () => {
+      try {
+        await unlockVault(unlockPassword)
+        setSuccess('Vault unlocked successfully')
+        setUnlockPassword('')
+        await fetchStatus()
+      } catch (err) {
+        setError('Incorrect password')
+      }
+    })
   }
 
   const handleLockVault = async () => {
     setError(null)
     setSuccess(null)
 
-    try {
-      await lockVault()
-      setSuccess('Vault locked successfully')
-      await fetchStatus()
-    } catch (err) {
-      setError('Failed to lock vault')
-    }
+    await run(async () => {
+      try {
+        await lockVault()
+        setSuccess('Vault locked successfully')
+        await fetchStatus()
+      } catch (err) {
+        setError('Failed to lock vault')
+      }
+    })
   }
 
   // Touch ID
@@ -225,15 +237,17 @@ export default function VaultSettings() {
       return
     }
 
-    try {
-      await storeApiKey(keyType, editingValue)
-      setSuccess(`${API_KEY_LABELS[keyType]} API key saved successfully`)
-      setEditingKey(null)
-      setEditingValue('')
-      await fetchAllApiKeys()
-    } catch (err) {
-      setError(`Failed to save ${API_KEY_LABELS[keyType]} API key`)
-    }
+    await run(async () => {
+      try {
+        await storeApiKey(keyType, editingValue)
+        setSuccess(`${API_KEY_LABELS[keyType]} API key saved successfully`)
+        setEditingKey(null)
+        setEditingValue('')
+        await fetchAllApiKeys()
+      } catch (err) {
+        setError(`Failed to save ${API_KEY_LABELS[keyType]} API key`)
+      }
+    })
   }
 
   const handleDeleteApiKey = async (keyType: ApiKeyType) => {
@@ -248,13 +262,15 @@ export default function VaultSettings() {
     setError(null)
     setSuccess(null)
 
-    try {
-      await deleteApiKey(keyType)
-      setSuccess(`${API_KEY_LABELS[keyType]} API key deleted successfully`)
-      await fetchAllApiKeys()
-    } catch (err) {
-      setError(`Failed to delete ${API_KEY_LABELS[keyType]} API key`)
-    }
+    await run(async () => {
+      try {
+        await deleteApiKey(keyType)
+        setSuccess(`${API_KEY_LABELS[keyType]} API key deleted successfully`)
+        await fetchAllApiKeys()
+      } catch (err) {
+        setError(`Failed to delete ${API_KEY_LABELS[keyType]} API key`)
+      }
+    })
   }
 
   if (loading) {
@@ -322,8 +338,8 @@ export default function VaultSettings() {
               autoComplete="new-password"
             />
           </div>
-          <button type="submit" className="btn-primary">
-            Set Master Password
+          <button type="submit" className="btn-primary" disabled={submitting}>
+            {submitting ? 'Setting…' : 'Set Master Password'}
           </button>
         </form>
       )}
@@ -346,8 +362,8 @@ export default function VaultSettings() {
               autoFocus
             />
           </div>
-          <button type="submit" className="btn-primary">
-            Unlock Vault
+          <button type="submit" className="btn-primary" disabled={submitting}>
+            {submitting ? 'Unlocking…' : 'Unlock Vault'}
           </button>
         </form>
       )}
@@ -362,8 +378,8 @@ export default function VaultSettings() {
             </p>
           </div>
 
-          <button className="btn-lock" onClick={handleLockVault}>
-            Lock Vault
+          <button className="btn-lock" onClick={handleLockVault} disabled={submitting}>
+            {submitting ? 'Locking…' : 'Lock Vault'}
           </button>
 
           {/* Touch ID — macOS only */}
@@ -462,12 +478,14 @@ export default function VaultSettings() {
                           <button
                             className="btn-save"
                             onClick={() => handleSaveApiKey(keyType)}
+                            disabled={submitting}
                           >
-                            Save
+                            {submitting ? 'Saving…' : 'Save'}
                           </button>
                           <button
                             className="btn-cancel"
                             onClick={handleCancelEdit}
+                            disabled={submitting}
                           >
                             Cancel
                           </button>
@@ -480,12 +498,14 @@ export default function VaultSettings() {
                             <button
                               className="btn-update"
                               onClick={() => handleStartEdit(keyType)}
+                              disabled={submitting}
                             >
                               Update
                             </button>
                             <button
                               className="btn-delete"
                               onClick={() => handleDeleteApiKey(keyType)}
+                              disabled={submitting}
                             >
                               Delete
                             </button>
