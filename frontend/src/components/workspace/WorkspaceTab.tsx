@@ -255,58 +255,65 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
             </>
           ) : (
             <>
-              {!state.terminalPanelCollapsed || showOutput ? (
-                <div
-                  className="workspace-terminal-panel"
-                  style={{ height: editorCollapsed ? '100%' : state.terminalPanelHeight, flex: editorCollapsed ? 1 : undefined }}
-                >
-                  {showOutput && (
-                    <div className="workspace-zone3-tabs">
-                      <button
-                        className={`workspace-zone3-tab ${zone3Mode === 'terminal' ? 'active' : ''}`}
-                        onClick={() => setZone3Mode('terminal')}
-                      >
-                        Terminal
-                      </button>
-                      <button
-                        className={`workspace-zone3-tab ${zone3Mode === 'output' ? 'active' : ''}`}
-                        onClick={() => setZone3Mode('output')}
-                      >
-                        Output
-                      </button>
-                      <div style={{ flex: 1 }} />
-                      <button
-                        className="workspace-terminal-action-btn"
-                        onClick={() => { workspace.toggleTerminalPanel(); if (editorCollapsed) setEditorCollapsed(false) }}
-                        title="Collapse terminal"
-                      >
-                        ▼
-                      </button>
-                    </div>
-                  )}
-
-                  <div style={{ display: zone3Mode === 'terminal' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-                    <WorkspaceTerminalPanel
-                      ref={terminalPanelRef}
-                      terminalTabs={state.terminalTabs}
-                      activeTerminalTabId={state.activeTerminalTabId}
-                      collapsed={false}
-                      workspaceRoot={state.rootPath}
-                      onSetActiveTab={workspace.setActiveTerminalTab}
-                      onCloseTab={workspace.closeTerminalTab}
-                      onAddTab={workspace.addTerminalTab}
-                      onToggleCollapse={() => { workspace.toggleTerminalPanel(); if (editorCollapsed) setEditorCollapsed(false) }}
-                    />
+              {/* Terminal panel is ALWAYS mounted — collapse just hides it via CSS.
+                  Unmounting would tear down xterm + kill the underlying PTY child
+                  (Claude Code / Aider / etc.), losing the AI session. */}
+              <div
+                className="workspace-terminal-panel"
+                style={
+                  state.terminalPanelCollapsed && !showOutput
+                    ? { display: 'none' }
+                    : { height: editorCollapsed ? '100%' : state.terminalPanelHeight, flex: editorCollapsed ? 1 : undefined }
+                }
+              >
+                {showOutput && (
+                  <div className="workspace-zone3-tabs">
+                    <button
+                      className={`workspace-zone3-tab ${zone3Mode === 'terminal' ? 'active' : ''}`}
+                      onClick={() => setZone3Mode('terminal')}
+                    >
+                      Terminal
+                    </button>
+                    <button
+                      className={`workspace-zone3-tab ${zone3Mode === 'output' ? 'active' : ''}`}
+                      onClick={() => setZone3Mode('output')}
+                    >
+                      Output
+                    </button>
+                    <div style={{ flex: 1 }} />
+                    <button
+                      className="workspace-terminal-action-btn"
+                      onClick={() => { workspace.toggleTerminalPanel(); if (editorCollapsed) setEditorCollapsed(false) }}
+                      title="Collapse terminal"
+                    >
+                      ▼
+                    </button>
                   </div>
+                )}
 
-                  {showOutput && zone3Mode === 'output' && (
-                    <WorkspaceOutputPanel
-                      filePath={outputFilePath}
-                      onClose={() => { setShowOutput(false); setZone3Mode('terminal') }}
-                    />
-                  )}
+                <div style={{ display: zone3Mode === 'terminal' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+                  <WorkspaceTerminalPanel
+                    ref={terminalPanelRef}
+                    terminalTabs={state.terminalTabs}
+                    activeTerminalTabId={state.activeTerminalTabId}
+                    collapsed={false}
+                    workspaceRoot={state.rootPath}
+                    onSetActiveTab={workspace.setActiveTerminalTab}
+                    onCloseTab={workspace.closeTerminalTab}
+                    onAddTab={workspace.addTerminalTab}
+                    onToggleCollapse={() => { workspace.toggleTerminalPanel(); if (editorCollapsed) setEditorCollapsed(false) }}
+                  />
                 </div>
-              ) : (
+
+                {showOutput && zone3Mode === 'output' && (
+                  <WorkspaceOutputPanel
+                    filePath={outputFilePath}
+                    onClose={() => { setShowOutput(false); setZone3Mode('terminal') }}
+                  />
+                )}
+              </div>
+
+              {state.terminalPanelCollapsed && !showOutput && (
                 <div className="workspace-zone-collapsed-bar" onClick={() => workspace.toggleTerminalPanel()}>
                   <span>Terminal</span>
                   <span className="workspace-zone-collapsed-expand">▲</span>
