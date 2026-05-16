@@ -293,6 +293,61 @@ export async function deleteConnection(topologyId: string, connectionId: string)
 }
 
 /**
+ * Counterpart to TopologyTabEditor's exportToJson — parse a previously-
+ * exported topology JSON blob and create a fresh topology with new IDs.
+ *
+ * Accepts both the wrapped export shape `{ version, exportedAt,
+ * topology: {...} }` and a raw Topology object for flexibility. Throws
+ * with a user-readable message on bad shape; the caller surfaces it via
+ * showToast.
+ */
+export async function importTopologyFromJson(
+  jsonText: string,
+  options?: { nameOverride?: string },
+): Promise<Topology> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (err) {
+    throw new Error(`Not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Unwrap the export envelope if present.
+  const candidate = (parsed && typeof parsed === 'object' && 'topology' in parsed)
+    ? (parsed as { topology: unknown }).topology
+    : parsed;
+
+  if (!candidate || typeof candidate !== 'object') {
+    throw new Error('Expected an object at the top level of the topology JSON');
+  }
+
+  const topo = candidate as Partial<Topology>;
+  if (typeof topo.name !== 'string' || !topo.name.trim()) {
+    throw new Error('Topology JSON is missing a `name` string');
+  }
+  if (!Array.isArray(topo.devices)) {
+    throw new Error('Topology JSON is missing a `devices` array');
+  }
+  if (!Array.isArray(topo.connections)) {
+    throw new Error('Topology JSON is missing a `connections` array');
+  }
+
+  const imported: Topology = {
+    id: 'pending-import',
+    name: options?.nameOverride?.trim() || topo.name,
+    source: topo.source ?? 'discovery',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    devices: topo.devices as Topology['devices'],
+    connections: topo.connections as Topology['connections'],
+  };
+
+  // saveTemporaryTopology already creates + adds devices + creates
+  // connections with fresh IDs — exactly what we need for import.
+  return saveTemporaryTopology(imported);
+}
+
+/**
  * Save a temporary topology to the database
  * Creates the topology, adds all devices, and creates all connections
  */
