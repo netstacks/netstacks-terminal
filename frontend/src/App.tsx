@@ -97,7 +97,7 @@ import ConnectionDetailsOverlay from './components/ConnectionDetailsOverlay'
 // SessionQuickLook removed - double-click now directly opens terminal
 import ContextMenu, { getDeviceMenuItems, type MenuItem } from './components/ContextMenu'
 import { ToastContainer, showToast } from './components/Toast'
-import { ConfirmDialogHost } from './components/ConfirmDialog'
+import { ConfirmDialogHost, confirmDialog } from './components/ConfirmDialog'
 import UpdateChecker from './components/UpdateChecker'
 import type { Connection } from './types/topology'
 import { loadPanelSettings, PANEL_SETTINGS_CHANGED, type PanelSettings } from './api/panelSettings'
@@ -2433,20 +2433,25 @@ def main(command: str = "show version"):
     setTabs(prev => prev.map(t => t.id === tabId ? { ...t, ...fields } : t))
   }, [])
 
-  // Close a tab (terminal or document)
-  const closeTab = useCallback((id: string, _force = false) => {
+  // Close a tab (terminal or document). `force` skips the unsaved-changes
+  // prompt — set by the confirm-resolved branch below when the user opts to
+  // close anyway.
+  const closeTab = useCallback((id: string, force = false) => {
     const tab = tabs.find(t => t.id === id)
     if (!tab) return
 
     // Warn about unsaved SFTP editor changes
-    if (tab.type === 'sftp-editor' && tab.sftpDirty) {
-      if (!window.confirm(`${tab.title} has unsaved changes. Close anyway?`)) {
-        return
-      }
+    if (!force && tab.type === 'sftp-editor' && tab.sftpDirty) {
+      confirmDialog({
+        title: 'Unsaved changes',
+        body: `${tab.title} has unsaved changes. Close anyway?`,
+        confirmLabel: 'Close without saving',
+        destructive: true,
+      }).then((ok) => {
+        if (ok) closeTab(id, true)
+      })
+      return
     }
-
-    // Note: Skipping unsaved changes warning since confirm dialogs don't work in Tauri
-    // Consider implementing a custom modal confirmation in the future
 
     setTabs(prev => {
       const filtered = prev.filter(t => t.id !== id)
@@ -2526,7 +2531,7 @@ def main(command: str = "show version"):
       .filter((t): t is Tab => t !== undefined && t.type === 'terminal' && t.status === 'connected')
 
     if (connectedTabs.length === 0) {
-      alert('No connected terminals in split view.\n\nMake sure your sessions are connected (green dot in tab).')
+      showToast('No connected terminals in split view. Make sure your sessions are connected (green dot in tab).', 'warning')
       closeSplitContextMenu()
       return
     }
@@ -3051,7 +3056,7 @@ def main(command: str = "show version"):
       }));
 
     if (groupTabs.length === 0) {
-      window.alert('No saveable tabs are open.');
+      showToast('No saveable tabs are open.', 'warning');
       return;
     }
 
@@ -3063,7 +3068,7 @@ def main(command: str = "show version"):
           bumpGroupsRefresh();
         } catch (err) {
           console.error('Failed to save group:', err);
-          window.alert('Failed to save group. See console for details.');
+          showToast(`Failed to save group: ${err instanceof Error ? err.message : 'unknown error'}`, 'error');
         }
       },
     })
@@ -3190,7 +3195,7 @@ def main(command: str = "show version"):
       );
 
       if (groupTabs.length === 0) {
-        alert('No connected terminals in this group.\n\nMake sure your sessions are connected (green dot in tab).');
+        showToast('No connected terminals in this group. Make sure your sessions are connected (green dot in tab).', 'warning');
         return;
       }
 
@@ -3772,7 +3777,7 @@ def main(command: str = "show version"):
     )
 
     if (groupTabs.length === 0) {
-      alert('No connected terminals in this group.\n\nMake sure your sessions are connected (green dot in tab).')
+      showToast('No connected terminals in this group. Make sure your sessions are connected (green dot in tab).', 'warning')
       return
     }
 
@@ -4164,7 +4169,7 @@ def main(command: str = "show version"):
       setDiscoveryModalOpen(false)
     } catch (err) {
       console.error('Failed to save topology:', err)
-      alert(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      showToast(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     }
   }, [discoveryGroupName, discoveryDevices, discoveryTargetTopologyId, tabs, chipSessionsById, deviceEnrichments, setDeviceEnrichment])
 
@@ -7195,7 +7200,7 @@ def main(command: str = "show version"):
             )
 
             if (!matchedSession) {
-              alert(`"${device.name}" is not a managed device.\n\nNo saved session found matching this device by IP or name. Add it as a session first, then try again.`)
+              showToast(`"${device.name}" is not a managed device. No saved session found matching this device by IP or name. Add it as a session first, then try again.`, 'warning')
               return
             }
 

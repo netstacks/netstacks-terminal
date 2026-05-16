@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { sftpDownload, sftpUpload } from '../api/sftp';
+import { confirmDialog } from './ConfirmDialog';
 import './SftpEditorTab.css';
 
 interface SftpEditorTabProps {
@@ -97,7 +98,12 @@ export default function SftpEditorTab({
   // Reload file
   const handleReload = useCallback(async () => {
     if (isDirty) {
-      const confirmed = window.confirm('Discard unsaved changes?');
+      const confirmed = await confirmDialog({
+        title: 'Discard unsaved changes?',
+        body: 'Reloading will overwrite your local edits with the remote file.',
+        confirmLabel: 'Discard and reload',
+        destructive: true,
+      });
       if (!confirmed) return;
     }
     await loadFile();

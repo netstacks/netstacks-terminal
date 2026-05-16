@@ -6,6 +6,7 @@ import {
   type AiEngineerProfile,
   type UpdateAiEngineerProfile,
 } from '../api/aiEngineerProfile'
+import { confirmDialog } from './ConfirmDialog'
 
 const BEHAVIOR_MODES = [
   { value: 'assistant', label: 'Assistant — answers questions, follows instructions' },
@@ -127,7 +128,13 @@ export default function AIEngineerSettingsTab() {
   }
 
   const handleReset = async () => {
-    if (!confirm('Reset your AI engineer profile? This will clear all settings and restart onboarding next time you open AI chat.')) return
+    const ok = await confirmDialog({
+      title: 'Reset AI engineer profile?',
+      body: 'This clears all settings and restarts onboarding the next time you open AI chat.',
+      confirmLabel: 'Reset',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await resetAiProfile()
       setProfile(null)

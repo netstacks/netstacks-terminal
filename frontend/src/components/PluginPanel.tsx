@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getClient } from '../api/client';
+import { confirmDialog } from './ConfirmDialog';
+import { showToast } from './Toast';
 import type { PluginColumnDef, PluginActionDef } from '../types/capabilities';
 import './PluginPanel.css';
 
@@ -102,11 +104,15 @@ export const PluginPanel: React.FC<PluginPanelProps> = ({
 
   /** Execute an action */
   const executeAction = async (action: PluginActionDef, row?: RowData) => {
-    // Confirmation check
+    // Confirmation check (plugin-supplied prompt text)
     if (action.confirm) {
-      if (!window.confirm(action.confirm)) {
-        return;
-      }
+      const ok = await confirmDialog({
+        title: action.label || 'Confirm action',
+        body: action.confirm,
+        confirmLabel: action.label || 'Confirm',
+        destructive: (action.method || 'POST').toUpperCase() === 'DELETE',
+      });
+      if (!ok) return;
     }
 
     // Build endpoint (replace {id} if row action)
@@ -142,7 +148,7 @@ export const PluginPanel: React.FC<PluginPanelProps> = ({
       await fetchData();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Action failed';
-      alert(`Action failed: ${message}`);
+      showToast(`Action failed: ${message}`, 'error');
     } finally {
       setActionLoading(null);
     }

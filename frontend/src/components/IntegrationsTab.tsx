@@ -10,6 +10,7 @@ import NetBoxImportDialog from './NetBoxImportDialog';
 import SmtpSettingsSection from './SmtpSettingsSection';
 import SecureCRTImportDialog from './SecureCRTImportDialog';
 import { downloadFile } from '../lib/formatters';
+import { showToast } from './Toast';
 import './IntegrationsTab.css';
 
 // Icons
@@ -178,10 +179,10 @@ export default function IntegrationsTab() {
         const formData = new FormData();
         formData.append('file', file);
         const { data: result } = await getClient().http.post('/sessions/import', formData);
-        alert(`Imported ${result.sessions_created || result.imported || 0} sessions successfully.`);
+        showToast(`Imported ${result.sessions_created || result.imported || 0} sessions successfully.`, 'success');
       } catch (err) {
         console.error('Import error:', err);
-        alert('Failed to import sessions. Please check the file format.');
+        showToast('Failed to import sessions. Please check the file format.', 'error');
       }
     };
     input.click();
@@ -193,7 +194,7 @@ export default function IntegrationsTab() {
       downloadFile(JSON.stringify(data, null, 2), `netstacks-sessions-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
     } catch (err) {
       console.error('Export error:', err);
-      alert('Failed to export sessions.');
+      showToast('Failed to export sessions.', 'error');
     }
   };
 

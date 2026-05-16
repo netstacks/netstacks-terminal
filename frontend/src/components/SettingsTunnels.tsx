@@ -11,6 +11,7 @@ import type { CredentialProfile } from '../api/profiles'
 import { listJumpHosts, listSessions } from '../api/sessions'
 import type { JumpHost, Session } from '../api/sessions'
 import { showToast } from './Toast'
+import { confirmDialog } from './ConfirmDialog'
 import './SettingsTunnels.css'
 
 type ForwardType = 'local' | 'remote' | 'dynamic'
@@ -170,7 +171,13 @@ export default function SettingsTunnels() {
   }
 
   async function handleDelete(tunnel: TunnelWithState) {
-    if (!confirm(`Delete tunnel "${tunnel.name}"?`)) return
+    const ok = await confirmDialog({
+      title: 'Delete tunnel?',
+      body: <>Delete tunnel <strong>{tunnel.name}</strong>?</>,
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await deleteTunnel(tunnel.id)
       showToast('Tunnel deleted', 'success')

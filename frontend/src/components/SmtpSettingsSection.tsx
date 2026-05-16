@@ -7,6 +7,7 @@ import {
   type SaveSmtpConfigRequest,
   type TestSmtpRequest,
 } from '../api/smtp';
+import { confirmDialog } from './ConfirmDialog';
 import './SmtpSettingsSection.css';
 
 // Icons
@@ -205,9 +206,13 @@ export default function SmtpSettingsSection({ onSaved }: SmtpSettingsSectionProp
 
   // Delete configuration
   const handleDelete = async () => {
-    if (!confirm('Are you sure you want to delete the SMTP configuration?')) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: 'Delete SMTP configuration?',
+      body: 'Email notifications will stop until a new SMTP config is added.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
 
     setDeleting(true);
     setSaveError(null);

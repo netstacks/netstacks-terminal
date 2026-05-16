@@ -12,6 +12,7 @@ import {
   type ApiKeyType,
   API_KEY_LABELS,
 } from '../api/vault'
+import { confirmDialog } from './ConfirmDialog'
 import './VaultSettings.css'
 
 export default function VaultSettings() {
@@ -236,9 +237,13 @@ export default function VaultSettings() {
   }
 
   const handleDeleteApiKey = async (keyType: ApiKeyType) => {
-    if (!window.confirm(`Delete ${API_KEY_LABELS[keyType]} API key?`)) {
-      return
-    }
+    const ok = await confirmDialog({
+      title: 'Delete API key?',
+      body: `Delete the stored ${API_KEY_LABELS[keyType]} API key?`,
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
 
     setError(null)
     setSuccess(null)

@@ -7,6 +7,8 @@ import {
 } from '../api/snippets';
 import './SnippetsSettingsTab.css';
 import AITabInput from './AITabInput';
+import { confirmDialog } from './ConfirmDialog';
+import { showToast } from './Toast';
 
 export default function SnippetsSettingsTab() {
   const [snippets, setSnippets] = useState<GlobalSnippet[]>([]);
@@ -48,19 +50,27 @@ export default function SnippetsSettingsTab() {
       setNewCommand('');
     } catch (err) {
       console.error('Failed to create snippet:', err);
-      alert('Failed to create snippet');
+      showToast('Failed to create snippet', 'error');
     }
   }, [newName, newCommand]);
 
   const handleDelete = useCallback(async (id: string) => {
+    const snippet = snippets.find(s => s.id === id);
+    const ok = await confirmDialog({
+      title: 'Delete snippet?',
+      body: snippet ? <>Delete snippet <strong>{snippet.name}</strong>?</> : 'Delete this snippet?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteGlobalSnippet(id);
       setSnippets(prev => prev.filter(s => s.id !== id));
     } catch (err) {
       console.error('Failed to delete snippet:', err);
-      alert('Failed to delete snippet');
+      showToast('Failed to delete snippet', 'error');
     }
-  }, []);
+  }, [snippets]);
 
   return (
     <div className="snippets-settings">

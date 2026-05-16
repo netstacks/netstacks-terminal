@@ -38,6 +38,7 @@ import { listMcpServers } from '../api/mcp';
 import { save as showSaveDialog } from '@tauri-apps/plugin-dialog';
 import { writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import AnnotationPropertiesPanel from './topology/AnnotationPropertiesPanel';
+import { showToast } from './Toast';
 import './TopologyTabEditor.css';
 
 /**
@@ -1086,7 +1087,7 @@ export default function TopologyTabEditor({
       onSaveTopology?.(savedTopology);
     } catch (err) {
       console.error('Failed to save topology:', err);
-      alert(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showToast(`Failed to save topology: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -1099,11 +1100,10 @@ export default function TopologyTabEditor({
     setSavingToDocs(true);
     try {
       await saveTopologyToDocs(topologyId, annotations);
-      // Show success feedback
-      alert(`Topology "${topology.name}" exported to Docs (Backups)`);
+      showToast(`Topology "${topology.name}" exported to Docs (Backups)`, 'success');
     } catch (err) {
       console.error('Failed to save topology to Docs:', err);
-      alert(`Failed to save to Docs: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showToast(`Failed to save to Docs: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     } finally {
       setSavingToDocs(false);
     }

@@ -30,6 +30,7 @@ import BroadcastCommandDialog from './BroadcastCommandDialog';
 import GroupsPanel from './GroupsPanel';
 import { useSessionSelection, SessionSelectionProvider } from '../hooks/useSessionSelection';
 import { downloadFile } from '../lib/formatters';
+import { showToast } from './Toast';
 
 // Drag and drop types
 type DragItemType = 'session' | 'folder';
@@ -604,9 +605,10 @@ function SessionPanelContent({
       const allWarnings = [...csvWarnings, ...result.warnings];
       const message = `Imported ${result.sessions_created} session(s) and ${result.folders_created} folder(s).`;
       if (allWarnings.length > 0) {
-        alert(`${message}\n\nWarnings:\n${allWarnings.join('\n')}`);
+        showToast(`${message} ${allWarnings.length} warning(s) — see console.`, 'warning');
+        console.warn('[SessionPanel] Import warnings:', allWarnings);
       } else {
-        alert(message);
+        showToast(message, 'success');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to import sessions');

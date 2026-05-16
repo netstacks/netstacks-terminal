@@ -20,6 +20,7 @@ import { CLI_FLAVOR_OPTIONS, type CliFlavor } from '../api/sessions';
 import { listAccessibleCredentials } from '../api/enterpriseCredentials';
 import type { AccessibleCredential } from '../types/enterpriseCredential';
 import { listEnterpriseDevices, type DeviceSummary } from '../api/enterpriseDevices';
+import { confirmDialog } from './ConfirmDialog';
 
 // Icons (reuse from SessionPanel patterns)
 const Icons = {
@@ -369,7 +370,13 @@ export default function EnterpriseSessionPanel({
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    if (!confirm('Delete this session?')) return;
+    const ok = await confirmDialog({
+      title: 'Delete session?',
+      body: 'This removes the session definition. Active connections are unaffected.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteSessionDefinition(sessionId);
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
@@ -456,7 +463,13 @@ export default function EnterpriseSessionPanel({
   };
 
   const handleDeleteFolder = async (folderId: string) => {
-    if (!confirm('Delete this folder? Sessions will be moved to root.')) return;
+    const ok = await confirmDialog({
+      title: 'Delete folder?',
+      body: 'Sessions inside this folder will be moved to root.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteUserFolder(folderId);
       setFolders((prev) => prev.filter((f) => f.id !== folderId));

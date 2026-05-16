@@ -13,6 +13,7 @@ import ContextMenu from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { useContextMenu } from '../hooks/useContextMenu';
 import AITabInput from './AITabInput';
+import { confirmDialog } from './ConfirmDialog';
 
 interface ScheduledTasksPanelProps {
   /** Callback when user wants to view execution history for a task */
@@ -59,7 +60,13 @@ export function ScheduledTasksPanel({ onViewHistory }: ScheduledTasksPanelProps)
 
   // Delete task
   const handleDelete = async (taskId: string) => {
-    if (!confirm('Delete this scheduled task?')) return;
+    const ok = await confirmDialog({
+      title: 'Delete scheduled task?',
+      body: 'Future runs of this task will be cancelled. Past run history is preserved.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await scheduledTasksApi.deleteScheduledTask(taskId);
       setTasks(prev => prev.filter(t => t.id !== taskId));
