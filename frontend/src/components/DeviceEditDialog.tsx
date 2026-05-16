@@ -47,6 +47,7 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
   const [status, setStatus] = useState<DeviceStatus>('unknown')
   const [site, setSite] = useState('')
   const [role, setRole] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
   // Initialize form when device changes
   useEffect(() => {
@@ -87,15 +88,27 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    setError(null)
     run(async () => {
-      await Promise.resolve(onSave({
-        name,
-        type,
-        status,
-        site: site || undefined,
-        role: role || undefined,
-      }))
-      resetDirty()
+      try {
+        await Promise.resolve(onSave({
+          name,
+          type,
+          status,
+          site: site || undefined,
+          role: role || undefined,
+        }))
+        // Order matters: reset the dirty baseline BEFORE close so the
+        // discard guard doesn't re-fire on the way out.
+        resetDirty()
+        onClose()
+      } catch (err) {
+        // Surface inline rather than letting the error escape as an
+        // unhandled promise rejection (the dialog kept silent and
+        // users assumed nothing happened, then clicked Save a second
+        // time and double-saved).
+        setError(err instanceof Error ? err.message : 'Failed to save device')
+      }
     })
   }
 
@@ -174,6 +187,24 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
               placeholder="Optional"
             />
           </div>
+
+          {error && (
+            <div
+              className="device-edit-dialog-error"
+              role="alert"
+              style={{
+                padding: '8px 12px',
+                marginTop: 8,
+                background: 'rgba(244, 67, 54, 0.1)',
+                border: '1px solid var(--color-error)',
+                borderRadius: 4,
+                color: 'var(--color-error)',
+                fontSize: 12,
+              }}
+            >
+              {error}
+            </div>
+          )}
 
           <div className="device-edit-dialog-actions">
             <button type="button" className="device-edit-btn-cancel" onClick={guardedClose} disabled={submitting}>
