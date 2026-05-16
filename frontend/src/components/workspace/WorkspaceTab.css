@@ -698,9 +698,9 @@
 }
 
 .workspace-panel-list {
-  flex-shrink: 0;
   overflow-y: auto;
   padding: var(--spacing-xs) 0;
+  max-height: 50%;
 }
 
 .workspace-panel-empty {
@@ -844,17 +844,6 @@
   color: var(--color-text-primary);
 }
 
-.workspace-panel-resize-handle {
-  height: 4px;
-  flex-shrink: 0;
-  cursor: row-resize;
-  background: transparent;
-  transition: background var(--transition-fast);
-}
-
-.workspace-panel-resize-handle:hover {
-  background: var(--color-accent);
-}
 
 /* Output panel (Netstacks engine runs) */
 .workspace-output-panel {
@@ -1894,10 +1883,16 @@
   display: none;
 }
 
+.workspace-ai-panel-inline .ai-side-panel.closed {
+  pointer-events: auto;
+  border-left-color: transparent;
+}
+
 /* Sidebar explorer target - receives portaled file explorer */
 .workspace-sidebar-explorer-target {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import type { WorkspaceConfig } from '../../types/workspace'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
@@ -52,10 +52,6 @@ export default function WorkspacesPanel({
   const [savedWorkspaces, setSavedWorkspaces] = useState<WorkspaceConfig[]>([])
   const [wsCollapsed, setWsCollapsed] = useState(false)
   const [explorerCollapsed, setExplorerCollapsed] = useState(false)
-  const [wsHeight, setWsHeight] = useState(140)
-  const [isResizing, setIsResizing] = useState(false)
-  const resizeStartY = useRef(0)
-  const resizeStartHeight = useRef(0)
 
   const load = useCallback(async () => {
     setSavedWorkspaces(await loadSavedWorkspaces())
@@ -80,30 +76,9 @@ export default function WorkspacesPanel({
     }
   }, [savedWorkspaces])
 
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsResizing(true)
-    resizeStartY.current = e.clientY
-    resizeStartHeight.current = wsHeight
-  }, [wsHeight])
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isResizing) return
-    setWsHeight(Math.max(60, Math.min(400, resizeStartHeight.current + (e.clientY - resizeStartY.current))))
-  }, [isResizing])
-
-  const handleMouseUp = useCallback(() => {
-    setIsResizing(false)
-  }, [])
-
   return (
-    <div
-      className="workspace-panel-sidebar"
-      onMouseMove={isResizing ? handleMouseMove : undefined}
-      onMouseUp={isResizing ? handleMouseUp : undefined}
-      onMouseLeave={isResizing ? handleMouseUp : undefined}
-    >
-      {/* ── Workspaces section (collapsible) ── */}
+    <div className="workspace-panel-sidebar">
+      {/* ── Workspaces section ── */}
       <div
         className="workspace-panel-section-header"
         onClick={() => setWsCollapsed(!wsCollapsed)}
@@ -120,7 +95,7 @@ export default function WorkspacesPanel({
       </div>
 
       {!wsCollapsed && (
-        <div className="workspace-panel-list" style={{ height: wsHeight, overflow: 'auto' }}>
+        <div className="workspace-panel-list" style={{ flex: explorerCollapsed ? 1 : undefined }}>
           {savedWorkspaces.length === 0 && (
             <div className="workspace-panel-empty">
               <p>No saved workspaces</p>
@@ -160,15 +135,7 @@ export default function WorkspacesPanel({
         </div>
       )}
 
-      {/* ── Resize handle ── */}
-      {!wsCollapsed && !explorerCollapsed && (
-        <div
-          className="workspace-panel-resize-handle"
-          onMouseDown={handleResizeStart}
-        />
-      )}
-
-      {/* ── Explorer section (collapsible) ── */}
+      {/* ── Explorer section ── */}
       <div
         className="workspace-panel-section-header"
         onClick={() => setExplorerCollapsed(!explorerCollapsed)}
@@ -177,9 +144,11 @@ export default function WorkspacesPanel({
         <span>EXPLORER</span>
       </div>
 
-      {!explorerCollapsed && (
-        <div id="workspace-sidebar-explorer" className="workspace-sidebar-explorer-target" />
-      )}
+      <div
+        id="workspace-sidebar-explorer"
+        className="workspace-sidebar-explorer-target"
+        style={{ display: explorerCollapsed ? 'none' : undefined, flex: wsCollapsed ? 1 : undefined }}
+      />
     </div>
   )
 }
