@@ -6,9 +6,9 @@
 //! is the public surface used by HTTP/WS routes.
 
 use crate::lsp::plugins::built_in_plugins;
+use crate::lsp::session::LspSession;
 use crate::lsp::types::{InstallationKind, LspPlugin, PluginSource, RuntimeConfig};
 use dashmap::DashMap;
-use serde_json::Value;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,8 +39,7 @@ pub type SessionKey = (String, WorkspaceKey);
 pub struct LspHost {
     pool: SqlitePool,
     /// Active sessions. Phase 2 only declares the map; LspSession is added in P2T5.
-    /// Stored as Value placeholder so this compiles without depending on session.rs yet.
-    pub(crate) sessions: DashMap<SessionKey, Arc<Value>>,
+    pub(crate) sessions: DashMap<SessionKey, Arc<LspSession>>,
 }
 
 impl LspHost {
@@ -126,6 +125,29 @@ impl LspHost {
         all.into_iter()
             .find(|p| p.id == id)
             .ok_or_else(|| LspHostError::PluginNotFound(id.to_string()))
+    }
+
+    /// Get or create the session for `(plugin_id, workspace)`. Spawns the
+    /// LSP child if no session exists. Subsequent calls for the same key
+    /// return the existing session so WebSocket clients can share it.
+    pub async fn get_or_create_session(
+        &self,
+        plugin_id: &str,
+        workspace: WorkspaceKey,
+    ) -> Result<Arc<LspSession>, LspHostError> {
+        let key = (plugin_id.to_string(), workspace.clone());
+        if let Some(s) = self.sessions.get(&key) {
+            return Ok(s.clone());
+        }
+        let plugin = self.get_plugin(plugin_id).await?;
+        let workspace_path = match &workspace {
+            WorkspaceKey::Path(p) => Some(p.as_path()),
+            WorkspaceKey::Scratch(_) => None,
+        };
+        let session = LspSession::spawn(&plugin.runtime, workspace_path)
+            .map_err(|e| LspHostError::InvalidConfig(format!("spawn LSP for {}: {}", plugin_id, e)))?;
+        self.sessions.insert(key, session.clone());
+        Ok(session)
     }
 }
 
