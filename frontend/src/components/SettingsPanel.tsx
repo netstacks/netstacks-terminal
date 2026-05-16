@@ -25,6 +25,7 @@ import ApiResourcesTab from './ApiResourcesTab'
 import WorkspaceSettingsTab from './WorkspaceSettingsTab'
 import { useKeyboard } from '../hooks/useKeyboard'
 import { useSettings, type AppSettings } from '../hooks/useSettings'
+import { confirmDialog } from './ConfirmDialog'
 import { TERMINAL_THEMES } from '../lib/terminalThemes'
 import { useMode } from '../hooks/useMode'
 import { useAuthStore } from '../stores/authStore'
@@ -167,7 +168,7 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
   const hasFeature = useCapabilitiesStore((s) => s.hasFeature)
 
   // Use the persisted settings hook
-  const { settings: appSettings, updateSetting } = useSettings()
+  const { settings: appSettings, updateSetting, resetSettings } = useSettings()
 
   // Initialize local settings state with persisted values
   const [settings, setSettings] = useState<Setting[]>(() =>
@@ -531,6 +532,26 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
               <div className="settings-category">
                 <h3 className="settings-category-title">Panels</h3>
                 <PanelSettingsPanel />
+              </div>
+
+              {/* Reset — last in the tab so it doesn't get clicked by
+                  mistake before users see what's available to tweak. */}
+              <div className="settings-category">
+                <h3 className="settings-category-title">Reset</h3>
+                <button
+                  className="btn-danger"
+                  onClick={async () => {
+                    const ok = await confirmDialog({
+                      title: 'Reset all general settings?',
+                      body: 'This restores every General-tab setting (theme, font, terminal copy/select, status bar, panel auto-hide) to defaults. AI keys, sessions, profiles, and other tabs are untouched.',
+                      confirmLabel: 'Reset',
+                      destructive: true,
+                    })
+                    if (ok) resetSettings()
+                  }}
+                >
+                  Reset to defaults…
+                </button>
               </div>
             </div>
           </>
