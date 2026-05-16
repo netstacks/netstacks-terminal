@@ -18,7 +18,6 @@ import DocsPanel from './components/DocsPanel'
 import TopologyPanel from './components/TopologyPanel'
 import ChangesPanel from './components/ChangesPanel'
 import AgentsPanel from './components/AgentsPanel'
-import ScriptsPanel from './components/ScriptsPanel'
 import ApiResponseTab from './components/ApiResponseTab'
 import ConfigPanel from './components/config/ConfigPanel'
 import { PluginPanel } from './components/PluginPanel'
@@ -459,7 +458,7 @@ const defaultPluginIcon = (
   </svg>
 )
 
-type ViewType = 'sessions' | 'topology' | 'docs' | 'changes' | 'agents' | 'scripts' | 'stacks' | 'workspaces' | string
+type ViewType = 'sessions' | 'topology' | 'docs' | 'changes' | 'agents' | 'stacks' | 'workspaces' | string
 
 function AppContent() {
   const [activeView, setActiveView] = useState<ViewType>('sessions')
@@ -489,7 +488,6 @@ function AppContent() {
   const showSessionsTab = isStandalone() || hasPermission('sessions.connect')
   const showDevicesTab = isStandalone() || hasPermission('devices.access')
   const showAgentsTab = isStandalone() || hasPermission('agents.manage')
-  const showScriptsTab = isStandalone() || hasPermission('scripts.run')
   const showChangesTab = isStandalone() || hasPermission('mops.manage')
 
   // Set initial view to first permitted tab after permissions load
@@ -1182,7 +1180,6 @@ function AppContent() {
       case 'docs': return 'Documents'
       case 'changes': return 'Changes'
       case 'agents': return 'AI Agents'
-      case 'scripts': return 'Scripts'
       case 'stacks': return 'Stacks'
       case 'sftp': return 'SFTP Browser'
       case 'workspaces': return 'Workspaces'
@@ -5780,15 +5777,6 @@ def main(command: str = "show version"):
                 {Icons.agents}
               </button>
             )}
-            {hasFeature('local_integrations') && showScriptsTab && (
-            <button
-              className={`activity-bar-item ${activeView === 'scripts' ? 'active' : ''}`}
-              onClick={() => handleActivityClick('scripts')}
-              title="Scripts" data-testid="nav-scripts"
-            >
-              {Icons.scripts}
-            </button>
-            )}
             {canStacks && (
               <button
                 className={`activity-bar-item ${activeView === 'stacks' ? 'active' : ''}`}
@@ -5914,13 +5902,6 @@ def main(command: str = "show version"):
             {canAgents && activeView === 'agents' && (
               <AgentsPanel />
             )}
-            {activeView === 'scripts' && (
-              <ScriptsPanel
-                onOpenScript={handleOpenScript}
-                onNewScript={handleNewScript}
-                onAIGenerate={() => setAiScriptGeneratorOpen(true)}
-              />
-            )}
             {activeView === 'stacks' && canStacks && (
               <ConfigPanel onOpenTemplateTab={handleOpenConfigTemplateTab} onOpenStackTab={handleOpenConfigStackTab} onOpenInstanceTab={handleOpenInstanceTab} onCreateTemplate={handleCreateConfigTemplate} onCreateStack={handleCreateConfigStack} />
             )}
@@ -5929,6 +5910,9 @@ def main(command: str = "show version"):
                 onOpenWorkspace={openWorkspaceTab}
                 onNewWorkspace={() => setShowNewWorkspace(true)}
                 openWorkspaceIds={new Set(tabs.filter(t => t.type === 'workspace' && t.workspaceConfig).map(t => t.workspaceConfig!.id))}
+                onOpenScript={handleOpenScript}
+                onNewScript={handleNewScript}
+                onAIGenerate={() => setAiScriptGeneratorOpen(true)}
               />
             )}
             {activeView === 'sftp' && (

@@ -3,11 +3,16 @@ import type { WorkspaceConfig } from '../../types/workspace'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
 import { confirmDialog } from '../ConfirmDialog'
+import ScriptsPanel from '../ScriptsPanel'
+import type { Script } from '../../api/scripts'
 
 interface WorkspacesPanelProps {
   onOpenWorkspace: (config: WorkspaceConfig) => void
   onNewWorkspace: () => void
   openWorkspaceIds: Set<string>
+  onOpenScript: (script: Script) => void
+  onNewScript: () => void
+  onAIGenerate: () => void
 }
 
 export async function loadSavedWorkspaces(): Promise<WorkspaceConfig[]> {
@@ -49,8 +54,12 @@ export default function WorkspacesPanel({
   onOpenWorkspace,
   onNewWorkspace,
   openWorkspaceIds,
+  onOpenScript,
+  onNewScript,
+  onAIGenerate,
 }: WorkspacesPanelProps) {
   const [savedWorkspaces, setSavedWorkspaces] = useState<WorkspaceConfig[]>([])
+  const [pyEngineCollapsed, setPyEngineCollapsed] = useState(false)
   const [wsCollapsed, setWsCollapsed] = useState(false)
   const [explorerCollapsed, setExplorerCollapsed] = useState(false)
 
@@ -86,6 +95,25 @@ export default function WorkspacesPanel({
 
   return (
     <div className="workspace-panel-sidebar">
+      {/* ── Python Engine section ── */}
+      <div
+        className="workspace-panel-section-header"
+        onClick={() => setPyEngineCollapsed(!pyEngineCollapsed)}
+      >
+        <span className="workspace-panel-section-toggle">{pyEngineCollapsed ? '▸' : '▾'}</span>
+        <span>PYTHON ENGINE</span>
+      </div>
+
+      {!pyEngineCollapsed && (
+        <div className="workspace-panel-list" style={{ flex: 'none', maxHeight: 'none' }}>
+          <ScriptsPanel
+            onOpenScript={onOpenScript}
+            onNewScript={onNewScript}
+            onAIGenerate={onAIGenerate}
+          />
+        </div>
+      )}
+
       {/* ── Workspaces section ── */}
       <div
         className="workspace-panel-section-header"
