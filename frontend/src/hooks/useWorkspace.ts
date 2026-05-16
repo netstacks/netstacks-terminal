@@ -53,22 +53,26 @@ function createInitialState(config: WorkspaceConfig): WorkspaceState {
 
   // Restore terminal tabs from saved config, or create default AI CLI tab
   const terminalSessions = config.terminalSessions || []
+
+  const buildAiCommand = (tool: string, args?: string, custom?: string): string => {
+    if (tool === 'custom') return custom || tool
+    return args ? `${tool} ${args}` : tool
+  }
+
+  const currentAiCommand = buildAiCommand(config.aiTool.tool, config.aiTool.launchArgs, config.aiTool.customCommand)
+
   const terminalTabs = terminalSessions.length > 0
     ? terminalSessions.map(t => ({
         id: crypto.randomUUID(),
         title: t.title,
-        command: t.command,
+        command: t.isAiCli ? currentAiCommand : t.command,
         isAiCli: t.isAiCli,
       }))
     : config.autoLaunchAi && config.aiTool.tool !== 'none'
       ? [{
           id: crypto.randomUUID(),
           title: config.aiTool.tool === 'custom' ? 'AI CLI' : config.aiTool.tool,
-          command: config.aiTool.tool === 'custom'
-            ? config.aiTool.customCommand
-            : config.aiTool.launchArgs
-              ? `${config.aiTool.tool} ${config.aiTool.launchArgs}`
-              : config.aiTool.tool,
+          command: currentAiCommand,
           isAiCli: true,
         }]
       : []
