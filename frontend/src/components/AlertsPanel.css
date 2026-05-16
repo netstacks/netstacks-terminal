@@ -213,3 +213,32 @@
   font-size: var(--font-size-small);
   color: var(--text-muted);
 }
+
+/* P3-18: pagination affordances */
+.alerts-panel-count {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.alerts-panel-load-more {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 8px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.alerts-panel-load-more:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.alerts-panel-load-more:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}

@@ -8,9 +8,14 @@ interface IncidentsPanelProps {
   onOpenIncidentTab: (id?: string) => void;
 }
 
+const PAGE_SIZE = 50;
+
 export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTab }) => {
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
   const intervalRef = useRef<number | null>(null);
@@ -19,11 +24,13 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
     if (!isMountedRef.current) return;
 
     try {
-      const result = await listIncidents(1, 50);
+      const result = await listIncidents(1, PAGE_SIZE);
 
       if (!isMountedRef.current) return;
 
       setIncidents(result.data);
+      setTotal(result.total);
+      setPage(1);
       setError(null);
       setIsLoading(false);
     } catch (err) {
@@ -34,6 +41,24 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
       setIsLoading(false);
     }
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (isLoadingMore || incidents.length >= total) return;
+    setIsLoadingMore(true);
+    try {
+      const nextPage = page + 1;
+      const result = await listIncidents(nextPage, PAGE_SIZE);
+      if (!isMountedRef.current) return;
+      setIncidents((prev) => [...prev, ...result.data]);
+      setTotal(result.total);
+      setPage(nextPage);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setError(err instanceof Error ? err.message : 'Failed to load more incidents');
+    } finally {
+      if (isMountedRef.current) setIsLoadingMore(false);
+    }
+  }, [isLoadingMore, incidents.length, total, page]);
 
   const handleRefresh = () => {
     setIsLoading(true);
@@ -146,6 +171,12 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
         <div className="incidents-panel-empty">No incidents</div>
       )}
 
+      {!error && incidents.length > 0 && total > 0 && (
+        <div className="incidents-panel-count">
+          Showing {incidents.length} of {total} {total === 1 ? 'incident' : 'incidents'}
+        </div>
+      )}
+
       {!error && incidents.length > 0 && (
         <div className="incidents-panel-list">
           {incidents.map((incident) => (
@@ -176,6 +207,18 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
               </div>
             </div>
           ))}
+
+          {incidents.length < total && (
+            <button
+              className="incidents-panel-load-more"
+              onClick={loadMore}
+              disabled={isLoadingMore}
+            >
+              {isLoadingMore
+                ? 'Loading…'
+                : `Load ${Math.min(PAGE_SIZE, total - incidents.length)} more`}
+            </button>
+          )}
         </div>
       )}
     </div>

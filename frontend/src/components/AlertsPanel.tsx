@@ -10,14 +10,24 @@ interface AlertsPanelProps {
 
 type FilterState = 'all' | AlertState;
 
+const PAGE_SIZE = 50;
+
 export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<FilterState>('all');
   const isMountedRef = useRef(true);
   const intervalRef = useRef<number | null>(null);
 
+  // Refresh always re-fetches starting from page 1 and replaces the list.
+  // The 15-second poll uses this so newly-arrived alerts surface even when
+  // the user has loaded extra pages — those extras get dropped on refresh,
+  // which matches the user's expectation that "the page" represents the
+  // newest set.
   const fetchAlerts = useCallback(async () => {
     if (!isMountedRef.current) return;
 
@@ -27,11 +37,13 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
         filters.state = stateFilter;
       }
 
-      const result = await listAlerts(1, 50, filters);
+      const result = await listAlerts(1, PAGE_SIZE, filters);
 
       if (!isMountedRef.current) return;
 
       setAlerts(result.data);
+      setTotal(result.total);
+      setPage(1);
       setError(null);
       setIsLoading(false);
     } catch (err) {
@@ -42,6 +54,29 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
       setIsLoading(false);
     }
   }, [stateFilter]);
+
+  // Load Next Page — appends to the existing list. The next poll will
+  // reset back to page 1; we accept that as a deliberate UX (the user
+  // clicked Load More to look at older entries, not to pin them).
+  const loadMore = useCallback(async () => {
+    if (isLoadingMore || alerts.length >= total) return;
+    setIsLoadingMore(true);
+    try {
+      const filters: Record<string, unknown> = {};
+      if (stateFilter !== 'all') filters.state = stateFilter;
+      const nextPage = page + 1;
+      const result = await listAlerts(nextPage, PAGE_SIZE, filters);
+      if (!isMountedRef.current) return;
+      setAlerts((prev) => [...prev, ...result.data]);
+      setTotal(result.total);
+      setPage(nextPage);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setError(err instanceof Error ? err.message : 'Failed to load more alerts');
+    } finally {
+      if (isMountedRef.current) setIsLoadingMore(false);
+    }
+  }, [isLoadingMore, alerts.length, total, page, stateFilter]);
 
   const handleRefresh = () => {
     setIsLoading(true);
@@ -193,6 +228,12 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
         <div className="alerts-panel-empty">No alerts</div>
       )}
 
+      {!error && alerts.length > 0 && total > 0 && (
+        <div className="alerts-panel-count">
+          Showing {alerts.length} of {total} {total === 1 ? 'alert' : 'alerts'}
+        </div>
+      )}
+
       {!error && alerts.length > 0 && (
         <div className="alerts-panel-list">
           {alerts.map((alert) => (
@@ -231,6 +272,18 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
               </div>
             </div>
           ))}
+
+          {alerts.length < total && (
+            <button
+              className="alerts-panel-load-more"
+              onClick={loadMore}
+              disabled={isLoadingMore}
+            >
+              {isLoadingMore
+                ? 'Loading…'
+                : `Load ${Math.min(PAGE_SIZE, total - alerts.length)} more`}
+            </button>
+          )}
         </div>
       )}
     </div>
