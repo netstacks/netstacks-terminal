@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   createProfile,
   updateProfile,
@@ -10,6 +10,8 @@ import {
 } from '../api/profiles';
 import { CLI_FLAVOR_OPTIONS, listJumpHosts, listSessions, type CliFlavor, type JumpHost, type Session } from '../api/sessions';
 import { TERMINAL_THEMES } from '../lib/terminalThemes';
+import { useDirtyGuard } from '../hooks/useDirtyGuard';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './ProfileEditorDialog.css';
 
 interface ProfileEditorDialogProps {
@@ -204,16 +206,84 @@ export default function ProfileEditorDialog({
     }
   }, [isOpen, sourceProfile, cloneFrom]);
 
-  // Handle escape key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // Dirty-state guard — snapshot the loaded profile (or the create-mode
+  // defaults) and prompt before discarding edits on close. Includes the
+  // user-facing field values; tab state and the in-progress
+  // newCommunity/newAutoCommand buffers are deliberately excluded.
+  const initialSnapshot = useMemo(
+    () =>
+      sourceProfile
+        ? {
+            name: cloneFrom ? `${sourceProfile.name} (copy)` : sourceProfile.name,
+            username: sourceProfile.username,
+            authType: sourceProfile.auth_type,
+            keyPath: sourceProfile.key_path || '',
+            password: '',
+            keyPassphrase: '',
+            port: sourceProfile.port,
+            keepaliveInterval: sourceProfile.keepalive_interval,
+            connectionTimeout: sourceProfile.connection_timeout,
+            terminalTheme: sourceProfile.terminal_theme,
+            defaultFontSize: sourceProfile.default_font_size,
+            defaultFontFamily: sourceProfile.default_font_family,
+            scrollbackLines: sourceProfile.scrollback_lines,
+            localEcho: sourceProfile.local_echo,
+            autoReconnect: sourceProfile.auto_reconnect,
+            reconnectDelay: sourceProfile.reconnect_delay,
+            cliFlavor: (sourceProfile.cli_flavor || 'auto') as CliFlavor,
+            autoCommands: sourceProfile.auto_commands || [],
+            snmpCommunities: [] as string[],
+            jumpSelection: sourceProfile.jump_host_id
+              ? `host:${sourceProfile.jump_host_id}`
+              : sourceProfile.jump_session_id
+              ? `session:${sourceProfile.jump_session_id}`
+              : '',
+          }
+        : {
+            name: '',
+            username: '',
+            authType: 'password' as AuthType,
+            keyPath: '',
+            password: '',
+            keyPassphrase: '',
+            port: 22,
+            keepaliveInterval: 30,
+            connectionTimeout: 30,
+            terminalTheme: null as string | null,
+            defaultFontSize: null as number | null,
+            defaultFontFamily: null as string | null,
+            scrollbackLines: 10000,
+            localEcho: false,
+            autoReconnect: true,
+            reconnectDelay: 5,
+            cliFlavor: 'auto' as CliFlavor,
+            autoCommands: [] as string[],
+            snmpCommunities: [] as string[],
+            jumpSelection: '',
+          },
+    [sourceProfile, cloneFrom],
+  );
+
+  const currentSnapshot = {
+    name, username, authType, keyPath, password, keyPassphrase, port,
+    keepaliveInterval, connectionTimeout, terminalTheme, defaultFontSize,
+    defaultFontFamily, scrollbackLines, localEcho, autoReconnect,
+    reconnectDelay, cliFlavor, autoCommands, snmpCommunities, jumpSelection,
+  };
+
+  const { confirmDiscard, reset: resetDirty } = useDirtyGuard(currentSnapshot, {
+    initial: initialSnapshot,
+    resetKey: `${sourceProfile?.id ?? 'new'}:${cloneFrom ? 'clone' : 'edit'}:${isOpen ? '1' : '0'}`,
+  });
+
+  const guardedClose = async () => {
+    if (await confirmDiscard()) onClose();
+  };
+
+  const { backdropProps, contentProps } = useOverlayDismiss({
+    onDismiss: guardedClose,
+    enabled: isOpen && !saving,
+  });
 
   const handleSave = async () => {
     // Validation
@@ -283,6 +353,9 @@ export default function ProfileEditorDialog({
         }
       }
 
+      // Mark snapshot clean before invoking onSaved (which usually
+      // closes the dialog) so the close path doesn't re-prompt.
+      resetDirty();
       onSaved();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to ${isEditing ? 'update' : 'create'} profile`);
@@ -307,11 +380,11 @@ export default function ProfileEditorDialog({
     : 'New Profile';
 
   return (
-    <div className="profile-dialog-overlay" onClick={onClose}>
-      <div className="profile-dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="profile-dialog-overlay" {...backdropProps}>
+      <div className="profile-dialog" {...contentProps}>
         <div className="profile-dialog-header">
           <h2>{dialogTitle}</h2>
-          <button className="profile-dialog-close" onClick={onClose} title="Close">
+          <button className="profile-dialog-close" onClick={guardedClose} title="Close" disabled={saving}>
             {Icons.close}
           </button>
         </div>
@@ -800,7 +873,7 @@ export default function ProfileEditorDialog({
         </div>
 
         <div className="profile-dialog-actions">
-          <button className="btn-secondary" onClick={onClose}>
+          <button className="btn-secondary" onClick={guardedClose} disabled={saving}>
             Cancel
           </button>
           <button className="btn-primary" onClick={handleSave} disabled={saving}>

@@ -6,6 +6,7 @@ import { useState, useEffect } from 'react'
 import type { Device, DeviceType, DeviceStatus } from '../types/topology'
 import { useSubmitting } from '../hooks/useSubmitting'
 import { useOverlayDismiss } from '../hooks/useOverlayDismiss'
+import { useDirtyGuard } from '../hooks/useDirtyGuard'
 import './DeviceEditDialog.css'
 
 interface DeviceEditDialogProps {
@@ -60,6 +61,28 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
 
   const { submitting, run } = useSubmitting()
 
+  // Track dirty state vs the device passed in — discard prompt fires
+  // on any close path (Escape, X, overlay click, Cancel) when changed.
+  const { confirmDiscard, reset: resetDirty } = useDirtyGuard(
+    { name, type, status, site, role },
+    {
+      initial: device
+        ? {
+            name: device.name,
+            type: device.type,
+            status: device.status,
+            site: device.site || '',
+            role: device.role || '',
+          }
+        : undefined,
+      resetKey: device?.id ?? null,
+    },
+  )
+
+  const guardedClose = async () => {
+    if (await confirmDiscard()) onClose()
+  }
+
   if (!device) return null
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -72,17 +95,18 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
         site: site || undefined,
         role: role || undefined,
       }))
+      resetDirty()
     })
   }
 
-  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: onClose, enabled: !submitting })
+  const { backdropProps, contentProps } = useOverlayDismiss({ onDismiss: guardedClose, enabled: !submitting })
 
   return (
     <div className="device-edit-dialog-overlay" {...backdropProps}>
       <div className="device-edit-dialog" {...contentProps}>
         <div className="device-edit-dialog-header">
           <h2>Edit Device</h2>
-          <button className="device-edit-dialog-close" onClick={onClose} title="Close" disabled={submitting}>
+          <button className="device-edit-dialog-close" onClick={guardedClose} title="Close" disabled={submitting}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -152,7 +176,7 @@ export default function DeviceEditDialog({ device, onSave, onClose }: DeviceEdit
           </div>
 
           <div className="device-edit-dialog-actions">
-            <button type="button" className="device-edit-btn-cancel" onClick={onClose} disabled={submitting}>
+            <button type="button" className="device-edit-btn-cancel" onClick={guardedClose} disabled={submitting}>
               Cancel
             </button>
             <button type="submit" className="device-edit-btn-save" disabled={submitting}>
