@@ -10,6 +10,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use crate::lsp::{LspHost, LspState};
 use crate::tracked_router::TrackedRouter;
 // Registry write only matters when the dev-routes endpoint is compiled in
 // (debug builds, or when the `dev-routes` feature is enabled). In release
@@ -395,7 +396,7 @@ async fn async_main() {
     // Create app state
     let app_state = Arc::new(AppState {
         provider: provider as Arc<dyn providers::DataProvider>,
-        auth_token,
+        auth_token: auth_token.clone(),
         sanitizer: sanitizer.clone(),
         task_store,
         task_registry,
@@ -410,6 +411,15 @@ async fn async_main() {
         // AUDIT FIX (REMOTE-001): per-process host-key approval registry.
         host_key_approvals: ssh::approvals::HostKeyApprovalService::new(),
     });
+
+    // LSP plugin host (per-plugin merged registry + active sessions).
+    // Built-in plugins are added in Phase 4 (Pyrefly); v1 ships with an
+    // empty registry plus whatever the user has added via Settings.
+    let lsp_host = Arc::new(LspHost::new(pool.clone()));
+    let lsp_state = LspState {
+        host: lsp_host.clone(),
+        auth_token: auth_token.clone(),
+    };
 
     // Auto-connect enabled MCP servers on startup (non-blocking).
     //
@@ -504,7 +514,7 @@ async fn async_main() {
     }
 
     // Build the application
-    let app = create_app(app_state, pool);
+    let app = create_app(app_state, pool, lsp_state);
 
     // Start HTTPS server on localhost only
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
@@ -566,7 +576,7 @@ async fn async_main() {
     }
 }
 
-fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
+fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -> Router {
     // Create terminal manager
     let terminal_manager = Arc::new(terminal::TerminalManager::new());
 
@@ -1190,9 +1200,19 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool) -> Router {
         api::auth_middleware,
     ));
 
+    // LSP routes: split HTTP (auth via middleware) from WebSocket (auth via query token).
+    let lsp_http = lsp::http_router(lsp_state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            api::auth_middleware,
+        ));
+    let lsp_ws = lsp::ws_router(lsp_state);
+
     Router::new()
         .merge(authenticated)
         .merge(ws_router)
+        .nest("/lsp", lsp_http)
+        .nest("/lsp", lsp_ws)
         .fallback_service(static_service)
         .layer(cors)
 }

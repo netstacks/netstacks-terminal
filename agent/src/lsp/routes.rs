@@ -30,8 +30,8 @@ pub struct LspState {
     pub auth_token: String,
 }
 
-/// Public API: build the router for `/lsp/*`. Caller mounts at the right path.
-pub fn router(state: LspState) -> Router {
+/// HTTP routes for plugin management. Auth handled by middleware at mount time.
+pub fn http_router(state: LspState) -> Router {
     Router::new()
         .route("/plugins", get(list_plugins))
         .route("/plugins", post(create_plugin_stub))
@@ -39,8 +39,19 @@ pub fn router(state: LspState) -> Router {
         .route("/plugins/:id", delete(delete_plugin_stub))
         .route("/plugins/:id/install", post(install_plugin_stub))
         .route("/plugins/test", post(test_plugin_stub))
-        .route("/:plugin_id", get(lsp_websocket))
         .with_state(state)
+}
+
+/// WebSocket route for LSP JSON-RPC streaming. Auth via `?token=...` query.
+pub fn ws_router(state: LspState) -> Router {
+    Router::new()
+        .route("/ws/:plugin_id", get(lsp_websocket))
+        .with_state(state)
+}
+
+/// Convenience: merged router used by integration tests.
+pub fn router(state: LspState) -> Router {
+    http_router(state.clone()).merge(ws_router(state))
 }
 
 // ===== Plugin listing =====
