@@ -2006,15 +2006,18 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
             : await createTask({ prompt });
           console.log(`[AI Agent] Spawned background task: ${task.id}${agent_id ? ` (agent: ${agent_id})` : ' (generic)'}`);
 
-          // Poll for completion
+          // Poll for completion. Exponential backoff on consecutive
+          // getTask errors so a transient backend blip doesn't pound the
+          // API every 3s for the full timeout window (capped at 30s).
           const startTime = Date.now();
-          const pollInterval = 3000; // 3 seconds
+          let pollInterval = 3000; // 3 seconds — bumps to 30s on repeated errors
 
           while (Date.now() - startTime < timeout) {
             await new Promise(resolve => setTimeout(resolve, pollInterval));
 
             try {
               const updated = await getTask(task.id);
+              pollInterval = 3000;
 
               if (updated.status === 'completed') {
                 // Parse result — may be JSON with answer field or plain text
@@ -2047,7 +2050,9 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
 
               // Still running — continue polling
             } catch {
-              // Transient error fetching task status, continue polling
+              // Transient error fetching task status — back off so we
+              // don't hammer the API every 3s during an outage.
+              pollInterval = Math.min(pollInterval * 2, 30000);
             }
           }
 

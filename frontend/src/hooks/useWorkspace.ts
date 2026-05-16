@@ -249,14 +249,17 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     const sep = config.rootPath.includes('/') ? '/' : '\\'
     const signalPath = `${config.rootPath}${sep}.netstacks${sep}open-request.json`
 
+    let cancelled = false
     const poll = setInterval(async () => {
+      if (cancelled) return
       try {
         // Existence check first — the file is absent 99% of the time and
         // hitting readFile on a missing path returns 500 from the agent,
         // which the global axios interceptor logs once per second.
         const present = await fileOps.exists(signalPath)
-        if (!present) return
+        if (cancelled || !present) return
         const content = await fileOps.readFile(signalPath)
+        if (cancelled) return
         const request = JSON.parse(content)
         if (request.path) {
           const fullPath = request.path.startsWith('/') || request.path.startsWith('\\') || request.path.includes(':')
@@ -295,7 +298,10 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
       }
     }, 1000)
 
-    return () => clearInterval(poll)
+    return () => {
+      cancelled = true
+      clearInterval(poll)
+    }
   }, [config.mode, config.rootPath, fileOps])
 
 

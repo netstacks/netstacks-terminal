@@ -284,23 +284,41 @@ export async function runScriptStream(
   }
 }
 
-export async function runScript(id: string, options?: RunScriptOptions): Promise<ScriptOutput | MultiDeviceOutput> {
+export async function runScript(id: string, options?: RunScriptOptions, signal?: AbortSignal): Promise<ScriptOutput | MultiDeviceOutput> {
   if (isEnterprise()) {
     const client = getClient();
     // Trigger execution on the controller, passing device targeting options
     const body = options && (options.device_ids?.length || options.custom_input || options.main_args)
       ? options
       : undefined;
-    const { data: execution } = await client.http.post<ControllerExecution>(`/scripts/${id}/run`, body);
+    const { data: execution } = await client.http.post<ControllerExecution>(`/scripts/${id}/run`, body, { signal });
 
-    // Poll until execution completes
+    // Poll until execution completes. Exponential backoff on consecutive
+    // errors so a transient controller blip doesn't hammer the API every
+    // 1s for 2 minutes. signal lets the caller (e.g. tab close, Stop
+    // button) cancel mid-poll.
     const execId = execution.id;
     const maxWait = 120000; // 2 minute timeout
-    const pollInterval = 1000;
+    let pollInterval = 1000;
     const start = Date.now();
 
     while (Date.now() - start < maxWait) {
-      const { data: status } = await client.http.get<ControllerExecution>(`/scripts/executions/${execId}`);
+      if (signal?.aborted) {
+        throw new DOMException('Script execution polling aborted', 'AbortError');
+      }
+      let status: ControllerExecution;
+      try {
+        const res = await client.http.get<ControllerExecution>(`/scripts/executions/${execId}`, { signal });
+        status = res.data;
+        pollInterval = 1000;
+      } catch (err) {
+        // Re-throw aborts so callers see them. Otherwise back off and try
+        // again — capped at 8s to avoid runaway waits on long outages.
+        if ((err as Error).name === 'AbortError') throw err;
+        pollInterval = Math.min(pollInterval * 2, 8000);
+        await new Promise((r) => setTimeout(r, pollInterval));
+        continue;
+      }
       if (status.state === 'completed' || status.state === 'failed' || status.state === 'timeout') {
         const outputStr = status.output || '';
         // Try to parse as multi-device output
@@ -321,7 +339,17 @@ export async function runScript(id: string, options?: RunScriptOptions): Promise
             : 0,
         };
       }
-      await new Promise((r) => setTimeout(r, pollInterval));
+      // Sleep between polls, but wake immediately on abort so the caller
+      // sees the AbortError without waiting up to pollInterval ms.
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, pollInterval);
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            clearTimeout(t);
+            reject(new DOMException('Script execution polling aborted', 'AbortError'));
+          }, { once: true });
+        }
+      });
     }
 
     return {
