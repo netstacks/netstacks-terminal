@@ -80,6 +80,14 @@ function ApiResourceDialog({
   const [authPassword, setAuthPassword] = useState('')
   const [authHeaderName, setAuthHeaderName] = useState(resource?.auth_header_name || '')
   const [authFlow, setAuthFlow] = useState<AuthFlowStep[]>(resource?.auth_flow || [])
+  // Parallel array of stable per-step React keys, kept in sync with
+  // authFlow's add/remove (update mutates content in place so rids stay).
+  // The defaultValue textarea for headers (line ~356) relies on stable
+  // keys — without this, removing step N leaves the textarea at index N
+  // showing the deleted step's content because React reuses the DOM node.
+  const [stepRids, setStepRids] = useState<string[]>(
+    () => (resource?.auth_flow || []).map(() => crypto.randomUUID()),
+  )
   const [defaultHeaders, setDefaultHeaders] = useState(
     JSON.stringify(resource?.default_headers || {}, null, 2)
   )
@@ -167,6 +175,7 @@ function ApiResourceDialog({
 
   const addAuthFlowStep = () => {
     setAuthFlow([...authFlow, { method: 'POST', path: '', body: '', extract_path: '', store_as: '' }])
+    setStepRids((prev) => [...prev, crypto.randomUUID()])
   }
 
   const updateAuthFlowStep = (index: number, field: keyof AuthFlowStep, value: string) => {
@@ -199,6 +208,7 @@ function ApiResourceDialog({
 
   const removeAuthFlowStep = (index: number) => {
     setAuthFlow(authFlow.filter((_, i) => i !== index))
+    setStepRids((prev) => prev.filter((_, i) => i !== index))
     setStepResults((prev) => {
       const next = { ...prev }
       delete next[index]
@@ -313,7 +323,7 @@ function ApiResourceDialog({
                 <PasswordInput value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder={isEdit ? '(unchanged)' : 'For {{password}} variable'} />
               </div>
               {authFlow.map((step, index) => (
-                <div key={index} className="auth-flow-step">
+                <div key={stepRids[index] ?? index} className="auth-flow-step">
                   <div className="auth-flow-step-header">
                     <span>Step {index + 1}</span>
                     <div style={{ display: 'flex', gap: '6px' }}>
