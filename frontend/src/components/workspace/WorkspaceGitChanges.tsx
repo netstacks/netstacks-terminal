@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import type { GitOps, GitFileStatus, GitBranchInfo, GitStatusCode } from '../../types/workspace'
 import { showToast } from '../Toast'
+import { sendChatMessage } from '../../api/ai'
 import ContextMenu from '../ContextMenu'
 import type { MenuItem } from '../ContextMenu'
 
@@ -229,8 +230,18 @@ export default function WorkspaceGitChanges({
                 e.preventDefault()
                 setGenerating(true)
                 try {
-                  const msg = await gitOps.generateCommitMessage()
-                  setCommitMsg(msg)
+                  const diff = await gitOps.diff()
+                  const truncatedDiff = diff.length > 4000 ? diff.slice(0, 4000) + '\n... (truncated)' : diff
+                  const fileList = staged.map(s => `${s.status}: ${s.path}`).join('\n')
+                  const prompt = `Write a concise git commit message for these changes. Use conventional commit format (feat/fix/chore/refactor/docs). First line max 72 chars. Add a blank line then a brief body if needed. Respond with ONLY the commit message, no quotes or explanation.
+
+Staged files:
+${fileList}
+
+Diff:
+${truncatedDiff}`
+                  const msg = await sendChatMessage([{ role: 'user', content: prompt }])
+                  setCommitMsg(msg.trim())
                 } catch (err) {
                   showToast(`Generate failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
                 } finally {
