@@ -7,6 +7,7 @@ import {
   revealPersonalCredential,
 } from '../api/enterpriseCredentials'
 import type { PersonalCredentialSummary, PersonalCredentialInput } from '../api/enterpriseCredentials'
+import { PasswordInput } from './PasswordInput'
 import './MyCredentialsTab.css'
 
 type CredentialType = PersonalCredentialInput['credential_type']
@@ -319,8 +320,7 @@ export default function MyCredentialsTab() {
               </div>
               <div className="form-group">
                 <label>Secret *</label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={form.secret}
                   onChange={(e) => setForm({ ...form, secret: e.target.value })}
                   placeholder="Password or key"
@@ -373,8 +373,7 @@ export default function MyCredentialsTab() {
               </div>
               <div className="form-group">
                 <label>New Secret (leave blank to keep current)</label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={form.secret}
                   onChange={(e) => setForm({ ...form, secret: e.target.value })}
                   placeholder="Leave blank to keep existing"

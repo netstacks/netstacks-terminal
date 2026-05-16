@@ -24,6 +24,7 @@ import NetBoxSourceDialog from './NetBoxSourceDialog';
 import NetBoxImportDialog from './NetBoxImportDialog';
 import SmtpSettingsSection from './SmtpSettingsSection';
 import SecureCRTImportDialog from './SecureCRTImportDialog';
+import { PasswordInput } from './PasswordInput';
 import { downloadFile } from '../lib/formatters';
 import { showToast } from './Toast';
 import { confirmDialog } from './ConfirmDialog';
@@ -548,8 +549,7 @@ export default function IntegrationsTab() {
               onChange={(e) => setLibreForm({ ...libreForm, url: e.target.value })}
               disabled={libreSubmit.submitting}
             />
-            <input
-              type="password"
+            <PasswordInput
               placeholder="API token"
               value={libreForm.token}
               onChange={(e) => setLibreForm({ ...libreForm, token: e.target.value })}
@@ -667,8 +667,7 @@ export default function IntegrationsTab() {
                 disabled={netdiscoSubmit.submitting}
               />
             )}
-            <input
-              type="password"
+            <PasswordInput
               placeholder={netdiscoEditingId === 'new' ? 'API key / password' : 'New API key / password (leave blank to keep current)'}
               value={netdiscoForm.credential}
               onChange={(e) => setNetdiscoForm({ ...netdiscoForm, credential: e.target.value })}

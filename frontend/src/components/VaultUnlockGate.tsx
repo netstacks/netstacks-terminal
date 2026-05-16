@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { getVaultStatus, setMasterPassword, unlockVault } from '../api/sessions';
 import { getBiometricStatus, unlockVaultWithBiometric, type BiometricStatus } from '../api/vault';
 import { useMode } from '../hooks/useMode';
+import { PasswordInput } from './PasswordInput';
 import './VaultUnlockGate.css';
 
 interface VaultUnlockGateProps {
@@ -269,27 +270,27 @@ export default function VaultUnlockGate({ children }: VaultUnlockGateProps) {
             <label htmlFor="vault-password">
               {state === 'setup' ? 'Master Password' : 'Password'}
             </label>
-            <input
+            <PasswordInput
               id="vault-password"
-              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={state === 'setup' ? 'Create a strong password' : 'Enter your password'}
               autoFocus
               disabled={loading}
+              autoComplete={state === 'setup' ? 'new-password' : 'current-password'}
             />
           </div>
 
           {state === 'setup' && (
             <div className="vault-field">
               <label htmlFor="vault-confirm">Confirm Password</label>
-              <input
+              <PasswordInput
                 id="vault-confirm"
-                type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Confirm your password"
                 disabled={loading}
+                autoComplete="new-password"
               />
             </div>
           )}

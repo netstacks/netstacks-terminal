@@ -25,6 +25,7 @@ import {
   type NetBoxPlatform,
   type NetBoxTag,
 } from '../api/netbox';
+import { PasswordInput } from './PasswordInput';
 import './NetBoxSourceDialog.css';
 
 interface NetBoxSourceDialogProps {
@@ -674,9 +675,8 @@ export default function NetBoxSourceDialog({
 
             <div className="form-group">
               <label htmlFor="source-token">API Token</label>
-              <input
+              <PasswordInput
                 id="source-token"
-                type="password"
                 value={apiToken}
                 onChange={(e) => setApiToken(e.target.value)}
                 placeholder={isEditing ? '(leave blank to keep existing)' : 'Enter API token'}

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { getClient } from '../api/client'
 import { showToast } from './Toast'
 import { confirmDialog } from './ConfirmDialog'
+import { PasswordInput } from './PasswordInput'
 
 interface GitAccountView {
   id: string
@@ -255,10 +256,8 @@ export default function GitAccountsSettingsTab() {
               <label style={{ fontSize: 12, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
                 Personal Access Token
               </label>
-              <input
-                type="password"
+              <PasswordInput
                 style={{
-                  width: '100%',
                   padding: '6px 8px',
                   background: 'var(--color-bg-primary)',
                   border: '1px solid var(--color-border)',

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { PasswordInput } from './PasswordInput';
 import {
   createProfile,
   updateProfile,
@@ -464,9 +465,8 @@ export default function ProfileEditorDialog({
                 {authType === 'password' && (
                   <div className="form-group">
                     <label htmlFor="profile-password">Password</label>
-                    <input
+                    <PasswordInput
                       id="profile-password"
-                      type="password"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder={isEditing ? '(leave blank to keep existing)' : 'Enter password'}
@@ -489,9 +489,8 @@ export default function ProfileEditorDialog({
                     </div>
                     <div className="form-group">
                       <label htmlFor="profile-key-passphrase">Key Passphrase (optional)</label>
-                      <input
+                      <PasswordInput
                         id="profile-key-passphrase"
-                        type="password"
                         value={keyPassphrase}
                         onChange={(e) => setKeyPassphrase(e.target.value)}
                         placeholder={isEditing ? '(leave blank to keep existing)' : 'If key is encrypted'}
@@ -834,8 +833,7 @@ export default function ProfileEditorDialog({
                 )}
 
                 <div className="snmp-community-add">
-                  <input
-                    type="password"
+                  <PasswordInput
                     placeholder="Community string (e.g., public)"
                     value={newCommunity}
                     onChange={(e) => setNewCommunity(e.target.value)}

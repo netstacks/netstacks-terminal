@@ -16,6 +16,7 @@ import {
 } from '../api/vault'
 import { confirmDialog } from './ConfirmDialog'
 import { useSubmitting } from '../hooks/useSubmitting'
+import { PasswordInput } from './PasswordInput'
 import './VaultSettings.css'
 
 export default function VaultSettings() {
@@ -444,9 +445,8 @@ export default function VaultSettings() {
           </p>
           <div className="form-group">
             <label htmlFor="new-password">Master Password</label>
-            <input
+            <PasswordInput
               id="new-password"
-              type="password"
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
               placeholder="Enter master password (min 8 characters)"
@@ -455,9 +455,8 @@ export default function VaultSettings() {
           </div>
           <div className="form-group">
             <label htmlFor="confirm-password">Confirm Password</label>
-            <input
+            <PasswordInput
               id="confirm-password"
-              type="password"
               value={confirmPassword}
               onChange={e => setConfirmPassword(e.target.value)}
               placeholder="Confirm master password"
@@ -478,9 +477,8 @@ export default function VaultSettings() {
           </p>
           <div className="form-group">
             <label htmlFor="unlock-password">Master Password</label>
-            <input
+            <PasswordInput
               id="unlock-password"
-              type="password"
               value={unlockPassword}
               onChange={e => setUnlockPassword(e.target.value)}
               placeholder="Enter master password"
@@ -530,9 +528,8 @@ export default function VaultSettings() {
               <form className="vault-form" onSubmit={handleChangePassword}>
                 <div className="form-group">
                   <label htmlFor="change-old-password">Current Master Password</label>
-                  <input
+                  <PasswordInput
                     id="change-old-password"
-                    type="password"
                     value={changeOldPassword}
                     onChange={e => setChangeOldPassword(e.target.value)}
                     autoComplete="current-password"
@@ -542,9 +539,8 @@ export default function VaultSettings() {
                 </div>
                 <div className="form-group">
                   <label htmlFor="change-new-password">New Master Password</label>
-                  <input
+                  <PasswordInput
                     id="change-new-password"
-                    type="password"
                     value={changeNewPassword}
                     onChange={e => setChangeNewPassword(e.target.value)}
                     placeholder="At least 8 characters"
@@ -554,9 +550,8 @@ export default function VaultSettings() {
                 </div>
                 <div className="form-group">
                   <label htmlFor="change-confirm-password">Confirm New Password</label>
-                  <input
+                  <PasswordInput
                     id="change-confirm-password"
-                    type="password"
                     value={changeConfirmPassword}
                     onChange={e => setChangeConfirmPassword(e.target.value)}
                     autoComplete="new-password"
@@ -611,9 +606,8 @@ export default function VaultSettings() {
                   <label htmlFor="wipe-confirm-password">
                     Confirm with current master password
                   </label>
-                  <input
+                  <PasswordInput
                     id="wipe-confirm-password"
-                    type="password"
                     value={wipeConfirmPassword}
                     onChange={e => setWipeConfirmPassword(e.target.value)}
                     autoComplete="current-password"
@@ -665,13 +659,13 @@ export default function VaultSettings() {
                     Anyone with a registered fingerprint on this Mac will be able to unlock NetStacks.
                     Your master password remains the recovery method.
                   </p>
-                  <input
-                    type="password"
+                  <PasswordInput
                     value={biometricPassword}
                     onChange={(e) => setBiometricPassword(e.target.value)}
                     placeholder="Confirm master password"
                     autoFocus
                     disabled={biometricBusy}
+                    autoComplete="current-password"
                   />
                   <div className="vault-biometric-enable-actions">
                     <button type="submit" className="btn-save" disabled={biometricBusy}>
@@ -727,8 +721,7 @@ export default function VaultSettings() {
 
                     {isEditing ? (
                       <div className="api-key-input">
-                        <input
-                          type="password"
+                        <PasswordInput
                           value={editingValue}
                           onChange={(e) => setEditingValue(e.target.value)}
                           placeholder={`Enter ${API_KEY_LABELS[keyType]} API key`}

@@ -14,6 +14,7 @@ import {
   type UpdateMcpServerRequest,
 } from '../api/mcp';
 import { showToast } from './Toast';
+import { PasswordInput } from './PasswordInput';
 import './McpServersSection.css';
 
 // Icons
@@ -300,9 +301,8 @@ function AddServerDialog({ isOpen, onClose, onAdd, editingServer, onUpdate }: Ad
                   <label htmlFor="mcp-auth-token">
                     {authType === 'bearer' ? 'Bearer Token' : 'API Key'}
                   </label>
-                  <input
+                  <PasswordInput
                     id="mcp-auth-token"
-                    type="password"
                     value={authToken}
                     onChange={e => setAuthToken(e.target.value)}
                     placeholder={

@@ -35,6 +35,7 @@ import { useTokenUsage, type AiProviderType as TokenProviderType } from '../cont
 import { TOOL_REGISTRY, TOOL_CATEGORIES, type ToolCategory } from '../lib/agentTools';
 import McpServersSection from './McpServersSection';
 import AIMemoryTab from './AIMemoryTab';
+import { PasswordInput } from './PasswordInput';
 import './AISettingsTab.css';
 
 // Icons
@@ -1130,8 +1131,7 @@ export default function AISettingsTab() {
                       <div className="form-group">
                         <label>API Key</label>
                         <div className="api-key-row">
-                          <input
-                            type="password"
+                          <PasswordInput
                             className="form-input"
                             value={apiKeys[p.type]}
                             onChange={(e) => setApiKeys(prev => ({ ...prev, [p.type]: e.target.value }))}
@@ -1539,8 +1539,7 @@ export default function AISettingsTab() {
                 </div>
               ) : (
                 <form onSubmit={handleEnableConfigMode} style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                  <input
-                    type="password"
+                  <PasswordInput
                     className="form-input"
                     placeholder="Master password to enable…"
                     value={configModePassword}

@@ -20,6 +20,7 @@ import {
   type DeviceFilters,
 } from '../api/netboxSources';
 import { listProfiles, type CredentialProfile } from '../api/profiles';
+import { PasswordInput } from './PasswordInput';
 
 // Helper to format device filters for display
 function formatDeviceFilters(filters: DeviceFilters): string {
@@ -713,9 +714,8 @@ function NetBoxImportDialog({
                   </div>
                   <div className="netbox-field">
                     <label htmlFor="netbox-token">API Token</label>
-                    <input
+                    <PasswordInput
                       id="netbox-token"
-                      type="password"
                       value={token}
                       onChange={(e) => setToken(e.target.value)}
                       placeholder="Enter your NetBox API token"

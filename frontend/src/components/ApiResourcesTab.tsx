@@ -17,6 +17,7 @@ import type {
   QuickActionResult,
 } from '../types/quickAction'
 import './ApiResourcesTab.css'
+import { PasswordInput } from './PasswordInput'
 
 // Icons
 const Icons = {
@@ -267,7 +268,7 @@ function ApiResourceDialog({
           {authType === 'bearer_token' && (
             <div className="form-group">
               <label>Bearer Token</label>
-              <input type="password" value={authToken} onChange={(e) => setAuthToken(e.target.value)} placeholder={isEdit ? '(unchanged if blank)' : 'Token'} />
+              <PasswordInput value={authToken} onChange={(e) => setAuthToken(e.target.value)} placeholder={isEdit ? '(unchanged if blank)' : 'Token'} />
             </div>
           )}
 
@@ -279,7 +280,7 @@ function ApiResourceDialog({
               </div>
               <div className="form-group">
                 <label>Password</label>
-                <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder={isEdit ? '(unchanged if blank)' : ''} />
+                <PasswordInput value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder={isEdit ? '(unchanged if blank)' : ''} />
               </div>
             </>
           )}
@@ -292,7 +293,7 @@ function ApiResourceDialog({
               </div>
               <div className="form-group">
                 <label>API Key</label>
-                <input type="password" value={authToken} onChange={(e) => setAuthToken(e.target.value)} placeholder={isEdit ? '(unchanged if blank)' : 'Key value'} />
+                <PasswordInput value={authToken} onChange={(e) => setAuthToken(e.target.value)} placeholder={isEdit ? '(unchanged if blank)' : 'Key value'} />
               </div>
             </>
           )}
@@ -309,7 +310,7 @@ function ApiResourceDialog({
               </div>
               <div className="form-group">
                 <label>Password</label>
-                <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder={isEdit ? '(unchanged)' : 'For {{password}} variable'} />
+                <PasswordInput value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder={isEdit ? '(unchanged)' : 'For {{password}} variable'} />
               </div>
               {authFlow.map((step, index) => (
                 <div key={index} className="auth-flow-step">

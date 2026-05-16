@@ -8,6 +8,7 @@ import {
   type TestSmtpRequest,
 } from '../api/smtp';
 import { confirmDialog } from './ConfirmDialog';
+import { PasswordInput } from './PasswordInput';
 import './SmtpSettingsSection.css';
 
 // Icons
@@ -336,9 +337,8 @@ export default function SmtpSettingsSection({ onSaved }: SmtpSettingsSectionProp
           </div>
           <div className="smtp-form-group">
             <label htmlFor="smtp-password">Password</label>
-            <input
+            <PasswordInput
               id="smtp-password"
-              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={hasExistingPassword ? '(unchanged)' : 'Enter password'}

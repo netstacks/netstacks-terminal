@@ -1,5 +1,6 @@
 import type { FormEvent } from 'react';
 import { useState } from 'react';
+import { PasswordInput } from '../PasswordInput';
 import { useAuth } from '../../hooks/useAuth';
 import './LoginScreen.css';
 
@@ -82,9 +83,8 @@ export function LoginScreen() {
 
           <div className="form-field">
             <label htmlFor="password">Password</label>
-            <input
+            <PasswordInput
               id="password"
-              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter your password"
