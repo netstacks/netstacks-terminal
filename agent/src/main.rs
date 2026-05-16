@@ -41,6 +41,7 @@ mod dev;
 mod discovery;
 mod docs;
 mod integrations;
+mod lsp;
 mod models;
 mod providers;
 mod quick_actions;
