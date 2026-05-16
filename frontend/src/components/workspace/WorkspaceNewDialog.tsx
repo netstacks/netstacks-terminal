@@ -72,16 +72,58 @@ export default function WorkspaceNewDialog({
   // defaultLaunchArgs / autoLaunchAi / defaultCustomCommand but this
   // dialog never read them, so every new workspace started with hard-
   // coded 'claude' / empty / true regardless of what the user saved.
-  // Reads from localStorage synchronously (no flash of hardcoded
-  // defaults) — see loadWorkspaceDefaults().
+  //
+  // Two read sources: localStorage (synchronous, instant) AND backend
+  // (/settings/workspace-defaults — authoritative for users who saved
+  // before localStorage mirroring landed, or who use the app from
+  // multiple machines). Backend wins when both are present, and the
+  // backend value is mirrored back to localStorage so subsequent dialog
+  // opens get the fast path.
   useEffect(() => {
-    const d = loadWorkspaceDefaults()
-    if (!touched.aiTool) setAiTool(d.defaultAiTool)
-    if (!touched.customCommand) setCustomCommand(d.defaultCustomCommand)
-    if (!touched.launchArgs) setLaunchArgs(d.defaultLaunchArgs)
-    if (!touched.autoLaunch) setAutoLaunch(d.autoLaunchAi)
-    // Run once on mount; later defaults edits don't retroactively rewrite
-    // an open dialog. touched is read inside but should not retrigger.
+    // Synchronous local-storage read first so the form fields don't
+    // flash hardcoded defaults before the backend round-trip lands.
+    const local = loadWorkspaceDefaults()
+    if (!touched.aiTool) setAiTool(local.defaultAiTool)
+    if (!touched.customCommand) setCustomCommand(local.defaultCustomCommand)
+    if (!touched.launchArgs) setLaunchArgs(local.defaultLaunchArgs)
+    if (!touched.autoLaunch) setAutoLaunch(local.autoLaunchAi)
+
+    let cancelled = false
+    getClient().http.get('/settings/workspace-defaults').then(({ data }) => {
+      if (cancelled || !data || typeof data !== 'object') return
+      const d = data as Partial<{
+        defaultAiTool: AiToolType
+        defaultCustomCommand: string
+        defaultLaunchArgs: string
+        autoLaunchAi: boolean
+      }>
+      if (d.defaultAiTool && !touched.aiTool) setAiTool(d.defaultAiTool)
+      if (typeof d.defaultCustomCommand === 'string' && !touched.customCommand) {
+        setCustomCommand(d.defaultCustomCommand)
+      }
+      if (typeof d.defaultLaunchArgs === 'string' && !touched.launchArgs) {
+        setLaunchArgs(d.defaultLaunchArgs)
+      }
+      if (typeof d.autoLaunchAi === 'boolean' && !touched.autoLaunch) {
+        setAutoLaunch(d.autoLaunchAi)
+      }
+      // Mirror back to localStorage so the next dialog open hits the
+      // fast path and survives a backend outage.
+      try {
+        const merged = { ...local, ...d }
+        window.localStorage.setItem(
+          'netstacks.workspaceDefaults',
+          JSON.stringify(merged),
+        )
+      } catch { /* full disk etc. — fine to skip */ }
+    }).catch(() => {
+      // Backend may be down or endpoint may have moved — local-storage
+      // values already applied above. Silent.
+    })
+    return () => { cancelled = true }
+    // Run once on mount; later defaults edits don't retroactively
+    // rewrite an open dialog. touched is read inside but should not
+    // retrigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
