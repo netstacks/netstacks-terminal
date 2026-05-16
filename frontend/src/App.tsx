@@ -5981,11 +5981,12 @@ def main(command: str = "show version"):
                 key={item.id}
                 draggable={isReordering}
                 className={`activity-bar-item ${activeView === item.id ? 'active' : ''} ${isReordering ? 'activity-bar-item--reordering' : ''} ${draggedItemId === item.id ? 'dragging' : ''} ${dragOverItemId === item.id && dragOverPosition === 'top' ? 'drag-over-top' : ''} ${dragOverItemId === item.id && dragOverPosition === 'bottom' ? 'drag-over-bottom' : ''}`}
-                onClick={(e) => {
-                  if (isReordering) {
-                    e.preventDefault()
-                    return
-                  }
+                onClick={() => {
+                  // Clicking an item while in reorder mode also exits the
+                  // mode and then navigates — otherwise users can get
+                  // stuck (the document click handler doesn't exit on
+                  // clicks landing inside .activity-bar-item).
+                  if (isReordering) setIsReordering(false)
                   item.onClick()
                 }}
                 onContextMenu={(e) => handleActivityContext(e, item.id)}
