@@ -9311,6 +9311,36 @@ pub async fn reject_host_key_prompt(
     }
 }
 
+/// GET /api/host-keys — list every trusted host key in the known_hosts
+/// store so the user can audit and revoke TOFU decisions.
+pub async fn list_host_keys() -> Result<Json<Vec<crate::ssh::host_keys::HostKeyEntry>>, ApiError> {
+    let store_arc = crate::ssh::host_keys::load_default_store();
+    let store = store_arc.lock().await;
+    Ok(Json(store.list_entries()))
+}
+
+/// DELETE /api/host-keys/:host/:port — revoke a previously-trusted key.
+/// On the next connection to that host:port the user will get a fresh
+/// TOFU prompt. Returns 404 if no key was stored for the pair.
+pub async fn delete_host_key(
+    Path((host, port)): Path<(String, u16)>,
+) -> Result<StatusCode, ApiError> {
+    let store_arc = crate::ssh::host_keys::load_default_store();
+    let mut store = store_arc.lock().await;
+    let removed = store.remove_key(&host, port).map_err(|e| ApiError {
+        error: format!("Failed to revoke host key: {}", e),
+        code: "HOST_KEY_REMOVE_FAILED".to_string(),
+    })?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError {
+            error: format!("No trusted key found for {}:{}", host, port),
+            code: "NOT_FOUND".to_string(),
+        })
+    }
+}
+
 // === AI Config-Mode Endpoints (AUDIT FIX EXEC-002) ===
 //
 // These three endpoints replace the request-body `allow_config_changes`

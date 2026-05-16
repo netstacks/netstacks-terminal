@@ -18,6 +18,7 @@ import SettingsMappedKeys from './SettingsMappedKeys'
 import PanelSettingsPanel from './PanelSettings'
 import SettingsTroubleshooting from './SettingsTroubleshooting'
 import JumpHostsTab from './JumpHostsTab'
+import HostKeysTab from './HostKeysTab'
 import ApiResourcesTab from './ApiResourcesTab'
 import WorkspaceSettingsTab from './WorkspaceSettingsTab'
 import { useKeyboard } from '../hooks/useKeyboard'
@@ -40,7 +41,7 @@ interface Setting {
   options?: { label: string; value: string }[]
 }
 
-export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'quickCalls' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
+export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'quickCalls' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'hostKeys' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
 
 interface SettingsPanelProps {
   onSettingChange?: (id: string, value: unknown) => void
@@ -63,6 +64,7 @@ const TAB_SEARCH_INDEX: { tab: SettingsTab; label: string; keywords: string[] }[
   { tab: 'tunnels', label: 'Tunnels', keywords: ['tunnel', 'ssh tunnel', 'port forward', 'socks', 'proxy'] },
   { tab: 'highlighting', label: 'Highlighting', keywords: ['highlight', 'color', 'pattern', 'regex', 'rule'] },
   { tab: 'security', label: 'Security', keywords: ['security', 'vault', 'credential', 'password', 'encryption'] },
+  { tab: 'hostKeys', label: 'Trusted Hosts', keywords: ['host key', 'known hosts', 'ssh', 'tofu', 'trust', 'fingerprint', 'revoke', 'mitm'] },
   { tab: 'integrations', label: 'Integrations', keywords: ['integration', 'netbox', 'netdisco', 'librenms'] },
   { tab: 'apiResources', label: 'API Resources', keywords: ['api', 'resource', 'quick', 'action', 'endpoint', 'solarwinds', 'prtg', 'http', 'rest'] },
   { tab: 'troubleshooting', label: 'Troubleshooting', keywords: ['troubleshoot', 'recording', 'session', 'capture'] },
@@ -402,6 +404,14 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         )}
         {!isEnterprise && (
           <button
+            className={`settings-nav-item ${activeTab === 'hostKeys' ? 'active' : ''}${matchingTabs && !matchingTabs.has('hostKeys') ? ' dimmed' : ''}`}
+            onClick={() => setActiveTab('hostKeys')}
+          >
+            Trusted Hosts
+          </button>
+        )}
+        {!isEnterprise && (
+          <button
             className={`settings-nav-item ${activeTab === 'workspaces' ? 'active' : ''}${matchingTabs && !matchingTabs.has('workspaces') ? ' dimmed' : ''}`}
             onClick={() => setActiveTab('workspaces')}
           >
@@ -568,6 +578,11 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         {/* Security settings tab */}
         {activeTab === 'security' && (
           <VaultSettings />
+        )}
+
+        {/* Trusted Hosts (SSH known_hosts) tab */}
+        {activeTab === 'hostKeys' && (
+          <HostKeysTab />
         )}
 
         {/* Workspaces settings tab */}

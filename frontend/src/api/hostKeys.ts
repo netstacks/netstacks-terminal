@@ -44,3 +44,25 @@ export async function approveHostKeyPrompt(id: string): Promise<void> {
 export async function rejectHostKeyPrompt(id: string): Promise<void> {
   await getClient().http.post(`/host-keys/prompts/${id}/reject`);
 }
+
+/** One entry in the trusted-hosts list returned by GET /api/host-keys. */
+export interface TrustedHostKey {
+  host: string;
+  port: number;
+  /** "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", etc. */
+  key_type: string;
+  /** SHA-256 fingerprint, e.g. "SHA256:abc..." */
+  fingerprint: string;
+}
+
+/** GET /api/host-keys — list every TOFU-trusted host key. */
+export async function listTrustedHostKeys(): Promise<TrustedHostKey[]> {
+  const { data } = await getClient().http.get('/host-keys');
+  return Array.isArray(data) ? data : [];
+}
+
+/** DELETE /api/host-keys/:host/:port — revoke a previously-trusted key.
+ *  Next connection to that host:port triggers a fresh TOFU prompt. */
+export async function deleteTrustedHostKey(host: string, port: number): Promise<void> {
+  await getClient().http.delete(`/host-keys/${encodeURIComponent(host)}/${port}`);
+}

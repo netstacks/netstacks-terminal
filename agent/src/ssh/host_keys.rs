@@ -262,6 +262,44 @@ impl HostKeyStore {
         }
     }
 
+    /// List every trusted host:port + fingerprint currently in the store.
+    /// Used by the settings UI so a user can audit what they've TOFU'd.
+    pub fn list_entries(&self) -> Vec<HostKeyEntry> {
+        let mut out = Vec::with_capacity(self.known_keys.len());
+        for (host_port, key_bytes) in &self.known_keys {
+            // Split "host:port" — host may itself contain `:` (IPv6), so
+            // partition on the LAST `:`.
+            let (host, port) = match host_port.rsplit_once(':') {
+                Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(22)),
+                None => (host_port.clone(), 22),
+            };
+            let key_type = PublicKey::from_bytes(key_bytes)
+                .map(|pk| pk.algorithm().as_str().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let fingerprint = fingerprint_bytes(key_bytes);
+            out.push(HostKeyEntry { host, port, key_type, fingerprint });
+        }
+        // Stable ordering: by host, then port.
+        out.sort_by(|a, b| a.host.cmp(&b.host).then(a.port.cmp(&b.port)));
+        out
+    }
+
+    /// Remove the trusted host key for `host:port`. Returns true if an
+    /// entry was actually removed; false if no such entry existed.
+    pub fn remove_key(&mut self, host: &str, port: u16) -> Result<bool, HostKeyError> {
+        let host_port = format!("{}:{}", host, port);
+        if self.known_keys.remove(&host_port).is_none() {
+            return Ok(false);
+        }
+        self.save_to_file()?;
+        tracing::warn!(
+            target: "audit",
+            host = %host_port,
+            "host key removed from known_hosts via user revoke"
+        );
+        Ok(true)
+    }
+
     /// Save all known host keys to the known_hosts file.
     ///
     /// Creates the parent directory if it doesn't exist.
@@ -297,6 +335,15 @@ impl HostKeyStore {
         tracing::info!("Saved {} known host keys to {}", self.known_keys.len(), self.path.display());
         Ok(())
     }
+}
+
+/// One entry in the user-visible trusted-hosts list.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostKeyEntry {
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
 }
 
 /// Classification of a presented host key for the new prompt-driven flow.
