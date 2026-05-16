@@ -28,7 +28,20 @@ Pyrefly is **not** bundled in the installer. It's downloaded (~13 MB) only when 
 | XML | Existing Monaco highlighting + format-document (`xml-formatter` npm package) | 100% client-side, in frontend bundle |
 | JSON | No work — Monaco's bundled `json.worker` already covers it | Already shipped |
 
-Editors targeted: `WorkspaceCodeEditor.tsx` (any extension) and `ScriptEditor.tsx` (Python-only). Wired via a single `useLspClient()` hook in each.
+### Editor coverage — works anywhere Monaco is used
+
+**Client-side features (YANG highlighting, XML format, JSON validation) light up in every Monaco editor automatically.** They register globally in `main.tsx` via `monaco.languages.register*` calls — no per-editor wiring. `WorkspaceCodeEditor`, `ScriptEditor`, `DocumentTabEditor`, `TemplateDetailTab`, and any future Monaco instance pick them up by virtue of existing.
+
+**Python LSP via Pyrefly works in any editor that calls the `useLspClient` hook**, with two modes depending on whether the editor has a workspace context:
+
+| Editor context | Mode | What Pyrefly sees |
+|---|---|---|
+| Editor has a workspace (e.g. `WorkspaceCodeEditor` opens `repo/src/foo.py`) | **Project mode** | The workspace root: full cross-file analysis, `pyproject.toml` respected, imports resolve |
+| Editor has no workspace (e.g. opening a loose `.py` in `DocumentTabEditor`) | **Loose-file mode** | A per-session temp dir containing only the file: single-file analysis (diagnostics, type inference from stdlib, hover docs); no cross-file go-to-def |
+
+`ScriptEditor` passes the scripts directory as its workspace, so all scripts in that directory share one Pyrefly session and get project-mode semantics.
+
+v1 wires the hook into `WorkspaceCodeEditor.tsx` (any extension) and `ScriptEditor.tsx` (Python-only). Adding it to any other Monaco editor later is a one-line call.
 
 ### Out of scope (deferred to later versions)
 
@@ -79,7 +92,7 @@ v1 ships one built-in descriptor (Pyrefly). User-added descriptors always use `i
 ### Agent — generic LSP host (`agent/src/lsp/`)
 
 - **`mod.rs`** — `LspHost` struct. Owns the merged plugin registry (built-ins + user-added from SQLite) and installed-binary state.
-- **`session.rs`** — `LspSession` per `(plugin_id, workspace_path)`. Owns a child process plus the set of connected WebSocket clients (multiple Monaco tabs in the same workspace share one Pyrefly process).
+- **`session.rs`** — `LspSession` per `(plugin_id, workspace_or_synthetic_id)`. Owns a child process plus the set of connected WebSocket clients. Multiple Monaco tabs in the same workspace share one Pyrefly process. For editors with no workspace, the session is keyed by a synthetic per-tab id, and the agent creates a temp dir (`{dataDir}/lsp/scratch/{uuid}/`) containing only the open file — torn down on disconnect.
 - **`install.rs`** — generic on-demand installer: download, SHA-256 verify, extract, set permissions, smoke test.
 - **`routes.rs`** — Axum routes mounted under `/lsp`:
   - `GET /lsp/plugins` — returns the merged plugin list with install status.
@@ -88,13 +101,13 @@ v1 ships one built-in descriptor (Pyrefly). User-added descriptors always use `i
   - `POST /lsp/plugins` — create a user-added plugin (used by the Add form's "Save").
   - `PUT /lsp/plugins/{id}` — update a plugin's configuration (override command for built-in; any field for user-added).
   - `POST /lsp/plugins/test` — spawn a candidate command, send LSP `initialize`, report success or stderr. Used by the "Test connection" button in the Add form.
-  - `WS /lsp/{plugin_id}?workspace={path}` — bidirectional LSP JSON-RPC stream (this is the hot path).
+  - `WS /lsp/{plugin_id}?workspace={path}` (project mode) or `WS /lsp/{plugin_id}?scratch=1` (loose-file mode) — bidirectional LSP JSON-RPC stream (this is the hot path).
 - Authentication: reuses the existing agent bearer-token scheme on all routes.
 
 ### Frontend — generic client (`frontend/src/lsp/`)
 
 - **`plugins.ts`** — the built-in plugin registry array. v1: `[pyreflyPlugin]`.
-- **`useLspClient.ts`** — hook called from any Monaco editor. Looks up the plugin descriptor for the editor's language, queries the agent for install status, opens the WebSocket if available, wires `monaco-languageclient` to Monaco.
+- **`useLspClient.ts`** — hook called from any Monaco editor: `useLspClient(language, workspace?)`. Looks up the plugin descriptor for the editor's language, queries the agent for install status, opens the WebSocket (`wss://localhost:8080/lsp/{plugin_id}?workspace={path}` for project mode, or `?scratch=1` for loose-file mode), and wires `monaco-languageclient` to Monaco. The `workspace` argument is optional; omitting it triggers loose-file mode.
 - **`installationApi.ts`** — thin axios wrapper over the agent's `/lsp/plugins` REST endpoints. Returns typed responses; emits progress events for downloads via the existing event system.
 
 ### Settings UI (`Settings → Workspaces → Language Features`)
@@ -254,6 +267,7 @@ No changes. Monaco's built-in `json.worker` (already bundled, configured in `fro
 
 - **First-launch race:** if a user opens a `.py` file before the agent's TLS-ready event fires, the banner waits silently until the agent is reachable (existing `sidecar-tls-ready` event handles this).
 - **Workspace = subdirectory of another workspace:** Pyrefly session is keyed by workspace root, not file path, so opening `repo/subdir/file.py` from a `repo`-rooted workspace reuses the `repo` session.
+- **Loose-file mode cleanup:** the per-tab synthetic id's temp dir is deleted when the WebSocket disconnects. If the agent crashes mid-session, leftover scratch dirs older than 24 hours are swept on next agent startup.
 - **Pyrefly version skew across NetStacks updates:** descriptor pinning ensures the agent never auto-runs a binary it didn't pin. When a NetStacks release pins a newer Pyrefly version, the install dir keeps the old binary until the user clicks "Update."
 - **Concurrent installs:** install endpoint is mutex-protected per plugin; second concurrent call returns `409 Already in progress` and joins the existing progress stream.
 
