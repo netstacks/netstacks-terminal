@@ -189,7 +189,7 @@ export interface GitOps {
   isRepo(): Promise<boolean>
   status(): Promise<GitFileStatus[]>
   branch(): Promise<GitBranchInfo | null>
-  diff(filePath?: string): Promise<string>
+  diff(filePath?: string, opts?: { staged?: boolean }): Promise<string>
   log(limit?: number, filePath?: string): Promise<CommitInfo[]>
   blame(filePath: string): Promise<BlameLine[]>
   listBranches(): Promise<BranchEntry[]>

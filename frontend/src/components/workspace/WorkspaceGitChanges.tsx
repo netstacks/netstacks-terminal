@@ -220,19 +220,32 @@ export default function WorkspaceGitChanges({
         <div style={{ position: 'relative' }}>
           <textarea
             className="workspace-git-commit-input"
-            placeholder={generating ? 'Generating...' : 'Commit message... (Tab to generate)'}
+            placeholder={
+              generating
+                ? 'Generating...'
+                : !hasChanges
+                  ? 'No changes to commit'
+                  : staged.length === 0
+                    ? 'Stage changes to commit... (Tab to generate)'
+                    : 'Commit message... (Tab to generate)'
+            }
             value={commitMsg}
             onChange={e => setCommitMsg(e.target.value)}
             rows={3}
-            disabled={generating}
+            disabled={generating || !hasChanges}
             onKeyDown={async e => {
               if (e.key === 'Tab' && !e.shiftKey && !commitMsg.trim() && hasChanges) {
                 e.preventDefault()
                 setGenerating(true)
                 try {
-                  const diff = await gitOps.diff()
+                  // Prefer the staged diff so the AI describes exactly what
+                  // will be committed. Fall back to the working-tree diff if
+                  // nothing is staged yet (user can preview a message before
+                  // staging).
+                  const useStaged = staged.length > 0
+                  const diff = await gitOps.diff(undefined, { staged: useStaged })
                   const truncatedDiff = diff.length > 4000 ? diff.slice(0, 4000) + '\n... (truncated)' : diff
-                  const fileList = staged.map(s => `${s.status}: ${s.path}`).join('\n')
+                  const fileList = (useStaged ? staged : unstaged).map(s => `${s.status}: ${s.path}`).join('\n')
                   const prompt = `Write a concise git commit message for these changes. Use conventional commit format (feat/fix/chore/refactor/docs). First line max 72 chars. Add a blank line then a brief body if needed. Respond with ONLY the commit message, no quotes or explanation.
 
 Staged files:

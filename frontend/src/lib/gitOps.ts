@@ -43,9 +43,10 @@ export class AgentGitOps implements GitOps {
     return data.branch ?? null
   }
 
-  async diff(filePath?: string): Promise<string> {
+  async diff(filePath?: string, opts?: { staged?: boolean }): Promise<string> {
     const data = await this.post<{ diff: string }>('/workspace/git/diff', {
       path: filePath ?? null,
+      staged: opts?.staged ?? false,
     })
     return data.diff ?? ''
   }
@@ -206,8 +207,10 @@ export class RemoteGitOps implements GitOps {
     return parseBranchOutput(output)
   }
 
-  async diff(filePath?: string): Promise<string> {
-    const args = filePath ? ['diff', '--', filePath] : ['diff']
+  async diff(filePath?: string, opts?: { staged?: boolean }): Promise<string> {
+    const args: string[] = ['diff']
+    if (opts?.staged) args.push('--cached')
+    if (filePath) args.push('--', filePath)
     return this.run(args)
   }
 

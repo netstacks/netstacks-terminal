@@ -41,13 +41,21 @@ pub async fn git_status(
 pub struct GitDiffRequest {
     pub workspace_root: String,
     pub path: Option<String>,
+    /// When true, return the staged diff (git diff --cached) — what will be
+    /// committed. When false/omitted, return the working-tree diff (unstaged
+    /// changes). Default false preserves the original API behavior.
+    #[serde(default)]
+    pub staged: bool,
 }
 
 pub async fn git_diff(
     Json(req): Json<GitDiffRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let ops = GitOps::new(&req.workspace_root);
-    let diff = ops.diff(req.path.as_deref()).await.map_err(ApiError::from)?;
+    let diff = ops
+        .diff_with_options(req.path.as_deref(), req.staged)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "diff": diff })))
 }
 

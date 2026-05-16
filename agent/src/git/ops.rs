@@ -60,7 +60,20 @@ impl GitOps {
     }
 
     pub async fn diff(&self, file_path: Option<&str>) -> Result<String, GitError> {
+        self.diff_with_options(file_path, false).await
+    }
+
+    /// `staged=true` adds `--cached` so the diff reflects what will be committed
+    /// (vs. the working-tree changes that haven't been `git add`-ed yet).
+    pub async fn diff_with_options(
+        &self,
+        file_path: Option<&str>,
+        staged: bool,
+    ) -> Result<String, GitError> {
         let mut args = vec!["diff"];
+        if staged {
+            args.push("--cached");
+        }
         if let Some(p) = file_path {
             args.push("--");
             args.push(p);
