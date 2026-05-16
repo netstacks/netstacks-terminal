@@ -18,7 +18,7 @@ import PanelSettingsPanel from './PanelSettings'
 import SettingsTroubleshooting from './SettingsTroubleshooting'
 import JumpHostsTab from './JumpHostsTab'
 import ApiResourcesTab from './ApiResourcesTab'
-import GitAccountsSettingsTab from './GitAccountsSettingsTab'
+import WorkspaceSettingsTab from './WorkspaceSettingsTab'
 import { useKeyboard } from '../hooks/useKeyboard'
 import { useSettings, type AppSettings } from '../hooks/useSettings'
 import { TERMINAL_THEMES } from '../lib/terminalThemes'
@@ -39,7 +39,7 @@ interface Setting {
   options?: { label: string; value: string }[]
 }
 
-export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'gitAccounts'
+export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
 
 interface SettingsPanelProps {
   onSettingChange?: (id: string, value: unknown) => void
@@ -68,7 +68,7 @@ const TAB_SEARCH_INDEX: { tab: SettingsTab; label: string; keywords: string[] }[
   { tab: 'account', label: 'Account', keywords: ['account', 'controller', 'username', 'sign out', 'logout'] },
   { tab: 'myCredentials', label: 'My Credentials', keywords: ['credential', 'password', 'secret'] },
   { tab: 'sshCerts', label: 'SSH Certificates', keywords: ['ssh', 'certificate', 'cert', 'ca', 'public key'] },
-  { tab: 'gitAccounts', label: 'Git Accounts', keywords: ['git', 'accounts', 'github', 'gitlab', 'gitea', 'bitbucket', 'pat', 'token', 'oauth'] },
+  { tab: 'workspaces', label: 'Workspaces', keywords: ['workspace', 'git', 'accounts', 'github', 'gitlab', 'ai', 'tool', 'auto-launch', 'terminal', 'explorer', 'default'] },
 ]
 
 // Default settings configuration - only includes settings that are actually functional
@@ -392,10 +392,10 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         )}
         {!isEnterprise && (
           <button
-            className={`settings-nav-item ${activeTab === 'gitAccounts' ? 'active' : ''}${matchingTabs && !matchingTabs.has('gitAccounts') ? ' dimmed' : ''}`}
-            onClick={() => setActiveTab('gitAccounts')}
+            className={`settings-nav-item ${activeTab === 'workspaces' ? 'active' : ''}${matchingTabs && !matchingTabs.has('workspaces') ? ' dimmed' : ''}`}
+            onClick={() => setActiveTab('workspaces')}
           >
-            Git Accounts
+            Workspaces
           </button>
         )}
         {!isEnterprise && hasFeature('local_integrations') && (
@@ -555,9 +555,9 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
           <VaultSettings />
         )}
 
-        {/* Git Accounts settings tab */}
-        {activeTab === 'gitAccounts' && (
-          <GitAccountsSettingsTab />
+        {/* Workspaces settings tab */}
+        {activeTab === 'workspaces' && (
+          <WorkspaceSettingsTab />
         )}
 
         {/* Integrations settings tab */}
