@@ -117,6 +117,9 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [isTransferMinimized, setIsTransferMinimized] = useState(false);
   const transferIdRef = useRef(0);
+  // Tracks IDs cancelled mid-flight. Reads are synchronous, unlike `transfers`
+  // state which is stale inside async closures captured before the cancel.
+  const cancelledTransferIdsRef = useRef<Set<string>>(new Set());
 
   const sftp = sftpId || sessionId;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -218,6 +221,7 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
 
   // Handle transfer cancellation
   const handleCancelTransfer = useCallback((id: string) => {
+    cancelledTransferIdsRef.current.add(id);
     setTransfers(prev => prev.map(t =>
       t.id === id && (t.status === 'active' || t.status === 'pending')
         ? { ...t, status: 'cancelled' as const }
@@ -253,26 +257,24 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
     setTransfers(prev => [...prev, newTransfer]);
     setIsTransferMinimized(false);
 
+    // Simulate progress updates (actual progress would need backend streaming support)
+    const progressInterval = setInterval(() => {
+      setTransfers(prev => prev.map(t => {
+        if (t.id !== transferId || t.status !== 'active') return t;
+        const newProgress = Math.min(t.progress + Math.random() * 15, 95);
+        return {
+          ...t,
+          progress: newProgress,
+          bytesTransferred: Math.floor((newProgress / 100) * t.size),
+        };
+      }));
+    }, 200);
+
     try {
-      // Simulate progress updates (actual progress would need backend streaming support)
-      const progressInterval = setInterval(() => {
-        setTransfers(prev => prev.map(t => {
-          if (t.id !== transferId || t.status !== 'active') return t;
-          const newProgress = Math.min(t.progress + Math.random() * 15, 95);
-          return {
-            ...t,
-            progress: newProgress,
-            bytesTransferred: Math.floor((newProgress / 100) * t.size),
-          };
-        }));
-      }, 200);
-
       const blob = await sftpDownload(sftp, entry.path);
-      clearInterval(progressInterval);
 
-      // Check if cancelled
-      const currentTransfer = transfers.find(t => t.id === transferId);
-      if (currentTransfer?.status === 'cancelled') {
+      // Check cancellation via ref (latest state, not the stale closure)
+      if (cancelledTransferIdsRef.current.has(transferId)) {
         return;
       }
 
@@ -292,6 +294,8 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
           : t
       ));
       setError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      clearInterval(progressInterval);
     }
   };
 
@@ -336,29 +340,31 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         ));
       }
 
-      // Check if cancelled before starting
-      const currentState = transfers.find(t => t.id === transfer.id);
-      if (currentState?.status === 'cancelled') {
+      // Check if cancelled before starting (ref read; transfers closure is stale)
+      if (cancelledTransferIdsRef.current.has(transfer.id)) {
         continue;
       }
 
-      try {
-        // Simulate progress updates
-        const progressInterval = setInterval(() => {
-          setTransfers(prev => prev.map(t => {
-            if (t.id !== transfer.id || t.status !== 'active') return t;
-            const newProgress = Math.min(t.progress + Math.random() * 15, 95);
-            return {
-              ...t,
-              progress: newProgress,
-              bytesTransferred: Math.floor((newProgress / 100) * t.size),
-            };
-          }));
-        }, 200);
+      // Simulate progress updates
+      const progressInterval = setInterval(() => {
+        setTransfers(prev => prev.map(t => {
+          if (t.id !== transfer.id || t.status !== 'active') return t;
+          const newProgress = Math.min(t.progress + Math.random() * 15, 95);
+          return {
+            ...t,
+            progress: newProgress,
+            bytesTransferred: Math.floor((newProgress / 100) * t.size),
+          };
+        }));
+      }, 200);
 
+      try {
         const buffer = await file.arrayBuffer();
         await sftpUpload(sftp, transfer.path, buffer);
-        clearInterval(progressInterval);
+
+        if (cancelledTransferIdsRef.current.has(transfer.id)) {
+          continue;
+        }
 
         // Mark as completed
         setTransfers(prev => prev.map(t =>
@@ -373,6 +379,8 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
             : t
         ));
         setError(err instanceof Error ? err.message : 'Upload failed');
+      } finally {
+        clearInterval(progressInterval);
       }
     }
 

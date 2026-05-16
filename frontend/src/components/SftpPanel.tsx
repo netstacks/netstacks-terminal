@@ -169,6 +169,9 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [isTransferMinimized, setIsTransferMinimized] = useState(false);
   const transferIdRef = useRef(0);
+  // Tracks IDs cancelled mid-flight. Reads are synchronous, unlike `transfers`
+  // state which is stale inside async closures captured before the cancel.
+  const cancelledTransferIdsRef = useRef<Set<string>>(new Set());
 
   // File input for upload
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -325,23 +328,26 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
     setTransfers((prev) => [...prev, newTransfer]);
     setIsTransferMinimized(false);
 
-    try {
-      const progressInterval = setInterval(() => {
-        setTransfers((prev) =>
-          prev.map((t) => {
-            if (t.id !== transferId || t.status !== 'active') return t;
-            const newProgress = Math.min(t.progress + Math.random() * 15, 95);
-            return {
-              ...t,
-              progress: newProgress,
-              bytesTransferred: Math.floor((newProgress / 100) * t.size),
-            };
-          })
-        );
-      }, 200);
+    const progressInterval = setInterval(() => {
+      setTransfers((prev) =>
+        prev.map((t) => {
+          if (t.id !== transferId || t.status !== 'active') return t;
+          const newProgress = Math.min(t.progress + Math.random() * 15, 95);
+          return {
+            ...t,
+            progress: newProgress,
+            bytesTransferred: Math.floor((newProgress / 100) * t.size),
+          };
+        })
+      );
+    }, 200);
 
+    try {
       const blob = await sftpDownload(sftpId, entry.path);
-      clearInterval(progressInterval);
+
+      if (cancelledTransferIdsRef.current.has(transferId)) {
+        return;
+      }
 
       setTransfers((prev) =>
         prev.map((t) =>
@@ -364,6 +370,8 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
             : t
         )
       );
+    } finally {
+      clearInterval(progressInterval);
     }
   };
 
@@ -408,24 +416,31 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
         );
       }
 
-      try {
-        const progressInterval = setInterval(() => {
-          setTransfers((prev) =>
-            prev.map((t) => {
-              if (t.id !== transfer.id || t.status !== 'active') return t;
-              const newProgress = Math.min(t.progress + Math.random() * 15, 95);
-              return {
-                ...t,
-                progress: newProgress,
-                bytesTransferred: Math.floor((newProgress / 100) * t.size),
-              };
-            })
-          );
-        }, 200);
+      if (cancelledTransferIdsRef.current.has(transfer.id)) {
+        continue;
+      }
 
+      const progressInterval = setInterval(() => {
+        setTransfers((prev) =>
+          prev.map((t) => {
+            if (t.id !== transfer.id || t.status !== 'active') return t;
+            const newProgress = Math.min(t.progress + Math.random() * 15, 95);
+            return {
+              ...t,
+              progress: newProgress,
+              bytesTransferred: Math.floor((newProgress / 100) * t.size),
+            };
+          })
+        );
+      }, 200);
+
+      try {
         const buffer = await file.arrayBuffer();
         await sftpUpload(sftpId, transfer.path, buffer);
-        clearInterval(progressInterval);
+
+        if (cancelledTransferIdsRef.current.has(transfer.id)) {
+          continue;
+        }
 
         setTransfers((prev) =>
           prev.map((t) =>
@@ -446,6 +461,8 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
               : t
           )
         );
+      } finally {
+        clearInterval(progressInterval);
       }
     }
 
@@ -577,6 +594,7 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
   // --- Transfer handlers ---
 
   const handleCancelTransfer = useCallback((id: string) => {
+    cancelledTransferIdsRef.current.add(id);
     setTransfers((prev) =>
       prev.map((t) =>
         t.id === id && (t.status === 'active' || t.status === 'pending')
