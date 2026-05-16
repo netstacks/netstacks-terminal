@@ -43,7 +43,7 @@ export default function WorkspaceMarkdownPreview({ filePath, fileOps }: Workspac
   }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 16, background: 'var(--color-bg-primary)' }}>
+    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'auto', padding: 16, background: 'var(--color-bg-primary)' }}>
       <MarkdownViewer content={content} />
     </div>
   )
