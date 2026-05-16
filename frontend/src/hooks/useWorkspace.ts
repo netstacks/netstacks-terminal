@@ -251,6 +251,11 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
 
     const poll = setInterval(async () => {
       try {
+        // Existence check first — the file is absent 99% of the time and
+        // hitting readFile on a missing path returns 500 from the agent,
+        // which the global axios interceptor logs once per second.
+        const present = await fileOps.exists(signalPath)
+        if (!present) return
         const content = await fileOps.readFile(signalPath)
         const request = JSON.parse(content)
         if (request.path) {
