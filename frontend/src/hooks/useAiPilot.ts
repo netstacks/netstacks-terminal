@@ -229,7 +229,7 @@ ${step.output || '(no output)'}`,
         },
       ];
 
-      const response = await sendChatMessage(messages);
+      const response = await sendChatMessage(messages, { signal: abortRef.current?.signal });
       // Check if aborted while awaiting
       if (abortRef.current?.signal.aborted) return;
 
@@ -300,7 +300,7 @@ ${deviceSummaries}`,
         },
       ];
 
-      const response = await sendChatMessage(messages);
+      const response = await sendChatMessage(messages, { signal: abortRef.current?.signal });
       // Check if aborted while awaiting
       if (abortRef.current?.signal.aborted) return;
 
@@ -405,7 +405,7 @@ ${deviceResults.map(d => `${d.name}: ${d.passed}/${d.total} passed, ${d.failed} 
         },
       ];
 
-      const response = await sendChatMessage(messages);
+      const response = await sendChatMessage(messages, { signal: abortRef.current?.signal });
       // Check if aborted while awaiting
       if (abortRef.current?.signal.aborted) return;
 

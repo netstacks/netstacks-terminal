@@ -96,9 +96,10 @@ For commands: use real network CLI commands.
 For tags: use comma-separated relevant tags.
 For tickets: use a realistic format like "CHG-2026-0409".`;
 
-      const response = await sendChatMessage([
-        { role: 'user', content: prompt },
-      ]);
+      const response = await sendChatMessage(
+        [{ role: 'user', content: prompt }],
+        { signal: abort.signal },
+      );
 
       if (abort.signal.aborted) return;
 

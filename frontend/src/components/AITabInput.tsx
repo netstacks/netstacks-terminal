@@ -93,9 +93,10 @@ ${contextEntries ? `\nOther fields:\n${contextEntries}` : ''}
 
 Generate a smart, concise value for this field. Respond with ONLY the value — no quotes, no explanation. Just the raw text.`;
 
-        const response = await sendChatMessage([
-          { role: 'user', content: prompt },
-        ]);
+        const response = await sendChatMessage(
+          [{ role: 'user', content: prompt }],
+          { signal: abort.signal },
+        );
 
         if (!abort.signal.aborted) {
           const cleanValue = response.trim().replace(/^["']|["']$/g, '');

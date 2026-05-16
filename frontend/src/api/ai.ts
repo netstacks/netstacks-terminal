@@ -446,6 +446,13 @@ export interface SendChatOptions {
   context?: AiContext;
   provider?: string;
   model?: string;
+  /**
+   * AbortSignal to actually cancel the in-flight HTTP request — without
+   * it, callers that hold an AbortController can only discard the result
+   * while the network call (and provider tokens) continue. Required for
+   * tab-complete, AI Pilot, and any feature that aborts on user input.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -460,16 +467,22 @@ export async function sendChatMessage(
   contextOrOptions?: AiContext | SendChatOptions
 ): Promise<string> {
   // Detect whether caller passed AiContext directly or SendChatOptions.
-  // AiContext never has 'provider' or 'model' keys, so their presence means SendChatOptions.
+  // AiContext never has 'provider', 'model', or 'signal' keys, so their
+  // presence means SendChatOptions.
   let context: AiContext | undefined;
   let provider: string | undefined;
   let model: string | undefined;
+  let signal: AbortSignal | undefined;
 
-  if (contextOrOptions && ('provider' in contextOrOptions || 'model' in contextOrOptions)) {
+  if (
+    contextOrOptions &&
+    ('provider' in contextOrOptions || 'model' in contextOrOptions || 'signal' in contextOrOptions)
+  ) {
     const opts = contextOrOptions as SendChatOptions;
     context = opts.context;
     provider = opts.provider;
     model = opts.model;
+    signal = opts.signal;
   } else {
     context = contextOrOptions as AiContext | undefined;
   }
@@ -480,7 +493,7 @@ export async function sendChatMessage(
     if (provider) body.provider = provider;
     if (model) body.model = model;
 
-    const res = await getClient().http.post('/ai/chat', body);
+    const res = await getClient().http.post('/ai/chat', body, signal ? { signal } : undefined);
     return (res.data as ChatResponse).response;
   } catch (err) {
     if (axios.isAxiosError(err) && err.response) {
