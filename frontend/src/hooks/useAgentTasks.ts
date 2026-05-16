@@ -8,7 +8,7 @@
  * - Automatic reconnection on WebSocket disconnect
  */
 
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback } from 'react';
 import { create } from 'zustand';
 import { getClient, getCurrentMode } from '../api/client';
 import * as tasksApi from '../api/tasks';
@@ -133,190 +133,225 @@ export interface UseAgentTasksReturn {
 }
 
 // ============================================================================
+// Module-level singleton WebSocket
+// ============================================================================
+//
+// Two components consume useAgentTasks (AgentsPanel + AISidePanel). The old
+// implementation kept WS state in per-hook useRef instances, so each
+// consumer opened its OWN WebSocket — and the React-strict-mode double-
+// mount in dev plus tab-switch unmount/remount cycles produced the rapid
+// "connect → server-rejects → reconnect" loop visible in the console.
+//
+// The fix is a module-level singleton: one WS shared across all hook
+// consumers, ref-counted so the WS opens on the first subscriber and
+// closes after the last one unsubscribes (with a 1s debounce to absorb
+// quick tab toggles). The onclose-reconnect path also checks `shouldStay`
+// so it doesn't resurrect the WS after intentional disconnect.
+
+let moduleWs: WebSocket | null = null;
+let moduleReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let moduleDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let moduleIsConnecting = false;
+let moduleSubscriberCount = 0;
+let moduleShouldStay = false; // false = intentional disconnect, don't reconnect
+let modulePollInterval: ReturnType<typeof setInterval> | null = null;
+
+function moduleConnect(): void {
+  if (checkIsEnterprise()) {
+    // Enterprise mode uses REST polling — Controller doesn't expose /ws/tasks.
+    useAgentTasksStore.getState().setConnected(true);
+    if (!modulePollInterval) {
+      let consecutiveErrors = 0;
+      const pollTasks = async () => {
+        try {
+          const response = await listAgentExecutions({ limit: 50 });
+          const s = useAgentTasksStore.getState();
+          s.setTasks(response.tasks);
+          s.setRunningCount(response.running_count);
+          s.setMaxConcurrent(response.max_concurrent);
+          consecutiveErrors = 0;
+        } catch {
+          consecutiveErrors++;
+          if (consecutiveErrors === 1) {
+            console.warn('[useAgentTasks] Agent executions endpoint not available');
+          }
+        }
+      };
+      pollTasks();
+      modulePollInterval = setInterval(pollTasks, 5000);
+    }
+    return;
+  }
+
+  // Prevent duplicate connection attempts (singleton-level, not per-hook).
+  if (
+    moduleWs?.readyState === WebSocket.OPEN ||
+    moduleWs?.readyState === WebSocket.CONNECTING ||
+    moduleIsConnecting
+  ) {
+    return;
+  }
+
+  moduleIsConnecting = true;
+  moduleShouldStay = true;
+
+  const client = getClient();
+  const wsUrl = client.wsUrlWithAuth('/ws/tasks');
+  const ws = new WebSocket(wsUrl);
+  moduleWs = ws;
+
+  ws.onopen = () => {
+    console.log('[useAgentTasks] WebSocket connected');
+    moduleIsConnecting = false;
+    useAgentTasksStore.getState().setConnected(true);
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg: TaskWsMessage = JSON.parse(event.data);
+      const store = useAgentTasksStore.getState();
+
+      if (msg.type === 'init') {
+        store.setTasks(msg.tasks);
+        store.setRunningCount(msg.running_count);
+        store.setMaxConcurrent(msg.max_concurrent);
+      } else if (msg.type === 'task_progress') {
+        // Backend sends camelCase (taskId, progressPct) per the Rust serde config
+        const taskId = msg.taskId;
+        const status = msg.status;
+        const progressPct = msg.progressPct;
+        const resultJson = msg.result ? JSON.stringify(msg.result) : undefined;
+        const currentTask = store.tasks.find((t) => t.id === taskId);
+
+        store.updateTask(taskId, {
+          status: status as TaskStatus,
+          progress_pct: progressPct,
+          result_json: resultJson,
+          error_message: msg.error,
+        });
+
+        if (currentTask) {
+          const wasRunning = currentTask.status === 'running';
+          const isNowRunning = status === 'running';
+          const isNowTerminal = ['completed', 'failed', 'cancelled'].includes(status);
+
+          if (!wasRunning && isNowRunning) {
+            store.setRunningCount(store.runningCount + 1);
+          } else if (wasRunning && isNowTerminal) {
+            store.setRunningCount(Math.max(0, store.runningCount - 1));
+          }
+
+          // Auto-save completed tasks to Documents.
+          if (status === 'completed' && resultJson && !store.savedTaskIds.has(taskId)) {
+            const updatedTask: AgentTask = {
+              ...currentTask,
+              status: 'completed',
+              progress_pct: progressPct,
+              result_json: resultJson,
+            };
+            saveTaskResultToDoc(updatedTask).then((docId) => {
+              if (docId) {
+                useAgentTasksStore.getState().addSavedTaskId(taskId);
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[useAgentTasks] Failed to parse WebSocket message:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    console.log('[useAgentTasks] WebSocket disconnected');
+    moduleIsConnecting = false;
+    useAgentTasksStore.getState().setConnected(false);
+    moduleWs = null;
+
+    // Only auto-reconnect if at least one component still wants the
+    // connection. Prevents the orphan-reconnect leak that fired 3s after
+    // tab unmount in the old implementation.
+    if (moduleShouldStay && moduleSubscriberCount > 0) {
+      if (moduleReconnectTimer) clearTimeout(moduleReconnectTimer);
+      moduleReconnectTimer = setTimeout(() => {
+        moduleReconnectTimer = null;
+        if (moduleShouldStay && moduleSubscriberCount > 0) moduleConnect();
+      }, 3000);
+    }
+  };
+
+  ws.onerror = (error) => {
+    console.error('[useAgentTasks] WebSocket error:', error);
+    moduleIsConnecting = false;
+  };
+}
+
+function moduleDisconnect(): void {
+  moduleShouldStay = false;
+  if (moduleReconnectTimer) {
+    clearTimeout(moduleReconnectTimer);
+    moduleReconnectTimer = null;
+  }
+  if (moduleWs) {
+    moduleWs.close();
+    moduleWs = null;
+  }
+  if (modulePollInterval) {
+    clearInterval(modulePollInterval);
+    modulePollInterval = null;
+  }
+}
+
+export function sendTaskCancelCommand(taskId: string): boolean {
+  if (moduleWs?.readyState === WebSocket.OPEN) {
+    const cmd: TaskCancelCommand = { type: 'cancel', task_id: taskId };
+    moduleWs.send(JSON.stringify(cmd));
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
 // Hook Implementation
 // ============================================================================
 
 export function useAgentTasks(): UseAgentTasksReturn {
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isConnectingRef = useRef(false);
-
   const {
     tasks,
     runningCount,
     maxConcurrent,
     isConnected,
     setTasks,
-    updateTask,
     addTask,
     removeTask,
     setRunningCount,
     setMaxConcurrent,
-    setConnected,
-    addSavedTaskId,
     addDeletedTaskId,
   } = useAgentTasksStore();
 
-  // Connect to WebSocket (standalone mode only)
-  // Enterprise mode uses REST polling since Controller doesn't have /ws/tasks
-  // Note: We use useAgentTasksStore.getState() inside handlers to get current state
-  // without adding state values to the dependency array (which would cause reconnection loops)
-  const connect = useCallback(() => {
-    // Skip WebSocket in enterprise mode - will use polling instead
-    if (checkIsEnterprise()) {
-      console.log('[useAgentTasks] Enterprise mode - using REST polling instead of WebSocket');
-      setConnected(true); // Mark as "connected" for UI purposes
-      return;
-    }
-
-    // Prevent duplicate connection attempts
-    if (wsRef.current?.readyState === WebSocket.OPEN ||
-        wsRef.current?.readyState === WebSocket.CONNECTING ||
-        isConnectingRef.current) {
-      return;
-    }
-
-    isConnectingRef.current = true;
-
-    const client = getClient();
-    const wsUrl = client.wsUrlWithAuth('/ws/tasks');
-
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log('[useAgentTasks] WebSocket connected');
-      isConnectingRef.current = false;
-      setConnected(true);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg: TaskWsMessage = JSON.parse(event.data);
-
-        if (msg.type === 'init') {
-          // Initial state from server
-          setTasks(msg.tasks);
-          setRunningCount(msg.running_count);
-          setMaxConcurrent(msg.max_concurrent);
-        } else if (msg.type === 'task_progress') {
-          // Progress update for a specific task
-          // Note: Backend sends camelCase (taskId, progressPct) per the Rust serde config
-          const taskId = msg.taskId;
-          const status = msg.status;
-          const progressPct = msg.progressPct;
-          const resultJson = msg.result ? JSON.stringify(msg.result) : undefined;
-
-          // Get current state from store (not from closure)
-          const state = useAgentTasksStore.getState();
-          const currentTask = state.tasks.find(t => t.id === taskId);
-
-          updateTask(taskId, {
-            status: status as TaskStatus,
-            progress_pct: progressPct,
-            result_json: resultJson,
-            error_message: msg.error,
-          });
-
-          // Update running count based on status transitions
-          if (currentTask) {
-            const wasRunning = currentTask.status === 'running';
-            const isNowRunning = status === 'running';
-            const isNowTerminal = ['completed', 'failed', 'cancelled'].includes(status);
-
-            if (!wasRunning && isNowRunning) {
-              // Task started running
-              setRunningCount(state.runningCount + 1);
-            } else if (wasRunning && isNowTerminal) {
-              // Task finished
-              setRunningCount(Math.max(0, state.runningCount - 1));
-            }
-
-            // Auto-save completed tasks to Documents
-            if (status === 'completed' && resultJson && !state.savedTaskIds.has(taskId)) {
-              // Build updated task object for saving
-              const updatedTask: AgentTask = {
-                ...currentTask,
-                status: 'completed',
-                progress_pct: progressPct,
-                result_json: resultJson,
-              };
-              // Non-blocking save - use .then() to avoid blocking WebSocket handler
-              saveTaskResultToDoc(updatedTask).then((docId) => {
-                if (docId) {
-                  addSavedTaskId(taskId);
-                }
-              });
-            }
-          }
-        }
-      } catch (e) {
-        console.error('[useAgentTasks] Failed to parse WebSocket message:', e);
-      }
-    };
-
-    ws.onclose = () => {
-      console.log('[useAgentTasks] WebSocket disconnected');
-      isConnectingRef.current = false;
-      setConnected(false);
-      wsRef.current = null;
-
-      // Reconnect after delay
-      reconnectTimeoutRef.current = setTimeout(() => {
-        connect();
-      }, 3000);
-    };
-
-    ws.onerror = (error) => {
-      console.error('[useAgentTasks] WebSocket error:', error);
-      isConnectingRef.current = false;
-    };
-  }, [setTasks, updateTask, setRunningCount, setMaxConcurrent, setConnected, addSavedTaskId]);
-
-  // Connect on mount (WebSocket for standalone, polling for enterprise)
+  // Ref-counted singleton subscription. First hook to mount opens the WS;
+  // last hook to unmount tears it down (with a 1s debounce so a quick tab
+  // toggle doesn't close-and-reopen).
   useEffect(() => {
-    connect();
-
-    // For enterprise mode, poll for task updates since we don't have WebSocket
-    let pollInterval: ReturnType<typeof setInterval> | null = null;
-    if (checkIsEnterprise()) {
-      let consecutiveErrors = 0;
-
-      const pollTasks = async () => {
-        try {
-          const response = await listAgentExecutions({ limit: 50 });
-          setTasks(response.tasks);
-          setRunningCount(response.running_count);
-          setMaxConcurrent(response.max_concurrent);
-          consecutiveErrors = 0; // Reset on success
-        } catch {
-          consecutiveErrors++;
-          // Only log the first error, then stay quiet
-          if (consecutiveErrors === 1) {
-            console.warn('[useAgentTasks] Agent executions endpoint not available');
-          }
-        }
-      };
-
-      // Initial load
-      pollTasks();
-
-      // Poll every 5 seconds for updates (faster for running tasks)
-      pollInterval = setInterval(pollTasks, 5000);
+    moduleSubscriberCount++;
+    if (moduleDisconnectTimer) {
+      clearTimeout(moduleDisconnectTimer);
+      moduleDisconnectTimer = null;
     }
+    moduleConnect();
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (pollInterval) {
-        clearInterval(pollInterval);
+      moduleSubscriberCount = Math.max(0, moduleSubscriberCount - 1);
+      if (moduleSubscriberCount === 0) {
+        // Debounce — quick AgentsPanel→MopWorkspace tab switches shouldn't
+        // cycle the WS. 1s covers React-strict-mode double-mount too.
+        moduleDisconnectTimer = setTimeout(() => {
+          moduleDisconnectTimer = null;
+          if (moduleSubscriberCount === 0) moduleDisconnect();
+        }, 1000);
       }
     };
-  }, [connect, setTasks, setRunningCount, setMaxConcurrent]);
+  }, []);
 
   // Create a new task
   const createTask = useCallback(async (prompt: string, failurePolicy?: FailurePolicyConfig): Promise<AgentTask> => {
@@ -335,13 +370,10 @@ export function useAgentTasks(): UseAgentTasksReturn {
       await tasksApi.cancelTask(taskId);
       // Update will come via polling
     } else {
-      // Standalone mode: send cancel command via WebSocket for immediate response
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        const cmd: TaskCancelCommand = { type: 'cancel', task_id: taskId };
-        wsRef.current.send(JSON.stringify(cmd));
-      }
-      // Note: The WebSocket handler will broadcast the status change,
-      // which will update the store via the onmessage handler
+      // Standalone mode: send cancel command via the singleton WebSocket
+      // for immediate response. The handler will broadcast the status
+      // change, which updates the store via onmessage.
+      sendTaskCancelCommand(taskId);
     }
   }, []);
 
