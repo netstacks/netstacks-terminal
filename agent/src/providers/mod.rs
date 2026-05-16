@@ -501,6 +501,13 @@ pub trait DataProvider: Send + Sync {
     /// Create a connection between devices
     async fn create_topology_connection(&self, topology_id: &str, req: &CreateConnectionRequest) -> Result<TopologyConnection, ProviderError>;
 
+    /// Update an existing topology connection (waypoints, label, color, etc.)
+    async fn update_topology_connection(
+        &self,
+        connection_id: &str,
+        req: &UpdateConnectionRequest,
+    ) -> Result<TopologyConnection, ProviderError>;
+
     /// Delete a topology connection
     async fn delete_topology_connection(&self, connection_id: &str) -> Result<(), ProviderError>;
 

@@ -4904,6 +4904,75 @@ impl DataProvider for LocalDataProvider {
         })
     }
 
+    async fn update_topology_connection(
+        &self,
+        connection_id: &str,
+        req: &UpdateConnectionRequest,
+    ) -> Result<TopologyConnection, ProviderError> {
+        // Fetch existing row, apply Option-Some fields, write full row back.
+        // Topology editing is single-user so the read-modify-write race is
+        // acceptable; the alternative (dynamic SET clause) is much messier.
+        let row: TopologyConnectionRow = sqlx::query_as(
+            "SELECT * FROM topology_connections WHERE id = ?"
+        )
+        .bind(connection_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?
+        .ok_or_else(|| ProviderError::NotFound(format!("Topology connection {} not found", connection_id)))?;
+
+        let mut conn = row.into_topology_connection()?;
+        let topology_id = conn.topology_id.clone();
+
+        if let Some(v) = req.source_interface.clone() { conn.source_interface = v; }
+        if let Some(v) = req.target_interface.clone() { conn.target_interface = v; }
+        if let Some(v) = req.label.clone() { conn.label = v; }
+        if let Some(v) = req.waypoints.clone() { conn.waypoints = v; }
+        if let Some(v) = req.curve_style.clone() { conn.curve_style = v; }
+        if let Some(v) = req.bundle_id.clone() { conn.bundle_id = v; }
+        if let Some(v) = req.bundle_index { conn.bundle_index = v; }
+        if let Some(v) = req.color.clone() { conn.color = v; }
+        if let Some(v) = req.line_style.clone() { conn.line_style = v; }
+        if let Some(v) = req.line_width { conn.line_width = v; }
+        if let Some(v) = req.notes.clone() { conn.notes = v; }
+
+        sqlx::query(
+            r#"
+            UPDATE topology_connections SET
+                source_interface = ?, target_interface = ?, label = ?,
+                waypoints = ?, curve_style = ?, bundle_id = ?, bundle_index = ?,
+                color = ?, line_style = ?, line_width = ?, notes = ?
+            WHERE id = ?
+            "#
+        )
+        .bind(&conn.source_interface)
+        .bind(&conn.target_interface)
+        .bind(&conn.label)
+        .bind(&conn.waypoints)
+        .bind(&conn.curve_style)
+        .bind(&conn.bundle_id)
+        .bind(&conn.bundle_index)
+        .bind(&conn.color)
+        .bind(&conn.line_style)
+        .bind(&conn.line_width)
+        .bind(&conn.notes)
+        .bind(connection_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        // Bump topology updated_at so the frontend sees a freshness change
+        let now = format_datetime(&Utc::now());
+        sqlx::query("UPDATE topologies SET updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&topology_id)
+            .execute(&self.pool)
+            .await
+            .ok();
+
+        Ok(conn)
+    }
+
     async fn delete_topology_connection(&self, connection_id: &str) -> Result<(), ProviderError> {
         self.delete_by_id("topology_connections", "id", connection_id, "Topology connection").await
     }

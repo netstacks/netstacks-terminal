@@ -4938,6 +4938,16 @@ pub async fn delete_topology_connection(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Update a connection (waypoints, label, color, line_style, etc.)
+pub async fn update_topology_connection(
+    State(state): State<Arc<AppState>>,
+    Path((_topology_id, connection_id)): Path<(String, String)>,
+    Json(req): Json<UpdateConnectionRequest>,
+) -> Result<Json<TopologyConnection>, ApiError> {
+    let conn = state.provider.update_topology_connection(&connection_id, &req).await?;
+    Ok(Json(conn))
+}
+
 // === Topology Annotations Endpoints (Phase 27-03) ===
 
 /// List all annotations for a topology

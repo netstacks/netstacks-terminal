@@ -1740,6 +1740,23 @@ pub struct TopologyConnection {
     pub notes: Option<String>,
 }
 
+/// Request to update an existing topology connection. Every field is
+/// optional — only fields that are `Some` will be written.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateConnectionRequest {
+    pub source_interface: Option<Option<String>>,
+    pub target_interface: Option<Option<String>>,
+    pub label: Option<Option<String>>,
+    pub waypoints: Option<Option<String>>,
+    pub curve_style: Option<Option<String>>,
+    pub bundle_id: Option<Option<String>>,
+    pub bundle_index: Option<Option<i32>>,
+    pub color: Option<Option<String>>,
+    pub line_style: Option<Option<String>>,
+    pub line_width: Option<Option<i32>>,
+    pub notes: Option<Option<String>>,
+}
+
 /// Request to create a connection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateConnectionRequest {

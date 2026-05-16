@@ -910,7 +910,11 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -
         .route("/topologies/:id/devices/:device_id/details", put(api::update_topology_device_details))
         .route("/topologies/:id/devices/:device_id", delete(api::delete_topology_device))
         .route("/topologies/:id/connections", post(api::create_topology_connection))
-        .route("/topologies/:id/connections/:conn_id", delete(api::delete_topology_connection))
+        .route(
+            "/topologies/:id/connections/:conn_id",
+            put(api::update_topology_connection)
+                .delete(api::delete_topology_connection),
+        )
         // Topology Annotations (Phase 27-03)
         .route("/topologies/:id/annotations", get(api::list_topology_annotations).post(api::create_topology_annotation))
         .route("/topologies/:id/annotations/reorder", post(api::reorder_topology_annotations))
