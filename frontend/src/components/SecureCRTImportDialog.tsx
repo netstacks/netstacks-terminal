@@ -209,19 +209,46 @@ export default function SecureCRTImportDialog({
     }
   }, []);
 
+  // When set true, the import loop stops scheduling new createFolder/
+  // createSession calls. In-flight calls still complete (the underlying
+  // APIs don't accept AbortSignal yet) but the per-row 60s timeout caps
+  // how long the user has to wait after they hit Cancel.
+  const cancelRequestedRef = useRef(false);
+
   const handleClose = useCallback(() => {
+    cancelRequestedRef.current = true;
     resetState();
     onClose();
   }, [resetState, onClose]);
 
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
+      // Suppress backdrop click during import to avoid losing a long
+      // import to a stray click. The X button still works.
       if (stage === 'importing') return;
       if (e.target === e.currentTarget) {
         handleClose();
       }
     },
     [handleClose, stage],
+  );
+
+  // Wrap a per-row API call in a timeout so a single hung create won't
+  // pin the import indefinitely. 60s is generous for SSH-backed creates;
+  // anything slower is a real backend problem worth surfacing.
+  const withRowTimeout = useCallback(
+    <T,>(label: string, p: Promise<T>): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`${label} timed out after 60s`)),
+          60_000,
+        );
+        p.then(
+          (v) => { clearTimeout(timer); resolve(v); },
+          (e) => { clearTimeout(timer); reject(e); },
+        );
+      }),
+    [],
   );
 
   // File handling
@@ -335,6 +362,7 @@ export default function SecureCRTImportDialog({
   const handleImport = useCallback(async () => {
     if (!parseResult || !selectedProfileId || selectedFolderIds.size === 0) return;
 
+    cancelRequestedRef.current = false;
     setStage('importing');
     setProgress(0);
     setProgressText('Preparing import...');
@@ -366,9 +394,11 @@ export default function SecureCRTImportDialog({
         folder: SecureCRTFolder,
         parentNetStacksFolderId: string | undefined,
       ) {
+        if (cancelRequestedRef.current) return;
         if (!selectedFolderIds.has(folder.id)) {
           // This folder is not selected, but check children individually
           for (const child of folder.children) {
+            if (cancelRequestedRef.current) return;
             await processFolder(child, undefined);
           }
           return;
@@ -380,7 +410,10 @@ export default function SecureCRTImportDialog({
 
         if (!netStacksFolderId) {
           try {
-            const created = await createFolder(folder.name, parentNetStacksFolderId);
+            const created = await withRowTimeout(
+              `Create folder "${folder.name}"`,
+              createFolder(folder.name, parentNetStacksFolderId),
+            );
             netStacksFolderId = created.id;
             foldersCreated++;
             // Add to map so children and sessions can reference it
@@ -400,15 +433,19 @@ export default function SecureCRTImportDialog({
 
         // Create sessions in this folder
         for (const session of folder.sessions) {
+          if (cancelRequestedRef.current) return;
           try {
-            await createSession({
-              name: session.name,
-              host: session.host,
-              port: session.port,
-              protocol: session.protocol,
-              profile_id: selectedProfileId,
-              folder_id: netStacksFolderId,
-            });
+            await withRowTimeout(
+              `Create session "${session.name}"`,
+              createSession({
+                name: session.name,
+                host: session.host,
+                port: session.port,
+                protocol: session.protocol,
+                profile_id: selectedProfileId,
+                folder_id: netStacksFolderId,
+              }),
+            );
             sessionsCreated++;
           } catch (err) {
             warnings.push(`Failed to create session "${session.name}": ${err instanceof Error ? err.message : String(err)}`);
@@ -420,13 +457,19 @@ export default function SecureCRTImportDialog({
 
         // Process child folders
         for (const child of folder.children) {
+          if (cancelRequestedRef.current) return;
           await processFolder(child, netStacksFolderId);
         }
       }
 
       // Process all root-level folders
       for (const folder of parseResult.folders) {
+        if (cancelRequestedRef.current) break;
         await processFolder(folder, undefined);
+      }
+
+      if (cancelRequestedRef.current) {
+        warnings.push('Import cancelled by user.');
       }
 
       // Add any parser warnings
@@ -442,7 +485,12 @@ export default function SecureCRTImportDialog({
       setResults({ foldersCreated, sessionsCreated, warnings });
       setStage('done');
     }
-  }, [parseResult, selectedProfileId, selectedFolderIds, selectedSessionCount]);
+  }, [parseResult, selectedProfileId, selectedFolderIds, selectedSessionCount, withRowTimeout]);
+
+  const handleCancelImport = useCallback(() => {
+    cancelRequestedRef.current = true;
+    setProgressText('Cancelling — finishing the current row…');
+  }, []);
 
   if (!isOpen) return null;
 
@@ -452,7 +500,11 @@ export default function SecureCRTImportDialog({
         {/* Header */}
         <div className="scrt-import-header">
           <h3>Import SecureCRT Sessions</h3>
-          <button className="scrt-import-close-btn" onClick={handleClose} disabled={stage === 'importing'} title="Close">
+          <button
+            className="scrt-import-close-btn"
+            onClick={handleClose}
+            title={stage === 'importing' ? 'Cancel and close — finishes the current row first' : 'Close'}
+          >
             <CloseIcon />
           </button>
         </div>
@@ -586,8 +638,12 @@ export default function SecureCRTImportDialog({
             </>
           )}
           {stage === 'importing' && (
-            <button className="scrt-btn-cancel" disabled>
-              Importing...
+            <button
+              className="scrt-btn-cancel"
+              onClick={handleCancelImport}
+              disabled={cancelRequestedRef.current}
+            >
+              {cancelRequestedRef.current ? 'Cancelling…' : 'Cancel'}
             </button>
           )}
           {stage === 'done' && (
