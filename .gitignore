@@ -2,7 +2,7 @@
 **/target/
 **/node_modules/
 **/dist/
-
+*.md
 # Rust
 **/*.rs.bk
 Cargo.lock

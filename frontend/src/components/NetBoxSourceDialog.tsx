@@ -63,11 +63,18 @@ const Icons = {
 };
 
 interface MappingRow {
+  /** Stable per-row id for React keys — assigned on add, never reused
+   * after a row is deleted. Without this, swapping/inserting/deleting
+   * rows shuffles the controlled input values because React reuses the
+   * DOM node at the same index. Not persisted (server only stores
+   * key+value pairs). */
+  rid: string;
   key: string;
   profileId: string;
 }
 
 interface FlavorMappingRow {
+  rid: string;
   key: string;
   flavor: CliFlavor;
 }
@@ -234,12 +241,16 @@ export default function NetBoxSourceDialog({
         setApiToken(''); // Don't expose stored token
         setDefaultProfileId(source.default_profile_id || '');
 
-        // Convert mappings to rows
+        // Convert mappings to rows — assign a rid per row so React's
+        // reconciler can track them across add/remove/reorder without
+        // shuffling the controlled input values.
         const siteRows = Object.entries(source.profile_mappings?.by_site || {}).map(([key, profileId]) => ({
+          rid: crypto.randomUUID(),
           key,
           profileId,
         }));
         const roleRows = Object.entries(source.profile_mappings?.by_role || {}).map(([key, profileId]) => ({
+          rid: crypto.randomUUID(),
           key,
           profileId,
         }));
@@ -248,10 +259,10 @@ export default function NetBoxSourceDialog({
 
         // Load CLI flavor mappings
         const mfrFlavorRows = Object.entries(source.cli_flavor_mappings?.by_manufacturer || {}).map(
-          ([key, flavor]) => ({ key, flavor })
+          ([key, flavor]) => ({ rid: crypto.randomUUID(), key, flavor })
         );
         const platformFlavorRows = Object.entries(source.cli_flavor_mappings?.by_platform || {}).map(
-          ([key, flavor]) => ({ key, flavor })
+          ([key, flavor]) => ({ rid: crypto.randomUUID(), key, flavor })
         );
         setManufacturerFlavorMappings(mfrFlavorRows);
         setPlatformFlavorMappings(platformFlavorRows);
@@ -563,7 +574,7 @@ export default function NetBoxSourceDialog({
   };
 
   const handleAddSiteMapping = () => {
-    setSiteMappings([...siteMappings, { key: '', profileId: '' }]);
+    setSiteMappings([...siteMappings, { rid: crypto.randomUUID(), key: '', profileId: '' }]);
   };
 
   const handleRemoveSiteMapping = (index: number) => {
@@ -577,7 +588,7 @@ export default function NetBoxSourceDialog({
   };
 
   const handleAddRoleMapping = () => {
-    setRoleMappings([...roleMappings, { key: '', profileId: '' }]);
+    setRoleMappings([...roleMappings, { rid: crypto.randomUUID(), key: '', profileId: '' }]);
   };
 
   const handleRemoveRoleMapping = (index: number) => {
@@ -592,7 +603,7 @@ export default function NetBoxSourceDialog({
 
   // CLI flavor mapping handlers
   const handleAddManufacturerFlavorMapping = () => {
-    setManufacturerFlavorMappings([...manufacturerFlavorMappings, { key: '', flavor: 'auto' }]);
+    setManufacturerFlavorMappings([...manufacturerFlavorMappings, { rid: crypto.randomUUID(), key: '', flavor: 'auto' }]);
   };
   const handleRemoveManufacturerFlavorMapping = (index: number) => {
     setManufacturerFlavorMappings(manufacturerFlavorMappings.filter((_, i) => i !== index));
@@ -611,7 +622,7 @@ export default function NetBoxSourceDialog({
   };
 
   const handleAddPlatformFlavorMapping = () => {
-    setPlatformFlavorMappings([...platformFlavorMappings, { key: '', flavor: 'auto' }]);
+    setPlatformFlavorMappings([...platformFlavorMappings, { rid: crypto.randomUUID(), key: '', flavor: 'auto' }]);
   };
   const handleRemovePlatformFlavorMapping = (index: number) => {
     setPlatformFlavorMappings(platformFlavorMappings.filter((_, i) => i !== index));
@@ -747,7 +758,7 @@ export default function NetBoxSourceDialog({
               ) : (
                 <div className="mapping-list">
                   {siteMappings.map((row, index) => (
-                    <div key={index} className="mapping-row">
+                    <div key={row.rid} className="mapping-row">
                       {sitesLoaded && sites.length > 0 ? (
                         <select
                           value={row.key}
@@ -810,7 +821,7 @@ export default function NetBoxSourceDialog({
               ) : (
                 <div className="mapping-list">
                   {roleMappings.map((row, index) => (
-                    <div key={index} className="mapping-row">
+                    <div key={row.rid} className="mapping-row">
                       {sitesLoaded && roles.length > 0 ? (
                         <select
                           value={row.key}
@@ -885,7 +896,7 @@ export default function NetBoxSourceDialog({
               ) : (
                 <div className="mapping-list">
                   {manufacturerFlavorMappings.map((row, index) => (
-                    <div key={index} className="mapping-row">
+                    <div key={row.rid} className="mapping-row">
                       {sitesLoaded && manufacturers.length > 0 ? (
                         <select
                           value={row.key}
@@ -957,7 +968,7 @@ export default function NetBoxSourceDialog({
               ) : (
                 <div className="mapping-list">
                   {platformFlavorMappings.map((row, index) => (
-                    <div key={index} className="mapping-row">
+                    <div key={row.rid} className="mapping-row">
                       {sitesLoaded && platforms.length > 0 ? (
                         <select
                           value={row.key}
