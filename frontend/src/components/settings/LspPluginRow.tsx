@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { installPlugin, deletePlugin, updatePlugin, type LspPluginListItem, type InstallEvent, subscribeToInstallProgress } from '../../lsp/installationApi';
+import { showToast } from '../Toast';
+import { confirmDialog } from '../ConfirmDialog';
 
 interface Props {
   plugin: LspPluginListItem;
@@ -38,18 +40,30 @@ export function LspPluginRow({ plugin, onChanged, onEdit }: Props) {
       unsub();
       setBusy(false);
       setInstallPhase(null);
-      alert(`Install failed: ${(e as Error).message}`);
+      showToast(`Install failed: ${(e as Error).message}`, 'error');
     }
   };
 
   const handleUninstall = async () => {
-    if (!confirm(`Remove ${plugin.displayName}?`)) return;
+    const ok = await confirmDialog({
+      title: 'Remove language server?',
+      body: (
+        <>
+          Uninstall <strong>{plugin.displayName}</strong>? The installed files
+          will be removed; the plugin entry stays so you can reinstall later.
+        </>
+      ),
+      confirmLabel: 'Uninstall',
+      destructive: true,
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await deletePlugin(plugin.id);
       onChanged();
+      showToast(`Uninstalled ${plugin.displayName}`, 'success');
     } catch (e) {
-      alert(`Failed: ${(e as Error).message}`);
+      showToast(`Uninstall failed: ${(e as Error).message}`, 'error');
     } finally {
       setBusy(false);
     }
@@ -61,7 +75,7 @@ export function LspPluginRow({ plugin, onChanged, onEdit }: Props) {
       await updatePlugin(plugin.id, { enabled: !plugin.defaultEnabled });
       onChanged();
     } catch (e) {
-      alert(`Failed: ${(e as Error).message}`);
+      showToast(`Toggle failed: ${(e as Error).message}`, 'error');
     } finally {
       setBusy(false);
     }
