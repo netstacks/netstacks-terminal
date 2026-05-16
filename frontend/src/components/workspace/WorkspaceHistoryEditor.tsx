@@ -25,9 +25,11 @@ export default function WorkspaceHistoryEditor({ gitOps, onClose, onRefresh }: W
   const [editMessage, setEditMessage] = useState('')
 
   useEffect(() => {
-    const load = async () => {
+    let cancelled = false
+    ;(async () => {
       try {
         const result = await gitOps.rebasePlan(20)
+        if (cancelled) return
         setCommits(result.map(c => ({
           hash: c.hash,
           shortHash: c.shortHash,
@@ -37,13 +39,14 @@ export default function WorkspaceHistoryEditor({ gitOps, onClose, onRefresh }: W
           selected: false,
         })))
       } catch (err) {
+        if (cancelled) return
         showToast(`Failed to load commits: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
         onClose()
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    }
-    load()
+    })()
+    return () => { cancelled = true }
   }, [gitOps, onClose])
 
   const moveUp = useCallback((idx: number) => {

@@ -19,27 +19,25 @@ export default function AboutModal({ isOpen, onClose }: AboutModalProps) {
   const [isLoading, setIsLoading] = useState(false)
 
   useEffect(() => {
-    async function fetchVersion() {
-      if (!isOpen) return
-
-      setIsLoading(true)
+    if (!isOpen) return
+    let cancelled = false
+    setIsLoading(true)
+    ;(async () => {
       try {
         const { data } = await getClient().http.get<AppInfo>('/info')
-        setAppInfo(data)
+        if (!cancelled) setAppInfo(data)
       } catch (error) {
-        // Fallback to Tauri API (e.g., enterprise mode where agent sidecar is not running)
         try {
           const tauriVersion = await getVersion()
-          setAppInfo({ name: 'NetStacks', version: tauriVersion, mode: 'Enterprise' })
+          if (!cancelled) setAppInfo({ name: 'NetStacks', version: tauriVersion, mode: 'Enterprise' })
         } catch {
-          console.error('Failed to fetch app info:', error)
+          if (!cancelled) console.error('Failed to fetch app info:', error)
         }
       } finally {
-        setIsLoading(false)
+        if (!cancelled) setIsLoading(false)
       }
-    }
-
-    fetchVersion()
+    })()
+    return () => { cancelled = true }
   }, [isOpen])
 
   // Handle escape key

@@ -40,25 +40,25 @@ export const ProfilingAgentChat: React.FC<ProfilingAgentChatProps> = ({
 
   // Load chat context on mount
   useEffect(() => {
-    const loadContext = async () => {
+    let cancelled = false;
+    setInitialLoading(true);
+    (async () => {
       try {
-        setInitialLoading(true);
         const userId = getUserId();
         const context = await getChatContext(agentId, userId);
-
+        if (cancelled) return;
         setDeviceStates(context.device_states || []);
         setAnomalies(context.anomalies || []);
         setMessages(context.conversation_history || []);
         setError(null);
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to load chat context';
-        setError(message);
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to load chat context');
       } finally {
-        setInitialLoading(false);
+        if (!cancelled) setInitialLoading(false);
       }
-    };
-
-    loadContext();
+    })();
+    return () => { cancelled = true; };
   }, [agentId]);
 
   // Auto-scroll to bottom when messages change

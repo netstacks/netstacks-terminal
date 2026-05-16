@@ -33,12 +33,14 @@ export default function UpdateChecker() {
 
   // Check for updates on component mount
   useEffect(() => {
+    let cancelled = false;
     const checkForUpdates = async () => {
       try {
         const { check } = await getTauriModules();
-        if (!check) return; // Not in Tauri environment
+        if (cancelled || !check) return;
 
         const update = await check();
+        if (cancelled) return;
         if (update) {
           setUpdateAvailable({
             version: update.version,
@@ -47,14 +49,16 @@ export default function UpdateChecker() {
           });
         }
       } catch (err) {
-        // Silently fail update check - don't bother user with network errors
-        console.warn('Update check failed:', err);
+        if (!cancelled) console.warn('Update check failed:', err);
       }
     };
 
     // Delay check slightly to not impact startup
     const timer = setTimeout(checkForUpdates, 3000);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, []);
 
   const installUpdate = useCallback(async () => {

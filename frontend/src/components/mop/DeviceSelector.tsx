@@ -57,22 +57,24 @@ export default function DeviceSelector({ onDevicesChange }: DeviceSelectorProps)
 
   // Load sessions and folders
   useEffect(() => {
-    async function loadData() {
-      setLoading(true);
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
       try {
         const [sessionsData, foldersData] = await Promise.all([
           listSessions(),
           listFolders(),
         ]);
+        if (cancelled) return;
         setSessions(sessionsData);
         setFolders(foldersData);
       } catch (err) {
-        console.error('Failed to load sessions:', err);
+        if (!cancelled) console.error('Failed to load sessions:', err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    }
-    loadData();
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Build folder counts

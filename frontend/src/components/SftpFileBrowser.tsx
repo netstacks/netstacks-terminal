@@ -128,26 +128,30 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
 
   // Connect on mount
   useEffect(() => {
-    const connect = async () => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
       try {
-        setLoading(true);
-        setError(null);
         const result = await sftpConnect(sftp, sessionId);
+        if (cancelled) return;
         setConnected(result.connected);
         if (result.home_dir) {
           setHomeDir(result.home_dir);
           setCurrentPath(result.home_dir);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Connection failed');
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Connection failed');
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    };
-    connect();
+    })();
 
-    // Disconnect on unmount
+    // Disconnect on unmount + flag the in-flight connect so a late-
+    // resolving sftpConnect doesn't try to set state on the unmounted
+    // component (or worse, a remounted one with a new sftp id).
     return () => {
+      cancelled = true;
       sftpDisconnect(sftp).catch(console.error);
     };
   }, [sftp, sessionId]);
@@ -155,21 +159,22 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   // Load directory when path changes
   useEffect(() => {
     if (!connected) return;
-
-    const loadDir = async () => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
       try {
-        setLoading(true);
-        setError(null);
         const result = await sftpLs(sftp, currentPath);
+        if (cancelled) return;
         setEntries(result.entries);
         setSelectedEntry(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load directory');
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load directory');
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    };
-    loadDir();
+    })();
+    return () => { cancelled = true; };
   }, [sftp, currentPath, connected]);
 
   // Refresh current directory
