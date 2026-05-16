@@ -937,7 +937,7 @@ export default function TopologyTabEditor({
     // For temporary topologies, just add connection locally
     if (isTemporary || !topologyId) {
       const newConnection: Connection = {
-        id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        id: `conn-${crypto.randomUUID()}`,
         sourceDeviceId: source.id,
         targetDeviceId: target.id,
         status: 'active',

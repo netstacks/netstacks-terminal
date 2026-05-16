@@ -101,7 +101,7 @@ export function useTroubleshootingSession(): UseTroubleshootingSessionReturn {
    */
   const startSession = useCallback(
     (name: string, terminalIds: string[]): string => {
-      const sessionId = `tshoot-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      const sessionId = `tshoot-${crypto.randomUUID()}`;
       const now = new Date();
 
       const newSession: TroubleshootingSession = {

@@ -81,7 +81,7 @@ export function showToast(
   action?: ToastAction,
 ): string {
   const effectiveDuration = duration ?? (type === 'error' ? 0 : 3000)
-  const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const id = `toast-${crypto.randomUUID()}`
   const newToast: ToastMessage = { id, message, type, duration: effectiveDuration, action }
   toasts = [...toasts, newToast].slice(-MAX_TOASTS)
   notifyListeners()

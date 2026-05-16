@@ -99,7 +99,7 @@ export interface SerializedHistoryState {
  * Generate a unique action ID
  */
 export function generateActionId(): string {
-  return `action-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  return `action-${crypto.randomUUID()}`;
 }
 
 /**

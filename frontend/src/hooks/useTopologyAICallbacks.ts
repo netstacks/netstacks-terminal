@@ -84,7 +84,7 @@ export function useTopologyAICallbacks({
     }
 
     const newDevice: Device = {
-      id: `device-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: `device-${crypto.randomUUID()}`,
       name: deviceData.name || 'New Device',
       type: (deviceData.type as DeviceType) || 'unknown',
       status: (deviceData.status as DeviceStatus) || 'unknown',
@@ -295,7 +295,7 @@ export function useTopologyAICallbacks({
     }
 
     const newConnection: Connection = {
-      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: `conn-${crypto.randomUUID()}`,
       sourceDeviceId: connData.sourceDeviceId,
       targetDeviceId: connData.targetDeviceId,
       sourceInterface: connData.sourceInterface,
@@ -457,7 +457,7 @@ export function useTopologyAICallbacks({
 
   const addAnnotation = useCallback(async (annotationData: Partial<Annotation>): Promise<Annotation> => {
     const annotation: Annotation = {
-      id: `annotation-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: `annotation-${crypto.randomUUID()}`,
       type: annotationData.type || 'text',
       content: annotationData.content,
       position: annotationData.position || { x: 500, y: 500 },

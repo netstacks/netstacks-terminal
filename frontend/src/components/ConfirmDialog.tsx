@@ -53,7 +53,7 @@ function notifyListeners() {
  */
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
-    const id = `confirm-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const id = `confirm-${crypto.randomUUID()}`
     const pending: PendingConfirm = { ...opts, id, resolve }
     if (current) {
       // Queue behind the current one (resolves when current finishes)
