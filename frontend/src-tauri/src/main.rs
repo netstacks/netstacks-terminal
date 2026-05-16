@@ -549,6 +549,39 @@ fn sanitize_filename(s: &str) -> String {
         .collect()
 }
 
+/// Read an arbitrary file path as bytes. Used by the SFTP drag-drop
+/// upload bridge — Tauri's `onDragDropEvent` hands us absolute paths
+/// to whatever the user dragged from Finder/Explorer, and the fs
+/// plugin's scoping system doesn't accept those arbitrary paths
+/// without loosening the global scope. A bespoke command avoids
+/// touching the fs plugin's scope and keeps the surface tight: this
+/// command is the only entry point for reading caller-supplied
+/// absolute paths, so any future audit / hardening lives in one
+/// place.
+///
+/// Size cap: 5 GiB. Larger than that and we should be streaming, not
+/// loading into a single Vec<u8> + serializing across the IPC bridge.
+#[tauri::command]
+async fn read_dropped_file(path: String) -> Result<Vec<u8>, String> {
+    const MAX_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+    let p = std::path::Path::new(&path);
+    let meta = tokio::fs::metadata(p).await
+        .map_err(|e| format!("Failed to stat dropped file: {}", e))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "Refusing to read: '{}' is not a regular file (directories aren't supported)",
+            path,
+        ));
+    }
+    if meta.len() > MAX_BYTES {
+        return Err(format!(
+            "Refusing to read: file exceeds {} GiB upload cap",
+            MAX_BYTES / (1024 * 1024 * 1024),
+        ));
+    }
+    tokio::fs::read(p).await.map_err(|e| format!("Failed to read dropped file: {}", e))
+}
+
 #[tauri::command]
 async fn install_ca_certificate(pem_content: String, filename: String) -> Result<String, String> {
     use std::io::Write;
@@ -734,7 +767,7 @@ fn main() {
         .manage(SidecarToken(Mutex::new(None)))
         .manage(SidecarChild(Mutex::new(None)))
         .manage(MenuItemRegistry(Mutex::new(HashMap::new())))
-        .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window, open_quicklook, set_menu_enabled_batch])
+        .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window, open_quicklook, set_menu_enabled_batch, read_dropped_file])
         .setup(|app| {
             // Build the native menu bar (macOS/Windows/Linux) and
             // stash the per-id MenuItem handles so the frontend's

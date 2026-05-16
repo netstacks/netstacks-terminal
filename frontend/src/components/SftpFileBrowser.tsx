@@ -16,6 +16,7 @@ import {
 import { downloadFile } from '../lib/formatters';
 import TransferProgress, { type TransferItem } from './TransferProgress';
 import { confirmDialog } from './ConfirmDialog';
+import { useTauriDragDrop } from '../lib/tauriDragDrop';
 import './SftpFileBrowser.css';
 
 // Icons
@@ -521,6 +522,47 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
     setIsDragging(false);
     handleUpload(e.dataTransfer.files);
   };
+
+  // Tauri v2 captures native OS file drops at the WebView layer before
+  // the DOM gets onDrop. Read each dropped absolute path via the
+  // bespoke read_dropped_file invoke (sidesteps fs-plugin scoping
+  // for caller-supplied paths) and feed the existing handleUpload
+  // pipeline so progress + cancellation work uniformly.
+  const handleUploadFromPaths = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const fileList: File[] = [];
+      for (const absPath of paths) {
+        try {
+          const bytes = await invoke<number[] | Uint8Array>('read_dropped_file', { path: absPath });
+          const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          const name = absPath.split(/[\\/]/).pop() || 'file';
+          fileList.push(new File([u8], name));
+        } catch (err) {
+          // Directory or permission error — Rust side rejected, skip.
+          console.warn('[SftpFileBrowser] Skipping non-file drop entry:', absPath, err);
+        }
+      }
+      if (fileList.length === 0) return;
+      const synthetic = {
+        length: fileList.length,
+        item: (i: number) => fileList[i],
+        [Symbol.iterator]: function* () { yield* fileList; },
+      };
+      for (let i = 0; i < fileList.length; i++) {
+        (synthetic as unknown as { [k: number]: File })[i] = fileList[i];
+      }
+      await handleUpload(synthetic as unknown as FileList);
+    } catch (err) {
+      console.error('[SftpFileBrowser] Tauri drop upload failed:', err);
+    }
+  }, []);
+
+  useTauriDragDrop({
+    selector: '.sftp-browser',
+    onDrop: (paths) => { void handleUploadFromPaths(paths); },
+  });
 
   // Close context menu on click outside
   useEffect(() => {

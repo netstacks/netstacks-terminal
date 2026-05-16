@@ -12,6 +12,7 @@ import {
 import { downloadFile } from '../lib/formatters';
 import { isTextFile } from '../lib/sftpStartPaths';
 import { useSftpStore } from '../stores/sftpStore';
+import { useTauriDragDrop } from '../lib/tauriDragDrop';
 import TransferProgress, { type TransferItem } from './TransferProgress';
 import './SftpPanel.css';
 
@@ -589,6 +590,58 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
     setIsDragging(false);
     handleUpload(e.dataTransfer.files, rootPath);
   };
+
+  // Upload by absolute filesystem path — used by the Tauri webview
+  // drag-drop bridge (see useTauriDragDrop below). Reads each file
+  // via the Tauri fs plugin (faster + more reliable than the FileList
+  // round-trip) and synthesizes pseudo-File objects so the existing
+  // handleUpload path can stay the single source of truth for progress
+  // tracking + cancellation.
+  const handleUploadFromPaths = useCallback(async (paths: string[], targetPath: string) => {
+    if (!sftpId || paths.length === 0) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const fileList: File[] = [];
+      for (const absPath of paths) {
+        try {
+          const bytes = await invoke<number[] | Uint8Array>('read_dropped_file', { path: absPath });
+          // Invoke serializes Vec<u8> as Uint8Array (newer Tauri) or
+          // number[] (older bridges); normalize.
+          const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          // Basename only — sftpUpload doesn't recurse directories,
+          // and read_dropped_file already rejects non-regular files.
+          const name = absPath.split(/[\\/]/).pop() || 'file';
+          fileList.push(new File([u8], name));
+        } catch (err) {
+          console.warn('[SftpPanel] Skipping non-file drop entry:', absPath, err);
+        }
+      }
+      if (fileList.length === 0) return;
+      // Synthesize a FileList-like object so handleUpload's signature
+      // matches without changes. The cast is safe — handleUpload only
+      // uses length + index access + .arrayBuffer().
+      const synthetic = {
+        length: fileList.length,
+        item: (i: number) => fileList[i],
+        [Symbol.iterator]: function* () { yield* fileList; },
+      };
+      for (let i = 0; i < fileList.length; i++) {
+        (synthetic as unknown as { [k: number]: File })[i] = fileList[i];
+      }
+      await handleUpload(synthetic as unknown as FileList, targetPath);
+    } catch (err) {
+      console.error('[SftpPanel] Tauri drop upload failed:', err);
+    }
+  }, [sftpId]);
+
+  // Tauri v2 captures native OS file drops at the WebView layer before
+  // they reach the DOM, so the React onDrop above only fires for
+  // intra-app drags. Bridge real OS drops onto the same handler via
+  // the global drag-drop coordinator — see lib/tauriDragDrop.ts.
+  useTauriDragDrop({
+    selector: '.sftp-panel',
+    onDrop: (paths) => { void handleUploadFromPaths(paths, rootPath); },
+  });
 
   // --- Transfer handlers ---
 
