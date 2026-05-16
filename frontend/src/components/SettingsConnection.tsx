@@ -12,6 +12,7 @@ import { loadAppConfig, saveAppConfig } from '../lib/appConfig'
 import { useMode } from '../hooks/useMode'
 import { fetchCaCertificateInfo, installCaCertificate, type CaCertificateInfo } from '../api/tlsTrust'
 import { useCapabilitiesStore } from '../stores/capabilitiesStore'
+import { confirmDialog } from './ConfirmDialog'
 
 export default function SettingsConnection() {
   const { controllerUrl, isEnterprise } = useMode()
@@ -103,6 +104,13 @@ export default function SettingsConnection() {
   const [deenrollMessage, setDeenrollMessage] = useState<string | null>(null)
 
   const handleDeenroll = async () => {
+    const ok = await confirmDialog({
+      title: 'Switch to standalone mode?',
+      body: 'You will lose access to controller-side sessions, MOPs, and shared resources until you re-enroll. The app will need to restart.',
+      confirmLabel: 'Switch to standalone',
+      destructive: true,
+    })
+    if (!ok) return
     setDeenrolling(true)
     setDeenrollMessage(null)
     try {

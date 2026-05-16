@@ -31,6 +31,7 @@ import GroupsPanel from './GroupsPanel';
 import { useSessionSelection, SessionSelectionProvider } from '../hooks/useSessionSelection';
 import { downloadFile } from '../lib/formatters';
 import { showToast } from './Toast';
+import { confirmDialog } from './ConfirmDialog';
 
 // Drag and drop types
 type DragItemType = 'session' | 'folder';
@@ -490,13 +491,21 @@ function SessionPanelContent({
   };
 
   const handleDeleteSession = async (sessionId: string) => {
+    const session = sessions.find(s => s.id === sessionId);
+    setSessionContextMenu(null);
+    const ok = await confirmDialog({
+      title: 'Delete session?',
+      body: session ? <>Delete saved session <strong>{session.name}</strong>?</> : 'Delete this session?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteSession(sessionId);
       setSessions(prev => prev.filter(s => s.id !== sessionId));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete session');
     }
-    setSessionContextMenu(null);
   };
 
   const handleOpenSettings = (sessionId: string) => {
@@ -635,6 +644,17 @@ function SessionPanelContent({
   };
 
   const handleDeleteFolder = async (folderId: string) => {
+    const folder = folders.find(f => f.id === folderId);
+    setFolderContextMenu(null);
+    const ok = await confirmDialog({
+      title: 'Delete folder?',
+      body: folder
+        ? <>Delete folder <strong>{folder.name}</strong>? Sessions inside will be moved out of the folder.</>
+        : 'Delete this folder? Sessions inside will be moved out.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteFolder(folderId);
       setFolders(prev => prev.filter(f => f.id !== folderId));
@@ -643,7 +663,6 @@ function SessionPanelContent({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete folder');
     }
-    setFolderContextMenu(null);
   };
 
   // === Drag and Drop Handlers ===
@@ -1686,6 +1705,13 @@ function SessionPanelContent({
                 className="context-menu-item danger"
                 onClick={async () => {
                   setSessionContextMenu(null);
+                  const ok = await confirmDialog({
+                    title: 'Delete selected sessions?',
+                    body: `Delete ${selectedSessionIds.size} session${selectedSessionIds.size === 1 ? '' : 's'}? Empty folders will be cleaned up.`,
+                    confirmLabel: 'Delete',
+                    destructive: true,
+                  });
+                  if (!ok) return;
                   try {
                     const result = await bulkDeleteSessions(Array.from(selectedSessionIds));
                     // Remove deleted sessions from local state

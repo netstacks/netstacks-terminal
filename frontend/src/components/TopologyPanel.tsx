@@ -20,6 +20,7 @@ import NewTopologyDialog from './NewTopologyDialog';
 import TracerouteDialog from './TracerouteDialog';
 import type { Topology, Device, DeviceStatus } from '../types/topology';
 import './TopologyPanel.css';
+import { confirmDialog } from './ConfirmDialog';
 
 // Drag and drop types
 type DragItemType = 'topology' | 'folder';
@@ -638,6 +639,17 @@ function TopologyPanelContent({
   };
 
   const handleDeleteFolder = async (folderId: string) => {
+    const folder = folders.find(f => f.id === folderId);
+    setFolderContextMenu(null);
+    const ok = await confirmDialog({
+      title: 'Delete folder?',
+      body: folder
+        ? <>Delete topology folder <strong>{folder.name}</strong>? Topologies inside will be moved out of the folder.</>
+        : 'Delete this folder? Topologies inside will be moved out.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteTopologyFolder(folderId);
       setFolders(prev => prev.filter(f => f.id !== folderId));
@@ -646,7 +658,6 @@ function TopologyPanelContent({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete folder');
     }
-    setFolderContextMenu(null);
   };
 
   // ── Drag and Drop ──

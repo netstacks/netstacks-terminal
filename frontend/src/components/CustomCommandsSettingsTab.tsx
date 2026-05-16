@@ -13,6 +13,7 @@ import type { QuickAction } from '../types/quickAction';
 import type { DetectionType } from '../types/detection';
 import './CustomCommandsSettingsTab.css';
 import AITabInput from './AITabInput';
+import { confirmDialog } from './ConfirmDialog';
 
 const DETECTION_TYPE_OPTIONS: { value: DetectionType; label: string }[] = [
   { value: 'ipv4', label: 'IPv4' },
@@ -207,6 +208,14 @@ export default function CustomCommandsSettingsTab() {
   }, [formName, formCommand, formMode, formDetectionTypes, formEnabled, formActionType, formQuickActionId, formQuickActionVariable, formScriptId, editingId, resetForm]);
 
   const handleDelete = useCallback(async (id: string) => {
+    const cmd = commands.find(c => c.id === id);
+    const ok = await confirmDialog({
+      title: 'Delete custom command?',
+      body: cmd ? <>Delete custom command <strong>{cmd.name}</strong>?</> : 'Delete this custom command?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteCustomCommand(id);
       setCommands(prev => prev.filter(c => c.id !== id));

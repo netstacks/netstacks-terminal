@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import axios from 'axios'
 import { listAiMemories, createAiMemory, updateAiMemory, deleteAiMemory, type AiMemory } from '../api/ai'
+import { confirmDialog } from './ConfirmDialog'
 
 const CATEGORIES = ['general', 'network', 'device', 'procedure', 'preference'] as const
 
@@ -56,6 +57,13 @@ export default function AIMemoryTab() {
   }
 
   const handleDelete = async (id: string) => {
+    const ok = await confirmDialog({
+      title: 'Delete memory?',
+      body: 'Delete this AI memory entry? It will no longer be sent as context.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await deleteAiMemory(id)
       loadMemories()

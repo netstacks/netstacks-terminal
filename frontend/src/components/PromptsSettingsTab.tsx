@@ -26,6 +26,7 @@ import { MODE_PROMPTS, type AIMode } from '../lib/aiModes';
 import { getSettings } from '../hooks/useSettings';
 import './PromptsSettingsTab.css';
 import AITabInput from './AITabInput';
+import { confirmDialog } from './ConfirmDialog';
 
 type SystemKey =
   | 'chat'
@@ -230,13 +231,21 @@ export default function PromptsSettingsTab() {
   }, []);
 
   const handleDelete = useCallback(async (id: string) => {
+    const prompt = prompts.find(p => p.id === id);
+    const ok = await confirmDialog({
+      title: 'Delete quick prompt?',
+      body: prompt ? <>Delete quick prompt <strong>{prompt.label || prompt.id}</strong>?</> : 'Delete this quick prompt?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteQuickPrompt(id);
       setPrompts(prev => prev.filter(p => p.id !== id));
     } catch (err) {
       console.error('Failed to delete prompt:', err);
     }
-  }, []);
+  }, [prompts]);
 
   const handleToggleFavorite = useCallback(async (prompt: QuickPrompt) => {
     try {

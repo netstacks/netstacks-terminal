@@ -12,6 +12,7 @@ import ContextMenu from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { useContextMenu } from '../hooks/useContextMenu';
 import type { TaskStatus, AgentTask } from '../types/tasks';
+import { confirmDialog } from './ConfirmDialog';
 import './AgentsPanel.css';
 
 /** Parsed task result from result_json */
@@ -535,13 +536,31 @@ export default function AgentsPanel() {
   }, [agentFormMode, loadAgentDefs]);
 
   const handleDeleteAgentDef = useCallback(async (id: string) => {
+    const def = agentDefs.find(d => d.id === id);
+    const ok = await confirmDialog({
+      title: 'Delete agent definition?',
+      body: def ? <>Delete agent <strong>{def.name}</strong>? The system prompt and tool config are removed.</> : 'Delete this agent definition?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteAgentDefinition(id);
       await loadAgentDefs();
     } catch (err) {
       console.error('[AgentsPanel] Failed to delete agent definition:', err);
     }
-  }, [loadAgentDefs]);
+  }, [loadAgentDefs, agentDefs]);
+
+  const handleDeleteTaskWithConfirm = useCallback(async (taskId: string) => {
+    const ok = await confirmDialog({
+      title: 'Delete task?',
+      body: 'Delete this task and its result history?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (ok) deleteTask(taskId);
+  }, [deleteTask]);
 
   const handleRunAgent = useCallback(async (agentId: string) => {
     if (!runPrompt.trim() || isRunningAgent) return;
@@ -578,11 +597,11 @@ export default function AgentsPanel() {
     if (isTerminal) {
       items.push(
         { id: 'divider-1', label: '', divider: true, action: () => {} },
-        { id: 'delete', label: 'Delete', action: () => deleteTask(task.id) },
+        { id: 'delete', label: 'Delete', action: () => handleDeleteTaskWithConfirm(task.id) },
       );
     }
     contextMenu.open(e, items);
-  }, [handleSelectTask, cancelTask, handleRerunTask, deleteTask, contextMenu]);
+  }, [handleSelectTask, cancelTask, handleRerunTask, handleDeleteTaskWithConfirm, contextMenu]);
 
   // Context menu for an agent definition
   const handleAgentDefContextMenu = useCallback((e: React.MouseEvent, def: AgentDefinition) => {
@@ -757,8 +776,16 @@ export default function AgentsPanel() {
             {tasks.some(t => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled') && (
               <button
                 className="agents-clear-btn"
-                onClick={() => {
+                onClick={async () => {
                   const finishedTasks = tasks.filter(t => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled');
+                  if (finishedTasks.length === 0) return;
+                  const ok = await confirmDialog({
+                    title: 'Clear finished tasks?',
+                    body: `Delete ${finishedTasks.length} completed / failed / cancelled task${finishedTasks.length === 1 ? '' : 's'} and their result history?`,
+                    confirmLabel: 'Clear',
+                    destructive: true,
+                  });
+                  if (!ok) return;
                   finishedTasks.forEach(t => deleteTask(t.id));
                 }}
                 title="Clear completed, failed, and cancelled tasks"

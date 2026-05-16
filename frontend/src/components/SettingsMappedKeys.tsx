@@ -5,6 +5,7 @@ import {
   deleteMappedKey,
   type MappedKey,
 } from '../api/mappedKeys';
+import { confirmDialog } from './ConfirmDialog';
 import './SettingsMappedKeys.css';
 
 export default function SettingsMappedKeys() {
@@ -73,6 +74,13 @@ export default function SettingsMappedKeys() {
   }, [capturedKeyCombo, newCommand, newDescription]);
 
   const handleDelete = useCallback(async (id: string) => {
+    const ok = await confirmDialog({
+      title: 'Delete mapped key?',
+      body: 'Remove this key combo and its mapped command?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await deleteMappedKey(id);
       setKeys(prev => prev.filter(k => k.id !== id));

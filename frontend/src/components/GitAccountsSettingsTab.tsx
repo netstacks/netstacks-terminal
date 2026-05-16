@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { getClient } from '../api/client'
 import { showToast } from './Toast'
+import { confirmDialog } from './ConfirmDialog'
 
 interface GitAccountView {
   id: string
@@ -105,6 +106,13 @@ export default function GitAccountsSettingsTab() {
   }, [form, fetchAccounts])
 
   const handleDelete = useCallback(async (id: string) => {
+    const ok = await confirmDialog({
+      title: 'Delete git account?',
+      body: 'Remove this git account from NetStacks. Repositories using it will fall back to your global git config.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     try {
       await getClient().http.post('/workspace/git/accounts/delete', { id })
       showToast('Account deleted', 'success')

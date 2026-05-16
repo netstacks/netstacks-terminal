@@ -8,6 +8,16 @@ import { useContextMenu } from '../hooks/useContextMenu';
 import { exportMopPackage, readMopPackageFromFile, importMopPackage, parseMopPackageJson } from '../lib/mopExport';
 import { getCurrentMode } from '../api/client';
 import { showToast } from './Toast';
+import { confirmDialog } from './ConfirmDialog';
+
+async function confirmDeleteChange(name: string): Promise<boolean> {
+  return confirmDialog({
+    title: 'Delete MOP plan?',
+    body: <>Delete <strong>{name}</strong>? This removes the plan and its snapshots.</>,
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+}
 import { listDocuments, createDocument, type Document } from '../api/docs';
 import { updateChange as apiUpdateChange } from '../api/changes';
 import './ChangesPanel.css';
@@ -210,7 +220,9 @@ export default function ChangesPanel({ sessionId, onSelectChange, onOpenMopTab }
       items.push(
         { id: 'execute', label: 'Execute', action: () => handleExecute(change) },
         { id: 'edit', label: 'Edit', action: () => handleEditChange(change) },
-        { id: 'delete', label: 'Delete', action: () => deleteChange(change.id) },
+        { id: 'delete', label: 'Delete', action: async () => {
+          if (await confirmDeleteChange(change.name)) deleteChange(change.id);
+        }},
       );
     }
     items.push(
@@ -421,9 +433,9 @@ export default function ChangesPanel({ sessionId, onSelectChange, onOpenMopTab }
                         </button>
                         <button
                           className="delete-btn"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation();
-                            deleteChange(change.id);
+                            if (await confirmDeleteChange(change.name)) deleteChange(change.id);
                           }}
                         >
                           Delete

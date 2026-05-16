@@ -15,6 +15,7 @@ import {
 } from '../api/sftp';
 import { downloadFile } from '../lib/formatters';
 import TransferProgress, { type TransferItem } from './TransferProgress';
+import { confirmDialog } from './ConfirmDialog';
 import './SftpFileBrowser.css';
 
 // Icons
@@ -408,6 +409,19 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
 
   // Handle delete
   const handleDelete = async (entry: FileEntry) => {
+    const ok = await confirmDialog({
+      title: entry.is_dir ? 'Delete directory?' : 'Delete file?',
+      body: (
+        <>
+          Permanently delete <strong>{entry.name}</strong>
+          {entry.is_dir ? ' and everything inside it' : ''} from the remote
+          server?
+        </>
+      ),
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       setLoading(true);
       await sftpRm(sftp, entry.path, entry.is_dir);

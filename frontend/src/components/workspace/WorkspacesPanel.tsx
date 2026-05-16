@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react'
 import type { WorkspaceConfig } from '../../types/workspace'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
+import { confirmDialog } from '../ConfirmDialog'
 
 interface WorkspacesPanelProps {
   onOpenWorkspace: (config: WorkspaceConfig) => void
@@ -66,11 +67,18 @@ export default function WorkspacesPanel({
   }, [openWorkspaceIds.size, load])
 
   const deleteWorkspace = useCallback(async (id: string, name: string) => {
+    const ok = await confirmDialog({
+      title: 'Delete saved workspace?',
+      body: <>Remove the saved workspace <strong>{name}</strong>? Your git repository on disk is not touched.</>,
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (!ok) return
     const updated = savedWorkspaces.filter(w => w.id !== id)
     try {
       await saveSavedWorkspaces(updated)
       setSavedWorkspaces(updated)
-      showToast(`Deleted "${name}"`, 'success', 1500)
+      showToast(`Deleted "${name}"`, 'success')
     } catch {
       showToast('Failed to delete workspace', 'error')
     }
