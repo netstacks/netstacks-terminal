@@ -3,6 +3,7 @@ import WorkspaceCodeEditor from './WorkspaceCodeEditor'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import WorkspaceDiffViewer from './WorkspaceDiffViewer'
 import WorkspaceBlameViewer from './WorkspaceBlameViewer'
+import WorkspaceImageViewer from './WorkspaceImageViewer'
 import WorkspaceMarkdownPreview from './WorkspaceMarkdownPreview'
 import ContextMenu from '../ContextMenu'
 import type { MenuItem } from '../ContextMenu'
@@ -159,6 +160,15 @@ export default function WorkspaceEditorArea({
             key={tab.id}
             filePath={tab.filePath}
             gitOps={gitOps}
+          />
+        )
+      case 'image':
+        if (!tab.filePath) return null
+        return (
+          <WorkspaceImageViewer
+            key={tab.id}
+            filePath={tab.filePath}
+            fileOps={fileOps}
           />
         )
       default:

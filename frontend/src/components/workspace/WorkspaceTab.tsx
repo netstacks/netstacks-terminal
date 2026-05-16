@@ -72,7 +72,16 @@ export default function WorkspaceTab({ config, isActive }: WorkspaceTabProps) {
   }, [])
 
   const handleFileOpen = useCallback((filePath: string, fileName: string) => {
-    workspace.openInnerTab('code-editor', { filePath, title: fileName })
+    const ext = filePath.split('.').pop()?.toLowerCase() || ''
+    // Binary / media files get the image viewer (which also handles PDF /
+    // audio / video). Everything else goes to Monaco — language detection
+    // there will treat unknown text as plaintext.
+    const IMAGE_LIKE = new Set([
+      'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg',
+      'pdf', 'mp3', 'wav', 'ogg', 'mp4', 'webm',
+    ])
+    const tabType = IMAGE_LIKE.has(ext) ? 'image' : 'code-editor'
+    workspace.openInnerTab(tabType, { filePath, title: fileName })
   }, [workspace])
 
   const handleViewDiff = useCallback((filePath: string) => {
