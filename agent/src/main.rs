@@ -138,7 +138,7 @@ fn check_enterprise_mode() -> bool {
 async fn evict_existing_agent_if_present(addr: SocketAddr) {
     use std::time::Duration;
 
-    if !port_in_use(addr) {
+    if !port_in_use(addr).await {
         return;
     }
 
@@ -182,7 +182,7 @@ async fn evict_existing_agent_if_present(addr: SocketAddr) {
     // Poll for up to 2s for the port to free.
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if !port_in_use(addr) {
+        if !port_in_use(addr).await {
             tracing::info!("Port {} freed", addr.port());
             return;
         }
@@ -201,8 +201,17 @@ async fn evict_existing_agent_if_present(_addr: SocketAddr) {
 }
 
 #[cfg(unix)]
-fn port_in_use(addr: SocketAddr) -> bool {
-    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok()
+async fn port_in_use(addr: SocketAddr) -> bool {
+    // Async probe — doesn't block a runtime thread the way
+    // std::net::TcpStream::connect_timeout did. 200ms cap stays the same so
+    // overall startup eviction time is unchanged.
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::TcpStream::connect(addr),
+        ).await,
+        Ok(Ok(_)),
+    )
 }
 
 #[cfg(unix)]

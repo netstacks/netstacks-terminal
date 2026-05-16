@@ -315,7 +315,7 @@ pub async fn bulk_delete_sessions(
         match state.provider.delete_session(&id).await {
             Ok(_) => deleted += 1,
             Err(e) => {
-                eprintln!("Failed to delete session {}: {:?}", id, e);
+                tracing::warn!("Failed to delete session {}: {:?}", id, e);
                 failed += 1;
             }
         }
@@ -2170,7 +2170,7 @@ pub async fn netbox_proxy_devices(
                 code: "NETBOX_TOO_MANY_PAGES".to_string(),
             });
         }
-        eprintln!("[DEBUG] Fetching NetBox devices page {} from: {}", page_count, api_url);
+        tracing::debug!("Fetching NetBox devices page {} from: {}", page_count, api_url);
 
         let response = client
             .get(&api_url)
@@ -2202,7 +2202,7 @@ pub async fn netbox_proxy_devices(
                 code: "PARSE_ERROR".to_string(),
             })?;
 
-        eprintln!("[DEBUG] Page {} returned {} devices (total count: {})", page_count, data.results.len(), data.count);
+        tracing::debug!("Page {} returned {} devices (total count: {})", page_count, data.results.len(), data.count);
         all_devices.extend(data.results);
 
         // Check for next page
@@ -2211,7 +2211,7 @@ pub async fn netbox_proxy_devices(
 
     // Log summary
     let with_ip = all_devices.iter().filter(|d| d.primary_ip.is_some()).count();
-    eprintln!("[DEBUG] Total devices fetched across {} pages: {} (with primary_ip: {})",
+    tracing::debug!("Total devices fetched across {} pages: {} (with primary_ip: {})",
               page_count, all_devices.len(), with_ip);
 
     Ok(Json(all_devices))
@@ -2378,7 +2378,7 @@ pub async fn netbox_proxy_ip_addresses(
     let params: Vec<(&str, &[String])> = vec![("address", &address_vec)];
     let api_url = build_netbox_url(&req.url, "/ipam/ip-addresses/", &params);
 
-    eprintln!("[DEBUG] NetBox IP address search: {}", api_url);
+    tracing::debug!("NetBox IP address search: {}", api_url);
 
     let response = client
         .get(&api_url)
@@ -5980,8 +5980,8 @@ pub async fn create_quick_action(
     match state.provider.create_quick_action(&req).await {
         Ok(action) => Ok((StatusCode::CREATED, Json(action))),
         Err(e) => {
-            eprintln!(
-                "[DEBUG] create_quick_action FAILED: name={} api_resource_id={} method={} path={} error={:?}",
+            tracing::warn!(
+                "create_quick_action FAILED: name={} api_resource_id={} method={} path={} error={:?}",
                 req.name, req.api_resource_id, req.method, req.path, e
             );
             Err(e.into())
@@ -6040,13 +6040,13 @@ pub async fn execute_inline_quick_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExecuteInlineQuickActionRequest>,
 ) -> Result<Json<QuickActionResult>, ApiError> {
-    eprintln!(
-        "[DEBUG] execute_inline_quick_action: api_resource_id={} method={} path={} variables={:?}",
+    tracing::debug!(
+        "execute_inline_quick_action: api_resource_id={} method={} path={} variables={:?}",
         req.api_resource_id, req.method, req.path, req.variables.keys().collect::<Vec<_>>()
     );
     let resource = state.provider.get_api_resource(&req.api_resource_id).await?
         .ok_or_else(|| {
-            eprintln!("[DEBUG] execute_inline_quick_action: api_resource_id '{}' not found in DB", req.api_resource_id);
+            tracing::warn!("execute_inline_quick_action: api_resource_id '{}' not found in DB", req.api_resource_id);
             ApiError { error: format!("API resource '{}' not found", req.api_resource_id), code: "NOT_FOUND".to_string() }
         })?;
     let credentials = state.provider.get_api_resource_credentials(&req.api_resource_id).await.ok().flatten();

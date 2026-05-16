@@ -2223,6 +2223,17 @@ struct TunnelRow {
     updated_at: String,
 }
 
+/// Normalize a SQLite `datetime('now')` value (`YYYY-MM-DD HH:MM:SS`) to
+/// ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`) so `new Date(...)` parses on Safari.
+/// Returns the input unchanged if it already contains `T` or `Z`.
+fn iso8601_utc(s: String) -> String {
+    if s.contains('T') || s.ends_with('Z') {
+        return s;
+    }
+    let with_t = s.replacen(' ', "T", 1);
+    format!("{}Z", with_t)
+}
+
 impl TunnelRow {
     fn into_tunnel(self) -> Tunnel {
         Tunnel {
@@ -2246,8 +2257,8 @@ impl TunnelRow {
             auto_reconnect: self.auto_reconnect,
             max_retries: self.max_retries as u32,
             enabled: self.enabled,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: iso8601_utc(self.created_at),
+            updated_at: iso8601_utc(self.updated_at),
         }
     }
 }
