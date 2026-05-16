@@ -216,7 +216,11 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     return new AgentGitOps(config.rootPath)
   }, [config.mode, config.sessionId, config.rootPath])
 
-  // Initialize .netstacks directory and load persisted state
+  // Initialize .netstacks directory and load persisted state. One-shot
+  // on mount — the workspace identity (mode, rootPath, fileOps) is
+  // immutable for the lifetime of this hook instance, so depending on
+  // them would just force an unnecessary re-init if React happened to
+  // re-create the prop reference.
   useEffect(() => {
     const init = async () => {
       if (config.mode !== 'local') return
@@ -333,7 +337,11 @@ export function useWorkspace({ config }: UseWorkspaceOptions): UseWorkspaceRetur
     fileOps,
   ])
 
-  // Save immediately on unmount
+  // Save immediately on unmount. Reads stateRef.current so the snapshot
+  // is whatever the user had at unmount time — fileOps captured in
+  // closure is fine because the workspace can't change mode mid-life.
+  // Intentionally empty deps: re-running the effect would tear down and
+  // re-register the cleanup, which would lose the unmount-time snapshot.
   useEffect(() => {
     return () => {
       const cfg = stateToConfig(stateRef.current)

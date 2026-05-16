@@ -173,6 +173,9 @@ export default function SharedTerminal({ token, controllerUrl }: SharedTerminalP
       fitRef.current = null;
       wsRef.current = null;
     };
+  // Intentionally only re-fires when the WS endpoint changes — anything
+  // referenced inside (setState callbacks, the resize observer) is
+  // setter-only or refs, so stale-closure capture doesn't bite.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, controllerUrl]);
 

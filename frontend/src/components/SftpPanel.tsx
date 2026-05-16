@@ -304,13 +304,12 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
         handleDownload(entry);
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sftpId, activeConnection, toggleDir, onOpenFile]
+    [sftpId, activeConnection, toggleDir, onOpenFile, handleDownload]
   );
 
   // --- Download ---
 
-  const handleDownload = async (entry: FileEntry) => {
+  const handleDownload = useCallback(async (entry: FileEntry) => {
     if (!sftpId) return;
     const transferId = `download-${++transferIdRef.current}`;
     const newTransfer: TransferItem = {
@@ -373,7 +372,7 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
     } finally {
       clearInterval(progressInterval);
     }
-  };
+  }, [sftpId]);
 
   // --- Upload ---
 

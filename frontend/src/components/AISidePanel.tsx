@@ -203,7 +203,9 @@ const AISidePanel = ({
     }
   }, [isCollapsed, onCollapsedChange])
 
-  // Center overlay when entering overlay mode
+  // Center overlay when entering overlay mode. Intentionally ignores
+  // overlaySize so resizing the overlay doesn't snap it back to center
+  // every render — only entering overlay mode should re-center.
   useEffect(() => {
     if (isOverlay) {
       setOverlayPos({
@@ -211,7 +213,8 @@ const AISidePanel = ({
         y: Math.max(40, (window.innerHeight - overlaySize.height) / 2),
       })
     }
-  }, [isOverlay]) // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOverlay])
 
   // Unified AI state
   const [input, setInput] = useState('')
