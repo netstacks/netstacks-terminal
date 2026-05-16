@@ -1410,8 +1410,21 @@ pub async fn run_script_stream(
             }
         });
 
-        // Wait for process to complete
-        let status = child.wait().await;
+        // Wait for child to finish OR the SSE client to disconnect.
+        // Without the second arm a long-running script (or `while True: pass`)
+        // outlives the user closing the tab — the spawn task keeps reading,
+        // the child keeps running, until the process self-terminates.
+        let status = tokio::select! {
+            status = child.wait() => status,
+            _ = tx.closed() => {
+                tracing::warn!("SSE client disconnected mid-run — killing script process");
+                let _ = child.kill().await;
+                stderr_handle.abort();
+                stdout_handle.abort();
+                let _ = tokio::fs::remove_file(&script_path).await;
+                return;
+            }
+        };
         let _ = stderr_handle.await;
         let _ = stdout_handle.await;
 

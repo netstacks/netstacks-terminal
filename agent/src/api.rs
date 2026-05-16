@@ -9874,7 +9874,19 @@ pub async fn local_run_python(
             });
         }
 
-        let status = child.wait().await;
+        // Wait for the child OR the SSE client to disconnect. Without the
+        // second arm, a long-running script (or `while True: pass`) outlives
+        // the user closing the tab — the spawn task keeps reading, the child
+        // keeps running, until the process self-terminates.
+        let status = tokio::select! {
+            status = child.wait() => status,
+            _ = tx.closed() => {
+                tracing::warn!("SSE client disconnected mid-run — killing python process");
+                let _ = child.kill().await;
+                let _ = tokio::fs::remove_file(&script_path).await;
+                return;
+            }
+        };
         let _ = tokio::fs::remove_file(&script_path).await;
         let duration_ms = start.elapsed().as_millis();
         let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
