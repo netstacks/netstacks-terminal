@@ -163,6 +163,15 @@ export default function WorkspaceCodeEditor({
 
   return (
     <div className="workspace-code-editor">
+      {editorRef.current && modelRef.current && (
+        <LspBridge
+          monaco={monaco}
+          editor={editorRef.current}
+          model={modelRef.current}
+          language={language}
+          workspace={workspaceRoot}
+        />
+      )}
       <Editor
         defaultValue={initialContent || ''}
         language={language}
@@ -180,15 +189,6 @@ export default function WorkspaceCodeEditor({
           padding: { top: 4 },
         }}
       />
-      {editorRef.current && modelRef.current && (
-        <LspBridge
-          monaco={monaco}
-          editor={editorRef.current}
-          model={modelRef.current}
-          language={language}
-          workspace={workspaceRoot}
-        />
-      )}
       {copilot.isOpen && copilot.widgetPosition && editorRef.current && (
         <MonacoCopilotWidget
           position={copilot.widgetPosition}

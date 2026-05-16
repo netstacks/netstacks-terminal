@@ -141,7 +141,14 @@ async fn install_plugin(
 async fn install_progress(
     State(state): State<LspState>,
     Path(id): Path<String>,
+    Query(query): Query<WsQuery>,
 ) -> impl IntoResponse {
+    // Auth: query token must match the agent's session token (SSE, like WS, cannot send custom headers).
+    let token_ok = query.token.as_deref() == Some(state.auth_token.as_str());
+    if !token_ok {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
     // Subscribe to the install progress channel for SSE streaming.
     let rx = match state.host.installs.get(&id) {
         Some(tx) => tx.subscribe(),

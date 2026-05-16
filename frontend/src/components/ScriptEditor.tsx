@@ -819,6 +819,16 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
       <div className="script-editor-body">
         <div className="script-editor-main">
           <div className="script-editor-monaco">
+            {/* LSP install banner (appears above editor when needed) */}
+            {editorRef.current && modelRef.current && (
+              <LspBridge
+                monaco={monaco}
+                editor={editorRef.current}
+                model={modelRef.current}
+                language="python"
+                workspace={null}
+              />
+            )}
             <Editor
               height="100%"
               defaultLanguage="python"
@@ -843,17 +853,6 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
             />
           </div>
         </div>
-
-        {/* LSP client bridge */}
-        {editorRef.current && modelRef.current && (
-          <LspBridge
-            monaco={monaco}
-            editor={editorRef.current}
-            model={modelRef.current}
-            language="python"
-            workspace={null}
-          />
-        )}
 
         {/* Cmd+I Copilot Widget */}
         {copilot.isOpen && copilot.widgetPosition && (

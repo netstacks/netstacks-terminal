@@ -107,3 +107,40 @@ body {
   background: var(--color-accent);
   color: white;
 }
+
+/* LSP Install Banner */
+.lsp-install-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 13px;
+}
+.lsp-install-banner__icon { font-size: 18px; }
+.lsp-install-banner__body { display: flex; flex-direction: column; flex: 1; }
+.lsp-install-banner__body strong { color: var(--color-text-primary); }
+.lsp-install-banner__body span { color: var(--color-text-secondary); font-size: 12px; }
+.lsp-install-banner__actions { display: flex; gap: 8px; }
+.lsp-install-banner__actions button {
+  padding: 4px 10px;
+  border-radius: 3px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: 12px;
+  transition: var(--transition-fast);
+}
+.lsp-install-banner__actions button:hover {
+  background: var(--color-bg-hover);
+}
+.lsp-install-banner__actions button.primary {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+.lsp-install-banner__actions button.primary:hover {
+  background: var(--color-accent-hover);
+}

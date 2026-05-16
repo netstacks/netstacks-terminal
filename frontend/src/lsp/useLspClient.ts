@@ -35,6 +35,8 @@ const RECONNECT_BACKOFF_MS = 1000;
 export function useLspClient(args: UseLspClientArgs) {
   const { monaco, editor: _editor, model, language, workspace } = args;
   const [status, setStatus] = useState<Status>('idle');
+  const [plugin, setPlugin] = useState<LspPluginListItem | undefined>(undefined);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // Refs hold mutable state across renders without triggering re-renders
   const wsRef = useRef<WebSocket | null>(null);
@@ -48,7 +50,7 @@ export function useLspClient(args: UseLspClientArgs) {
 
   useEffect(() => {
     let cancelled = false;
-    let plugin: LspPluginListItem | undefined;
+    let pluginLocal: LspPluginListItem | undefined;
 
     async function setup() {
       // 1) Look up the plugin for this language
@@ -60,26 +62,32 @@ export function useLspClient(args: UseLspClientArgs) {
         if (!cancelled) setStatus('error');
         return;
       }
-      plugin = plugins.find((p) => p.language === language);
-      if (!plugin) {
-        if (!cancelled) setStatus('idle');
+      pluginLocal = plugins.find((p) => p.language === language);
+      if (!pluginLocal) {
+        if (!cancelled) {
+          setStatus('idle');
+          setPlugin(undefined);
+        }
         return;
       }
 
+      // Store plugin in state
+      if (!cancelled) setPlugin(pluginLocal);
+
       // 2) Check install status
       if (
-        plugin.installStatus === 'not-installed' ||
-        plugin.installStatus === 'installing' ||
-        plugin.installStatus === 'installed-but-unusable' ||
-        plugin.installStatus === 'unavailable' ||
-        plugin.installStatus === 'disabled'
+        pluginLocal.installStatus === 'not-installed' ||
+        pluginLocal.installStatus === 'installing' ||
+        pluginLocal.installStatus === 'installed-but-unusable' ||
+        pluginLocal.installStatus === 'unavailable' ||
+        pluginLocal.installStatus === 'disabled'
       ) {
         if (!cancelled) setStatus('unavailable');
         return;
       }
 
       // 3) Connect WebSocket
-      await connect(plugin);
+      await connect(pluginLocal);
     }
 
     async function connect(plugin: LspPluginListItem) {
@@ -392,9 +400,19 @@ export function useLspClient(args: UseLspClientArgs) {
       // Clear markers
       monaco.editor.setModelMarkers(model, 'lsp', []);
     };
-  }, [language, workspace, model.uri.toString()]);
+  }, [language, workspace, model.uri.toString(), refreshKey]);
 
-  return { status };
+  // Compute derived flags
+  const needsInstall = plugin?.installStatus === 'not-installed';
+  const isEnterpriseUnavailable = plugin?.installStatus === 'unavailable';
+
+  return {
+    status,
+    plugin,
+    needsInstall,
+    isEnterpriseUnavailable,
+    refresh: () => setRefreshKey((k) => k + 1),
+  };
 }
 
 function lspCompletionKindToMonaco(kind: number | undefined, monaco: typeof Monaco): number {

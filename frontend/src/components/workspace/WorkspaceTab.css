@@ -647,8 +647,10 @@
   gap: 6px;
 }
 
-/* Code editor */
+/* Code editor wrapper */
 .workspace-code-editor {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
 }
@@ -666,14 +668,6 @@
   height: 18px;
   font-family: var(--font-family);
   min-width: 0;
-}
-
-/* Code editor wrapper */
-.workspace-code-editor {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
 }
 
 /* Workspaces sidebar panel */
