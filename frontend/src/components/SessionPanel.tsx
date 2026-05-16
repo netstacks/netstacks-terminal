@@ -313,7 +313,8 @@ function SessionPanelContent({
     'default',
     { validate: isSortOrder },
   );
-  // Favorites stored in localStorage
+  // Favorites stored in localStorage. Cross-window sync: a second
+  // popout marking a session as favorite should reflect here too.
   const [favoriteSessionIds, setFavoriteSessionIds] = useState<Set<string>>(() => {
     try {
       const stored = localStorage.getItem('session-panel-favorites');
@@ -322,6 +323,23 @@ function SessionPanelContent({
       return new Set();
     }
   });
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key !== 'session-panel-favorites') return;
+      if (e.newValue === null) {
+        setFavoriteSessionIds(new Set());
+        return;
+      }
+      try {
+        const parsed = JSON.parse(e.newValue);
+        if (Array.isArray(parsed)) setFavoriteSessionIds(new Set(parsed));
+      } catch {
+        /* ignore parse errors on incoming updates */
+      }
+    };
+    window.addEventListener('storage', handler);
+    return () => window.removeEventListener('storage', handler);
+  }, []);
   // Show/hide favorites section
   const [showFavorites, setShowFavorites] = usePersistedState('session-panel-show-favorites', true);
 

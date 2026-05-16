@@ -162,7 +162,7 @@ function saveSettings(settings: AppSettings): void {
 export function useSettings() {
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
 
-  // Listen for settings changes from other hook instances
+  // Listen for settings changes from other hook instances (same window).
   useEffect(() => {
     const handleSettingsChanged = (e: Event) => {
       const customEvent = e as CustomEvent<AppSettings>;
@@ -170,6 +170,32 @@ export function useSettings() {
     };
     window.addEventListener(SETTINGS_CHANGED_EVENT, handleSettingsChanged);
     return () => window.removeEventListener(SETTINGS_CHANGED_EVENT, handleSettingsChanged);
+  }, []);
+
+  // Listen for storage events from OTHER windows (popouts share the
+  // same WebView origin → same localStorage). Without this, editing a
+  // setting in a popout left the main window showing stale state until
+  // reload. The custom event above only fires within the window that
+  // wrote — the browser storage event fires in every OTHER window.
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY) return;
+      if (e.newValue === null) {
+        setSettings(defaultSettings);
+        globalSettings = defaultSettings;
+        return;
+      }
+      try {
+        const merged = { ...defaultSettings, ...JSON.parse(e.newValue) };
+        setSettings(merged);
+        // Keep the singleton in sync for non-hook callers in this window.
+        globalSettings = merged;
+      } catch {
+        // Corrupt incoming value — leave state alone.
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
   }, []);
 
   // Save to localStorage when settings change (but don't trigger event recursively)

@@ -5,7 +5,7 @@
  * and provides a centralized way to monitor usage across all AI features.
  */
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
 
 // Provider types (matches backend)
 export type AiProviderType = 'anthropic' | 'openai' | 'ollama' | 'openrouter' | 'litellm' | 'custom'
@@ -115,10 +115,33 @@ const TokenUsageContext = createContext<TokenUsageContextValue | null>(null)
 export function TokenUsageProvider({ children }: { children: ReactNode }) {
   const [usage, setUsage] = useState<GlobalTokenUsage>(loadUsage)
 
-  // Save to localStorage whenever usage changes
+  // Save to localStorage whenever usage changes. A short-lived ref
+  // suppresses the next storage-event echo from THIS window (we don't
+  // want to clobber the same value we just wrote).
+  const suppressNextStorageEvent = useRef(false)
   useEffect(() => {
+    suppressNextStorageEvent.current = true
     saveUsage(usage)
   }, [usage])
+
+  // Cross-window sync — popouts share the same WebView origin so they
+  // also share localStorage. Without this, two windows could each
+  // track tokens, race on save, and double-count or lose increments.
+  // Storage event fires in every OTHER window when one writes.
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY || e.newValue === null) return
+      try {
+        const parsed = JSON.parse(e.newValue) as GlobalTokenUsage
+        suppressNextStorageEvent.current = true
+        setUsage(parsed)
+      } catch {
+        /* corrupt incoming value — ignore */
+      }
+    }
+    window.addEventListener('storage', handler)
+    return () => window.removeEventListener('storage', handler)
+  }, [])
 
   // Track new token usage
   const trackUsage = useCallback((provider: AiProviderType, tokens: TokenUsage) => {
