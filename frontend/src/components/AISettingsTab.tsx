@@ -539,15 +539,21 @@ export default function AISettingsTab() {
         return;
       }
 
-      // Only check API keys for enabled providers
-      const [hasAnthropic, hasOpenAI, hasOpenRouter, hasCustom] = await Promise.all([
+      // Only check API keys for enabled providers. allSettled so one
+      // vault-level error doesn't wipe the other three providers'
+      // "key saved" indicators — each rejection just falls back to false.
+      const [anthropicRes, openaiRes, openrouterRes, customRes] = await Promise.allSettled([
         isProviderEnabled('anthropic') ? hasAiApiKey('anthropic') : Promise.resolve(false),
         isProviderEnabled('openai') ? hasAiApiKey('openai') : Promise.resolve(false),
         isProviderEnabled('openrouter') ? hasAiApiKey('openrouter') : Promise.resolve(false),
         // Custom is always considered "enabled" — check the vault directly so
         // the UI shows "key saved" after a reload (was hardcoded to false).
-        hasAiApiKey('custom').catch(() => false),
+        hasAiApiKey('custom'),
       ]);
+      const hasAnthropic = anthropicRes.status === 'fulfilled' ? anthropicRes.value : false;
+      const hasOpenAI = openaiRes.status === 'fulfilled' ? openaiRes.value : false;
+      const hasOpenRouter = openrouterRes.status === 'fulfilled' ? openrouterRes.value : false;
+      const hasCustom = customRes.status === 'fulfilled' ? customRes.value : false;
 
       // Check Ollama status only if enabled
       let ollamaRunning = false;

@@ -156,14 +156,21 @@ export default function EnterpriseSessionPanel({
     setLoading(true);
     setError(null);
     try {
-      const [sessionsRes, foldersData, assignmentsData] = await Promise.all([
+      // allSettled: a folders or assignments outage shouldn't blank the
+      // entire panel. Sessions list is the primary content — that's the
+      // only branch that promotes to a panel-level error.
+      const [sessionsRes, foldersRes, assignmentsRes] = await Promise.allSettled([
         listEnterpriseSessionDefinitions(),
         listUserFolders(),
         listUserAssignments(),
       ]);
-      setSessions(sessionsRes.items);
-      setFolders(foldersData);
-      setAssignments(assignmentsData);
+      if (sessionsRes.status === 'fulfilled') {
+        setSessions(sessionsRes.value.items);
+      } else {
+        throw sessionsRes.reason;
+      }
+      setFolders(foldersRes.status === 'fulfilled' ? foldersRes.value : []);
+      setAssignments(assignmentsRes.status === 'fulfilled' ? assignmentsRes.value : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sessions');
     } finally {

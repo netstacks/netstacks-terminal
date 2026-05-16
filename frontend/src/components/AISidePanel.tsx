@@ -548,11 +548,16 @@ const AISidePanel = ({
             custom: providerTypes.has('custom'),
           }
         } else {
-          // Personal mode: check vault for API keys (only for enabled providers)
-          const [hasAnthropic, hasOpenAI] = await Promise.all([
+          // Personal mode: check vault for API keys (only for enabled
+          // providers). allSettled so one provider's vault error doesn't
+          // hide the other's available key — treat any rejection as "no
+          // key" rather than blanking both.
+          const [anthropicRes, openaiRes] = await Promise.allSettled([
             isEnabled('anthropic') ? hasAiApiKey('anthropic') : Promise.resolve(false),
             isEnabled('openai') ? hasAiApiKey('openai') : Promise.resolve(false),
           ])
+          const hasAnthropic = anthropicRes.status === 'fulfilled' ? anthropicRes.value : false
+          const hasOpenAI = openaiRes.status === 'fulfilled' ? openaiRes.value : false
 
           // Check Ollama only if enabled
           let ollamaRunning = false

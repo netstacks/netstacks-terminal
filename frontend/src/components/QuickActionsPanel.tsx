@@ -88,12 +88,19 @@ function QuickActionsPanel({ onOpenResultTab }: QuickActionsPanelProps) {
     setLoading(true)
     setError(null)
     try {
-      const [actionsData, resourcesData] = await Promise.all([
+      // allSettled: an API-resources fetch failure shouldn't blank the
+      // actions list. Actions is the primary content; resources are used
+      // for enrichment (name lookups) and can be empty.
+      const [actionsRes, resourcesRes] = await Promise.allSettled([
         listQuickActions(),
         listApiResources(),
       ])
-      setActions(actionsData)
-      setResources(resourcesData)
+      if (actionsRes.status === 'fulfilled') {
+        setActions(actionsRes.value)
+      } else {
+        throw actionsRes.reason
+      }
+      setResources(resourcesRes.status === 'fulfilled' ? resourcesRes.value : [])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load quick actions')
     } finally {

@@ -365,14 +365,23 @@ function SessionPanelContent({
     setLoading(true);
     setError(null);
     try {
-      const [sessionsData, foldersData, historyData] = await Promise.all([
+      // allSettled: don't let a folders/history failure wipe the sessions
+      // list (or vice versa). Surface only the worst failure (sessions) as
+      // a panel error since folders+history have sane fallbacks.
+      const [sessionsRes, foldersRes, historyRes] = await Promise.allSettled([
         listSessions(),
         listFolders(),
-        listHistory().catch(() => []), // Don't fail if history fails
+        listHistory(),
       ]);
-      setSessions(sessionsData);
-      setFolders(foldersData);
-      setRecentConnections(historyData.slice(0, 5));
+      if (sessionsRes.status === 'fulfilled') {
+        setSessions(sessionsRes.value);
+      } else {
+        throw sessionsRes.reason;
+      }
+      setFolders(foldersRes.status === 'fulfilled' ? foldersRes.value : []);
+      setRecentConnections(
+        (historyRes.status === 'fulfilled' ? historyRes.value : []).slice(0, 5),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sessions');
     } finally {
