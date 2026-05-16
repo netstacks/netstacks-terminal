@@ -118,7 +118,60 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), DbError> {
     migrate_jump_session_id_columns(pool).await?;
     migrate_topology_folders(pool).await?;
     migrate_git_accounts_table(pool).await?;
+    migrate_lsp_plugin_tables(pool).await?;
     seed_default_settings(pool).await?;
+
+    Ok(())
+}
+
+/// LSP plugin storage. Two tables:
+///   - `lsp_plugins`: user-added plugins (Add Language Server form).
+///     `installation` is implicitly `system-path` — the agent runs whatever
+///     `command` + `args` the user configured against a binary already on
+///     their machine.
+///   - `lsp_plugin_overrides`: per-built-in customizations (custom command
+///     override and enabled/disabled toggle). Keyed by the plugin id from
+///     the built-in registry; only the rows the user has actually changed
+///     are persisted.
+async fn migrate_lsp_plugin_tables(pool: &SqlitePool) -> Result<(), DbError> {
+    if !table_exists(pool, "lsp_plugins").await? {
+        sqlx::query(
+            r#"CREATE TABLE lsp_plugins (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                language TEXT NOT NULL,
+                file_extensions TEXT NOT NULL DEFAULT '[]',
+                command TEXT NOT NULL,
+                args TEXT NOT NULL DEFAULT '[]',
+                env_vars TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"#
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| DbError::Migration(format!("Failed to create lsp_plugins table: {}", e)))?;
+
+        tracing::info!("Created lsp_plugins table");
+    }
+
+    if !table_exists(pool, "lsp_plugin_overrides").await? {
+        sqlx::query(
+            r#"CREATE TABLE lsp_plugin_overrides (
+                plugin_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                custom_command TEXT,
+                custom_args TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"#
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| DbError::Migration(format!("Failed to create lsp_plugin_overrides table: {}", e)))?;
+
+        tracing::info!("Created lsp_plugin_overrides table");
+    }
 
     Ok(())
 }
