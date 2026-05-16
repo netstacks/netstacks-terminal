@@ -197,9 +197,18 @@ export default function WorkspaceNewDialog({
               <input type="radio" checked={mode === 'local'} onChange={() => setMode('local')} />
               Local Directory
             </label>
-            <label className="workspace-new-dialog-radio">
-              <input type="radio" checked={mode === 'remote'} onChange={() => setMode('remote')} />
-              Remote Server
+            <label
+              className="workspace-new-dialog-radio disabled"
+              title="Remote workspaces aren't wired up yet — the dialog accepts a path but no SFTP connection is established. Coming soon."
+              style={{ opacity: 0.5, cursor: 'not-allowed' }}
+            >
+              <input
+                type="radio"
+                checked={mode === 'remote'}
+                onChange={() => {/* no-op until remote workspaces are implemented */}}
+                disabled
+              />
+              Remote Server (coming soon)
             </label>
             <label className="workspace-new-dialog-radio">
               <input type="radio" checked={mode === 'clone'} onChange={() => setMode('clone')} />
