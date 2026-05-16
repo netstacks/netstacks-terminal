@@ -16,16 +16,31 @@ import { useCallback, useEffect, useState } from 'react'
  * Usage:
  *   const [collapsed, setCollapsed] = usePersistedState('workspaces.wsCollapsed', false)
  */
+export interface UsePersistedStateOptions<T> {
+  /**
+   * Optional runtime validator. Called on the parsed value before it's
+   * accepted into state — returning false (or throwing) falls back to
+   * `initial`. Use for union types or anything where a stale / hostile
+   * value in localStorage could break the UI. JSON.parse failure
+   * already falls back without needing a validator.
+   */
+  validate?: (value: unknown) => value is T
+}
+
 export function usePersistedState<T>(
   key: string,
   initial: T,
+  options?: UsePersistedStateOptions<T>,
 ): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const validate = options?.validate
   const [value, setValue] = useState<T>(() => {
     if (typeof window === 'undefined') return initial
     try {
       const stored = window.localStorage.getItem(key)
       if (stored === null) return initial
-      return JSON.parse(stored) as T
+      const parsed = JSON.parse(stored) as unknown
+      if (validate && !validate(parsed)) return initial
+      return parsed as T
     } catch {
       return initial
     }
@@ -50,14 +65,16 @@ export function usePersistedState<T>(
       if (e.key !== key) return
       if (e.newValue === null) return
       try {
-        setValue(JSON.parse(e.newValue) as T)
+        const parsed = JSON.parse(e.newValue) as unknown
+        if (validate && !validate(parsed)) return
+        setValue(parsed as T)
       } catch {
         // Ignore parse errors on incoming updates.
       }
     }
     window.addEventListener('storage', handler)
     return () => window.removeEventListener('storage', handler)
-  }, [key])
+  }, [key, validate])
 
   // Stable setter wrapper isn't needed (useState already returns a
   // stable setter), but the return shape matches useState 1:1.

@@ -33,6 +33,10 @@ import { useSessionSelection, SessionSelectionProvider } from '../hooks/useSessi
 import { downloadFile } from '../lib/formatters';
 import { showToast } from './Toast';
 import { confirmDialog } from './ConfirmDialog';
+import { usePersistedState } from '../hooks/usePersistedState';
+
+const isSortOrder = (v: unknown): v is 'default' | 'reverse' =>
+  v === 'default' || v === 'reverse';
 
 // Drag and drop types
 type DragItemType = 'session' | 'folder';
@@ -292,15 +296,17 @@ function SessionPanelContent({
   const [folderContextMenu, setFolderContextMenu] = useState<{ x: number; y: number; folderId: string } | null>(null);
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renameFolderValue, setRenameFolderValue] = useState('');
-  const [showRecent, setShowRecent] = useState(true);
+  const [showRecent, setShowRecent] = usePersistedState('session-panel-show-recent', true);
   const [broadcastDialogOpen, setBroadcastDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   // Sub-tab state for Sessions/Groups navigation (Phase 25)
   const [activeSubTab, setActiveSubTab] = useState<'sessions' | 'groups'>('sessions');
   // Sort order: 'default' = folders first, 'reverse' = sessions first
-  const [sortOrder, setSortOrder] = useState<'default' | 'reverse'>(() => {
-    return (localStorage.getItem('session-panel-sort-order') as 'default' | 'reverse') || 'default';
-  });
+  const [sortOrder, setSortOrder] = usePersistedState<'default' | 'reverse'>(
+    'session-panel-sort-order',
+    'default',
+    { validate: isSortOrder },
+  );
   // Favorites stored in localStorage
   const [favoriteSessionIds, setFavoriteSessionIds] = useState<Set<string>>(() => {
     try {
@@ -311,7 +317,7 @@ function SessionPanelContent({
     }
   });
   // Show/hide favorites section
-  const [showFavorites, setShowFavorites] = useState(true);
+  const [showFavorites, setShowFavorites] = usePersistedState('session-panel-show-favorites', true);
 
   // Drag and drop state (using pointer events for Tauri compatibility)
   const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
@@ -393,14 +399,10 @@ function SessionPanelContent({
     });
   }, []);
 
-  // Toggle sort order
+  // Toggle sort order — persistence handled by usePersistedState.
   const toggleSortOrder = useCallback(() => {
-    setSortOrder(prev => {
-      const next = prev === 'default' ? 'reverse' : 'default';
-      localStorage.setItem('session-panel-sort-order', next);
-      return next;
-    });
-  }, []);
+    setSortOrder(prev => (prev === 'default' ? 'reverse' : 'default'));
+  }, [setSortOrder]);
 
   // Collapse all folders
   const collapseAllFolders = useCallback(() => {

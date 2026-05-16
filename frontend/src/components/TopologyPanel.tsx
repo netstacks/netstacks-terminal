@@ -22,6 +22,10 @@ import TracerouteDialog from './TracerouteDialog';
 import type { Topology, Device, DeviceStatus } from '../types/topology';
 import './TopologyPanel.css';
 import { confirmDialog } from './ConfirmDialog';
+import { usePersistedState } from '../hooks/usePersistedState';
+
+const isSortOrder = (v: unknown): v is 'default' | 'reverse' =>
+  v === 'default' || v === 'reverse';
 
 // Drag and drop types
 type DragItemType = 'topology' | 'folder';
@@ -191,9 +195,11 @@ function TopologyPanelContent({
   const [tracerouteDialogOpen, setTracerouteDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const [sortOrder, setSortOrder] = useState<'default' | 'reverse'>(() => {
-    return (localStorage.getItem('topology-panel-sort-order') as 'default' | 'reverse') || 'default';
-  });
+  const [sortOrder, setSortOrder] = usePersistedState<'default' | 'reverse'>(
+    'topology-panel-sort-order',
+    'default',
+    { validate: isSortOrder },
+  );
 
   // --- Context Menu State ---
   const [topologyContextMenu, setTopologyContextMenu] = useState<{
@@ -297,12 +303,8 @@ function TopologyPanelContent({
   // ── Sort Order Toggle ──
 
   const toggleSortOrder = useCallback(() => {
-    setSortOrder(prev => {
-      const next = prev === 'default' ? 'reverse' : 'default';
-      localStorage.setItem('topology-panel-sort-order', next);
-      return next;
-    });
-  }, []);
+    setSortOrder(prev => (prev === 'default' ? 'reverse' : 'default'));
+  }, [setSortOrder]);
 
   // ── Folder expand/collapse ──
 
