@@ -49,6 +49,12 @@ interface SessionPanelProps {
   onConnect: (session: Session) => void;
   onOpenLocalShell?: () => void;
   onBulkConnect?: (sessionIds: string[]) => Promise<void>;
+  /** Close every connected terminal tab for the given session(s). */
+  onDisconnect?: (sessionIds: string[]) => void;
+  /** IDs of sessions that currently have at least one connected terminal tab.
+   *  Used to swap the context-menu "Connect" entry for "Disconnect" so the
+   *  sidebar isn't a one-way valve. */
+  connectedSessionIds?: Set<string>;
   onSelectionChange?: (selectedIds: string[]) => void;
   /** Called when a session is created or updated, so parent can update open tabs */
   onSessionUpdated?: (session: Session) => void;
@@ -254,6 +260,8 @@ function downloadTextFile(content: string, filename: string, mimeType: string): 
 
 function SessionPanelContent({
   onConnect,
+  onDisconnect,
+  connectedSessionIds,
   onOpenLocalShell,
   onBulkConnect,
   onSelectionChange,
@@ -458,6 +466,16 @@ function SessionPanelContent({
     if (session) onConnect(session);
     setSessionContextMenu(null);
   };
+
+  const handleDisconnectSession = (sessionId: string) => {
+    onDisconnect?.([sessionId]);
+    setSessionContextMenu(null);
+  };
+
+  const isSessionConnected = useCallback(
+    (sessionId: string) => connectedSessionIds?.has(sessionId) ?? false,
+    [connectedSessionIds],
+  );
 
   const handleDuplicateSession = async (sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
@@ -1787,6 +1805,15 @@ function SessionPanelContent({
             {Icons.newTab}
             <span>Connect in New Tab</span>
           </button>
+          {isSessionConnected(sessionContextMenu.sessionId) && onDisconnect && (
+            <button
+              className="context-menu-item"
+              onClick={() => handleDisconnectSession(sessionContextMenu.sessionId)}
+              title="Close every connected terminal tab for this session"
+            >
+              <span>Disconnect</span>
+            </button>
+          )}
           <div className="context-menu-divider" />
           <button
             className="context-menu-item"

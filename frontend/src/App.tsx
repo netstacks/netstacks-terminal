@@ -5854,6 +5854,20 @@ def main(command: str = "show version"):
                 onConnect={handleSSHConnect}
                 onOpenLocalShell={createTerminal}
                 onBulkConnect={handleBulkConnect}
+                onDisconnect={(sessionIds) => {
+                  const ids = new Set(sessionIds);
+                  // Close every connected terminal tab whose session matches.
+                  tabs
+                    .filter(t => isTerminalTab(t) && t.status === 'connected' && t.sessionId && ids.has(t.sessionId))
+                    .forEach(t => closeTab(t.id, true));
+                }}
+                connectedSessionIds={
+                  new Set(
+                    tabs
+                      .filter(t => isTerminalTab(t) && t.status === 'connected' && t.sessionId)
+                      .map(t => t.sessionId!),
+                  )
+                }
                 onSelectionChange={handleSelectionChange}
                 onSessionUpdated={handleSessionUpdated}
                 externalSessionUpdate={externalSessionUpdate}
