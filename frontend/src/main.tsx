@@ -198,20 +198,23 @@ const startFn = shareToken
 
 startFn().catch((error) => {
   console.error('[main] Failed to initialize app:', error);
-  document.getElementById('root')!.innerHTML = `
-    <div style="
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      background: #1e1e1e;
-      color: #cccccc;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    ">
-      <h1>Failed to Start</h1>
-      <p style="color: #f44336;">Error: ${error.message}</p>
-      <p>Please restart the application.</p>
-    </div>
-  `;
+  // Build the failure screen with safe DOM APIs instead of innerHTML —
+  // error.message can be anything (Tauri, the agent, third-party libs) and
+  // interpolating it into innerHTML is an XSS sink.
+  const root = document.getElementById('root')!;
+  root.replaceChildren();
+  const container = document.createElement('div');
+  container.style.cssText =
+    'display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+    "height:100vh;background:#1e1e1e;color:#cccccc;" +
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+  const title = document.createElement('h1');
+  title.textContent = 'Failed to Start';
+  const errorLine = document.createElement('p');
+  errorLine.style.color = '#f44336';
+  errorLine.textContent = `Error: ${(error && error.message) || String(error)}`;
+  const hint = document.createElement('p');
+  hint.textContent = 'Please restart the application.';
+  container.append(title, errorLine, hint);
+  root.appendChild(container);
 });

@@ -312,7 +312,9 @@ export function useEnterpriseSSH(options: UseEnterpriseSSHOptions): UseEnterpris
 
             case WsMessageType.Reconnect: {
               const token = payloadAsReconnectToken(msg.payload);
-              console.log('[useEnterpriseSSH] Reconnect token received:', token);
+              // Don't log the token itself — it's a session secret. Log only
+              // that one was received so the channel is still observable.
+              console.log('[useEnterpriseSSH] Reconnect token received');
               reconnectTokenRef.current = token;
               break;
             }
