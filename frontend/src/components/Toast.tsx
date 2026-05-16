@@ -55,30 +55,42 @@ type ToastListener = (toasts: ToastMessage[]) => void
 let listeners: ToastListener[] = []
 let toasts: ToastMessage[] = []
 
+// Cap on concurrent toasts. A burst (e.g. 50 failed SNMP probes) shouldn't
+// stack 50 deep — drop oldest so only the most recent N are visible.
+const MAX_TOASTS = 5
+
 function notifyListeners() {
   listeners.forEach(listener => listener([...toasts]))
 }
 
 /**
  * Show a toast notification.
- * Optional action adds a clickable link inside the toast.
+ *
+ * Default durations differ by type. Errors are persistent (duration=0,
+ * manual dismiss) because users routinely need more than 3 seconds to
+ * read a multi-line error like `Import failed: invalid YAML at line 47`.
+ * Pass an explicit `duration` to override.
+ *
+ * Optional `action` adds a clickable button inside the toast — useful
+ * for "Retry" on error toasts.
  */
 export function showToast(
   message: string | React.ReactNode,
   type: ToastType = 'info',
-  duration: number = 3000,
+  duration?: number,
   action?: ToastAction,
 ): string {
+  const effectiveDuration = duration ?? (type === 'error' ? 0 : 3000)
   const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  const newToast: ToastMessage = { id, message, type, duration, action }
-  toasts = [...toasts, newToast]
+  const newToast: ToastMessage = { id, message, type, duration: effectiveDuration, action }
+  toasts = [...toasts, newToast].slice(-MAX_TOASTS)
   notifyListeners()
 
-  // Auto-remove after duration
-  if (duration > 0) {
+  // Auto-remove after duration (0 = persistent, manual dismiss only)
+  if (effectiveDuration > 0) {
     setTimeout(() => {
       removeToast(id)
-    }, duration)
+    }, effectiveDuration)
   }
 
   return id
