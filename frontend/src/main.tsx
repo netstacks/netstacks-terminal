@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import { registerNetstacksLanguages } from './languages';
+import { registerIconifyCollections } from './lib/iconifyInit';
 import './index.css';
 import App from './App.tsx';
 import VaultUnlockGate from './components/VaultUnlockGate';
@@ -44,6 +45,9 @@ self.MonacoEnvironment = {
 // Register NetStacks-specific language features (YANG, XML format).
 // JSON is left to Monaco's built-in json.worker.
 registerNetstacksLanguages(monaco);
+
+// Register iconify icon collections (vscode-icons for file-type icons).
+registerIconifyCollections();
 
 // Create TanStack Query client with sensible defaults
 const queryClient = new QueryClient({

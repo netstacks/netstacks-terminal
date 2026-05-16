@@ -41,6 +41,8 @@
     "build:linux:rpm": "npm run build:linux -- --bundles rpm"
   },
   "dependencies": {
+    "@iconify-json/vscode-icons": "^1.2.49",
+    "@iconify/react": "^6.0.2",
     "@monaco-editor/react": "^4.7.0",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.5.0",
@@ -69,6 +71,7 @@
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "three": "^0.182.0",
+    "vscode-icons-js": "^11.6.1",
     "xml-formatter": "^3.7.0",
     "zod": "^4.3.6",
     "zustand": "^5.0.10"

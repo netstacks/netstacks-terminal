@@ -1,33 +1,5 @@
-const ICON_MAP: Record<string, string> = {
-  py: '🐍', python: '🐍',
-  ts: '📘', tsx: '📘',
-  js: '📒', jsx: '📒',
-  json: '{}',
-  yaml: '📋', yml: '📋',
-  xml: '📰',
-  md: '📝', markdown: '📝',
-  css: '🎨',
-  html: '🌐', htm: '🌐',
-  sh: '⚡', bash: '⚡', zsh: '⚡',
-  rs: '🦀',
-  go: '🔵',
-  java: '☕',
-  c: '©', cpp: '©', h: '©',
-  toml: '⚙',
-  cfg: '⚙', conf: '⚙', ini: '⚙',
-  j2: '📐', jinja: '📐', jinja2: '📐',
-  yang: '🌿',
-  tf: '🏗',
-  sql: '🗄',
-  log: '📜',
-  txt: '📄',
-  png: '🖼', jpg: '🖼', jpeg: '🖼', gif: '🖼', svg: '🖼', webp: '🖼',
-  lock: '🔒',
-  env: '🔐',
-  gitignore: '🚫',
-  dockerfile: '🐳',
-  makefile: '🔨',
-}
+import { Icon } from '@iconify/react'
+import { getIconForFile, getIconForFolder, getIconForOpenFolder } from 'vscode-icons-js'
 
 interface FileIconProps {
   name: string
@@ -35,14 +7,27 @@ interface FileIconProps {
   isExpanded?: boolean
 }
 
+/**
+ * Convert vscode-icons-js's `file_type_python.svg` style names into iconify
+ * names (`vscode-icons:file-type-python`).
+ */
+function toIconifyName(svgName: string | undefined, fallback: string): string {
+  if (!svgName) return `vscode-icons:${fallback}`
+  const base = svgName.replace(/\.svg$/, '').replace(/_/g, '-')
+  return `vscode-icons:${base}`
+}
+
 export default function FileIcon({ name, isDir, isExpanded }: FileIconProps) {
-  if (isDir) {
-    return <span className="workspace-file-entry-icon">{isExpanded ? '📂' : '📁'}</span>
-  }
+  const iconName = isDir
+    ? toIconifyName(
+        isExpanded ? getIconForOpenFolder(name) : getIconForFolder(name),
+        'default-folder',
+      )
+    : toIconifyName(getIconForFile(name), 'default-file')
 
-  const lower = name.toLowerCase()
-  const ext = lower.split('.').pop() || ''
-  const icon = ICON_MAP[ext] || ICON_MAP[lower] || '📄'
-
-  return <span className="workspace-file-entry-icon">{icon}</span>
+  return (
+    <span className="workspace-file-entry-icon">
+      <Icon icon={iconName} width={16} height={16} />
+    </span>
+  )
 }

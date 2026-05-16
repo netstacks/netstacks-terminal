@@ -13,6 +13,8 @@ import {
 import { downloadMopPackage, importMopPackage, parseMopPackageJson } from '../lib/mopExport';
 import { showToast } from './Toast';
 import { useCapabilitiesStore } from '../stores/capabilitiesStore';
+import { Icon } from '@iconify/react';
+import { getIconForFile } from 'vscode-icons-js';
 
 interface DocsPanelProps {
   onOpenDocument: (doc: Document) => void;
@@ -388,12 +390,30 @@ function DocsPanel({ onOpenDocument, onNewDocument }: DocsPanelProps) {
     setHasAutoExpanded(true);
   }, [loading, hasAutoExpanded]);
 
-  // Get content type icon
+  // Map our Document.content_type to a sensible file extension so vscode-icons
+  // can pick a matching glyph. If the document's name already has an extension,
+  // prefer that.
+  const contentTypeExt: Record<ContentType, string> = {
+    csv: 'csv',
+    json: 'json',
+    jinja: 'j2',
+    config: 'conf',
+    text: 'txt',
+    markdown: 'md',
+    recording: 'json',
+  };
+
   const getDocIcon = (doc: Document) => {
     if (doc.parent_folder) {
       return Icons.folder;
     }
-    return Icons.document;
+    const hasExt = /\.[A-Za-z0-9]{1,5}$/.test(doc.name);
+    const lookupName = hasExt ? doc.name : `${doc.name}.${contentTypeExt[doc.content_type] ?? 'txt'}`;
+    const svgName = getIconForFile(lookupName);
+    const iconName = svgName
+      ? `vscode-icons:${svgName.replace(/\.svg$/, '').replace(/_/g, '-')}`
+      : 'vscode-icons:default-file';
+    return <Icon icon={iconName} width={16} height={16} />;
   };
 
   const renderDocument = (doc: Document) => (
