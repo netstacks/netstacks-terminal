@@ -64,7 +64,11 @@ function createInitialState(config: WorkspaceConfig): WorkspaceState {
       ? [{
           id: crypto.randomUUID(),
           title: config.aiTool.tool === 'custom' ? 'AI CLI' : config.aiTool.tool,
-          command: config.aiTool.tool === 'custom' ? config.aiTool.customCommand : config.aiTool.tool,
+          command: config.aiTool.tool === 'custom'
+            ? config.aiTool.customCommand
+            : config.aiTool.launchArgs
+              ? `${config.aiTool.tool} ${config.aiTool.launchArgs}`
+              : config.aiTool.tool,
           isAiCli: true,
         }]
       : []

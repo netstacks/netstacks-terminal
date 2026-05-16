@@ -5,6 +5,7 @@ export type AiToolType = 'claude' | 'aider' | 'opencode' | 'kimicode' | 'none' |
 export interface AiToolConfig {
   tool: AiToolType
   customCommand?: string
+  launchArgs?: string
 }
 
 export type InnerTabType = 'code-editor' | 'browser' | 'diff' | 'blame' | 'image' | 'markdown'

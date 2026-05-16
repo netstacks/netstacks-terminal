@@ -6,6 +6,7 @@ import GitAccountsSettingsTab from './GitAccountsSettingsTab'
 interface WorkspaceDefaults {
   defaultAiTool: AiToolType
   defaultCustomCommand: string
+  defaultLaunchArgs: string
   autoLaunchAi: boolean
   defaultTerminalPanelHeight: number
   defaultFileExplorerWidth: number
@@ -25,6 +26,7 @@ export default function WorkspaceSettingsTab() {
   const [defaults, setDefaults] = useState<WorkspaceDefaults>({
     defaultAiTool: 'claude',
     defaultCustomCommand: '',
+    defaultLaunchArgs: '',
     autoLaunchAi: true,
     defaultTerminalPanelHeight: 250,
     defaultFileExplorerWidth: 220,
@@ -124,6 +126,21 @@ export default function WorkspaceSettingsTab() {
                 onChange={e => saveDefaults({ ...defaults, defaultCustomCommand: e.target.value })}
                 placeholder="e.g. aider --model claude-3.5-sonnet"
               />
+            </div>
+          )}
+
+          {defaults.defaultAiTool !== 'custom' && defaults.defaultAiTool !== 'none' && defaults.defaultAiTool !== 'netstacks-agent' && (
+            <div style={fieldStyle}>
+              <label style={labelStyle}>Default Launch Arguments</label>
+              <input
+                style={{ ...inputStyle, fontFamily: 'var(--font-family-mono)' }}
+                value={defaults.defaultLaunchArgs}
+                onChange={e => saveDefaults({ ...defaults, defaultLaunchArgs: e.target.value })}
+                placeholder="e.g. --dangerously-skip-permissions --continue"
+              />
+              <div style={{ fontSize: 11, color: 'var(--color-text-secondary)', marginTop: 4 }}>
+                Full command: cd &lt;workspace&gt; &amp;&amp; clear &amp;&amp; {defaults.defaultAiTool} {defaults.defaultLaunchArgs || ''}
+              </div>
             </div>
           )}
 

@@ -50,6 +50,7 @@ export default function WorkspaceNewDialog({
   const [remotePath, setRemotePath] = useState('')
   const [aiTool, setAiTool] = useState<AiToolType>('claude')
   const [customCommand, setCustomCommand] = useState('')
+  const [launchArgs, setLaunchArgs] = useState('')
   const [autoLaunch, setAutoLaunch] = useState(true)
   const [gitCheck, setGitCheck] = useState<{
     checking: boolean
@@ -118,7 +119,7 @@ export default function WorkspaceNewDialog({
           name,
           mode: 'local',
           rootPath: fullPath,
-          aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined },
+          aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined, launchArgs: launchArgs.trim() || undefined },
           autoLaunchAi: autoLaunch,
           fileExplorerWidth: 220,
           terminalPanelHeight: 250,
@@ -159,7 +160,7 @@ export default function WorkspaceNewDialog({
       mode,
       rootPath: rootPath.trim(),
       sessionId: mode === 'remote' ? remoteSessionId : undefined,
-      aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined },
+      aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined, launchArgs: launchArgs.trim() || undefined },
       autoLaunchAi: autoLaunch,
       fileExplorerWidth: 220,
       terminalPanelHeight: 250,
@@ -173,7 +174,7 @@ export default function WorkspaceNewDialog({
     }
 
     onSubmit(config)
-  }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, autoLaunch, initGit, cloneUrl, clonePath, cloning, onSubmit])
+  }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, launchArgs, autoLaunch, initGit, cloneUrl, clonePath, cloning, onSubmit])
 
   const isValid = mode === 'local'
     ? localPath.trim().length > 0
@@ -325,6 +326,21 @@ export default function WorkspaceNewDialog({
               onChange={e => setCustomCommand(e.target.value)}
               placeholder="e.g. aider --model claude-3.5-sonnet"
             />
+          </div>
+        )}
+
+        {aiTool !== 'custom' && aiTool !== 'none' && aiTool !== 'netstacks-agent' && (
+          <div className="workspace-new-dialog-field">
+            <span className="workspace-new-dialog-label">Launch Arguments</span>
+            <input
+              className="workspace-new-dialog-input"
+              value={launchArgs}
+              onChange={e => setLaunchArgs(e.target.value)}
+              placeholder="e.g. --dangerously-skip-permissions --continue"
+            />
+            <span style={{ fontSize: 10, color: 'var(--color-text-secondary)', marginTop: 2, display: 'block' }}>
+              Full command: cd &lt;workspace&gt; &amp;&amp; clear &amp;&amp; {aiTool} {launchArgs || ''}
+            </span>
           </div>
         )}
 
