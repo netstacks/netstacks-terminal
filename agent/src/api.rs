@@ -5898,7 +5898,7 @@ pub async fn run_agent_definition(
     // Create task with agent_definition_id
     let task = state
         .task_store
-        .create_task_with_agent(crate::tasks::CreateTaskRequest { prompt: req.prompt, _failure_policy: None }, Some(id))
+        .create_task_with_agent(crate::tasks::CreateTaskRequest { prompt: req.prompt, failure_policy: None }, Some(id))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

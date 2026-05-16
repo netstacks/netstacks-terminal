@@ -90,7 +90,7 @@ pub struct AgentTask {
 pub struct CreateTaskRequest {
     pub prompt: String,
     #[serde(default)]
-    pub _failure_policy: Option<serde_json::Value>,
+    pub failure_policy: Option<serde_json::Value>,
 }
 
 /// Request to update task status/progress
