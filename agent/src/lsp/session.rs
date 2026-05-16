@@ -120,9 +120,10 @@ impl LspSession {
         self.outbound_tx.subscribe()
     }
 
-    /// Get a sender for messages into the LSP child.
     /// How many subscribers (typically WebSocket clients) are attached.
-    pub fn client_count(&self) -> usize {
+    /// Currently unused — kept (with underscore prefix) as a hook for the
+    /// future "shut down idle LSP sessions" sweep.
+    pub fn _client_count(&self) -> usize {
         self.outbound_tx.receiver_count()
     }
 

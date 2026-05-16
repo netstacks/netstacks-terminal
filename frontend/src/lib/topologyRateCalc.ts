@@ -13,14 +13,18 @@ export interface RateResult {
   utilizationOut: number; // 0-100
 }
 
-/** 32-bit counter max for wrap detection */
-export const COUNTER_32_MAX = 2 ** 32;
+/** 32-bit counter max for wrap detection. Internal — module-private
+ * because the three callers (InterfaceSnmpQuickLook, DeviceDetailTab,
+ * LinkDetailTab) keep their own copies inline; the shared lib only
+ * uses it through computeRateStats. */
+const COUNTER_32_MAX = 2 ** 32;
 
 /**
  * Calculate counter delta, handling 32-bit counter wrap.
  * HC (64-bit) counters should not wrap in practice; negative treated as 0.
+ * Internal — see COUNTER_32_MAX note above.
  */
-export function counterDelta(current: number, previous: number, hcCounters: boolean): number {
+function counterDelta(current: number, previous: number, hcCounters: boolean): number {
   const delta = current - previous;
   if (delta >= 0) return delta;
   if (!hcCounters) return delta + COUNTER_32_MAX;
