@@ -42,15 +42,18 @@ pub fn http_router(state: LspState) -> Router {
         .route("/plugins/:id", put(update_plugin))
         .route("/plugins/:id", delete(delete_plugin))
         .route("/plugins/:id/install", post(install_plugin))
-        .route("/plugins/:id/install-progress", get(install_progress))
         .route("/plugins/test", post(test_plugin_command))
         .with_state(state)
 }
 
-/// WebSocket route for LSP JSON-RPC streaming. Auth via `?token=...` query.
+/// Query-token-auth routes (WebSocket + SSE). These bypass the bearer
+/// auth middleware because browser EventSource and WebSocket APIs can't
+/// send custom headers — auth rides as `?token=...` and each handler
+/// verifies it explicitly.
 pub fn ws_router(state: LspState) -> Router {
     Router::new()
         .route("/ws/:plugin_id", get(lsp_websocket))
+        .route("/plugins/:id/install-progress", get(install_progress))
         .with_state(state)
 }
 
@@ -199,7 +202,7 @@ async fn install_progress(
         match result {
             Ok(event) => {
                 let json = serde_json::to_string(&event).ok()?;
-                Some(Ok::<_, Infallible>(Event::default().data(json)))
+                Some(Ok::<_, Infallible>(Event::default().event("progress").data(json)))
             }
             Err(_) => None, // Lagged or closed; skip
         }

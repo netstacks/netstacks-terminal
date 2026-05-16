@@ -121,6 +121,11 @@ impl LspSession {
     }
 
     /// Get a sender for messages into the LSP child.
+    /// How many subscribers (typically WebSocket clients) are attached.
+    pub fn client_count(&self) -> usize {
+        self.outbound_tx.receiver_count()
+    }
+
     pub fn inbound_sender(&self) -> InboundSender {
         self.inbound_tx.clone()
     }
