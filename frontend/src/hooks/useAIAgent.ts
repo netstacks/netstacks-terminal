@@ -20,6 +20,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { getAvailableTools, type AgentTool } from '../lib/agentTools';
 import { getSettings } from './useSettings';
 import { validateReadOnlyCommand, type ValidationResult } from '../lib/readOnlyFilter';
+import { parseAiCommandArray } from '../lib/aiJson';
 import { getClient } from '../api/client';
 import { lookupOui, lookupDns, lookupWhois, lookupAsn } from '../api/lookup';
 import { getTopologyTools, executeTopologyTool, isTopologyTool, type TopologyAICallbacks } from '../lib/topologyAITools';
@@ -1776,35 +1777,33 @@ export function useAIAgent(options: UseAIAgentOptions = {}): UseAIAgentReturn {
           return { content: 'At least one session ID is required', is_error: true };
         }
 
-        // Parse JSON arrays for steps
-        let preChecks: Array<{ command: string; description?: string; expected_output?: string }>;
-        let changes: Array<{ command: string; description?: string }>;
-        let postChecks: Array<{ command: string; description?: string; expected_output?: string }>;
+        // Parse JSON arrays for steps. parseAiCommandArray enforces
+        // non-empty array of objects each with a non-empty `command`
+        // string — without this an AI that returned [{"foo":"bar"}]
+        // would crash createMopStep downstream with "undefined.toString".
+        const preChecks = parseAiCommandArray(preChecksStr) as Array<{ command: string; description?: string; expected_output?: string }> | null;
+        const changes = parseAiCommandArray(changesStr) as Array<{ command: string; description?: string }> | null;
+        const postChecks = parseAiCommandArray(postChecksStr) as Array<{ command: string; description?: string; expected_output?: string }> | null;
         let rollback: Array<{ command: string; description?: string }> | undefined;
-
-        try {
-          preChecks = JSON.parse(preChecksStr);
-          changes = JSON.parse(changesStr);
-          postChecks = JSON.parse(postChecksStr);
-          if (rollbackStr) {
-            rollback = JSON.parse(rollbackStr);
+        if (rollbackStr) {
+          const rb = parseAiCommandArray(rollbackStr);
+          if (!rb) {
+            return {
+              content: 'rollback must be a JSON array of objects each with a non-empty "command" string.',
+              is_error: true,
+            };
           }
-        } catch (parseErr) {
-          return {
-            content: `Failed to parse step JSON arrays: ${parseErr instanceof Error ? parseErr.message : 'Invalid JSON'}. Make sure pre_checks, changes, and post_checks are valid JSON arrays.`,
-            is_error: true,
-          };
+          rollback = rb as Array<{ command: string; description?: string }>;
         }
 
-        // Validate we have at least some steps
-        if (preChecks.length === 0) {
-          return { content: 'At least one pre_check command is required', is_error: true };
+        if (!preChecks) {
+          return { content: 'pre_checks must be a JSON array of objects each with a non-empty "command" string.', is_error: true };
         }
-        if (changes.length === 0) {
-          return { content: 'At least one change command is required', is_error: true };
+        if (!changes) {
+          return { content: 'changes must be a JSON array of objects each with a non-empty "command" string.', is_error: true };
         }
-        if (postChecks.length === 0) {
-          return { content: 'At least one post_check command is required', is_error: true };
+        if (!postChecks) {
+          return { content: 'post_checks must be a JSON array of objects each with a non-empty "command" string.', is_error: true };
         }
 
         try {

@@ -17,6 +17,7 @@ import { useMopExecution } from '../../hooks/useMopExecution';
 import { useAiPilot } from '../../hooks/useAiPilot';
 import { getDeviceSnapshotDiff, computeStepDiff, type SnapshotDiff, type MopAiAnalysisResponse } from '../../api/mop';
 import { sendChatMessage, AiNotConfiguredError } from '../../api/ai';
+import { parseAiCommandArray, parseAiStringArray, parseAiObject } from '../../lib/aiJson';
 import { resolveProvider } from '../../lib/aiProviderResolver';
 import {
   pushPlanToController,
@@ -1528,12 +1529,15 @@ RULES:
 
       const response = await callAi(systemPrompt, userPrompt);
 
-      // Extract JSON from response (handle markdown code fences)
+      // Extract JSON from response (handle markdown code fences). parseAiCommandArray
+      // validates each item has a non-empty string `command` field — without it a
+      // hallucinated response like [{"foo":"bar"}] would pass length/array checks
+      // and then createMopStep would get undefined.
       const jsonStr = response.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-      const parsed: { command: string; description?: string }[] = JSON.parse(jsonStr);
+      const parsed = parseAiCommandArray(jsonStr) as { command: string; description?: string }[] | null;
 
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        setAiError('AI could not parse the config text. Try adding clearer commands.');
+      if (!parsed) {
+        setAiError('AI returned an unexpected response. Try adding clearer commands.');
         return;
       }
 
@@ -1600,7 +1604,15 @@ RULES:
       const response = await callAi(systemPrompt, userPrompt);
 
       const jsonStr = response.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-      const generated: Record<string, { command: string; description?: string }[]> = JSON.parse(jsonStr);
+      let generated: Record<string, unknown>;
+      try {
+        const raw: unknown = JSON.parse(jsonStr);
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SyntaxError('expected object');
+        generated = raw as Record<string, unknown>;
+      } catch {
+        setAiError('AI returned invalid format. Try again.');
+        return;
+      }
 
       const newSteps: MopStep[] = [];
       const newExpanded = new Set(expandedSteps);
@@ -1609,7 +1621,14 @@ RULES:
         const stepType: MopStepType = section === 'pre_checks' ? 'pre_check'
           : section === 'post_checks' ? 'post_check'
           : 'rollback';
-        const items = generated[section] || [];
+        const rawItems = generated[section];
+        if (!Array.isArray(rawItems)) continue;
+        // Per-item shape check — drop entries the AI returned without a
+        // valid `command` string instead of crashing createMopStep.
+        const items = rawItems.filter((it): it is { command: string; description?: string } =>
+          !!it && typeof it === 'object' && typeof (it as { command?: unknown }).command === 'string'
+          && (it as { command: string }).command.length > 0
+        );
         let order = 0;
         for (const item of items) {
           const step = createMopStep(stepType, item.command, ++order, item.description);
@@ -1665,7 +1684,8 @@ RULES:
 
       const response = await callAi(systemPrompt, userPrompt);
       const jsonStr = response.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-      const result: { risk_level: string; reason: string } = JSON.parse(jsonStr);
+      const result = parseAiObject<{ risk_level: string; reason: string }>(jsonStr, ['risk_level', 'reason']);
+      if (!result) return; // AI returned junk — silently leave the badge unchanged
 
       if (['low', 'medium', 'high', 'critical'].includes(result.risk_level)) {
         setAiRiskLevel(result.risk_level);
@@ -1779,7 +1799,10 @@ RULES:
         commands.join('\n')
       );
       const jsonStr = result.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-      const descriptions: string[] = JSON.parse(jsonStr);
+      // parseAiStringArray validates every entry is a string — otherwise
+      // descriptions[i].trim() would throw on a number/null/object item.
+      const descriptions = parseAiStringArray(jsonStr);
+      if (!descriptions) return;
 
       sectionSteps.forEach((step, i) => {
         if (descriptions[i]) {
