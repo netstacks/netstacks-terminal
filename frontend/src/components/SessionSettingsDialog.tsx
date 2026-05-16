@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useDirtyGuard } from '../hooks/useDirtyGuard';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import './SessionSettingsDialog.css';
 import {
   createSession,
@@ -253,16 +255,54 @@ function SessionSettingsDialog({
     }
   }, [isOpen, session, defaultFolderId]);
 
-  // Handle escape key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // Dirty-state guard — snapshot the loaded session (or create-mode
+  // defaults) and prompt before discarding edits on close.
+  const initialSnapshot = useMemo(() => session ? {
+    name: session.name,
+    host: session.host,
+    port: session.port,
+    folderId: session.folder_id,
+    selectedProfileId: session.profile_id,
+    protocol: session.protocol || 'ssh',
+    jumpSelection: session.jump_host_id
+      ? `host:${session.jump_host_id}`
+      : session.jump_session_id
+      ? `session:${session.jump_session_id}`
+      : '',
+    legacySsh: session.legacy_ssh || false,
+    portForwards: session.port_forwards || [],
+    autoReconnect: session.auto_reconnect,
+    reconnectDelay: session.reconnect_delay,
+    scrollbackLines: session.scrollback_lines,
+    localEcho: session.local_echo,
+    fontSizeOverride: session.font_size_override,
+    cliFlavor: session.cli_flavor || 'auto',
+    autoCommands: session.auto_commands || [],
+    sftpStartPath: session.sftp_start_path || '',
+    terminalTheme: session.terminal_theme || null,
+    fontFamily: session.font_family || null,
+  } : {
+    name: '', host: '', port: 22, folderId: defaultFolderId || null,
+    selectedProfileId: '', protocol: 'ssh' as Protocol, jumpSelection: '',
+    legacySsh: false, portForwards: [] as PortForward[],
+    autoReconnect: true, reconnectDelay: 5, scrollbackLines: 10000,
+    localEcho: false, fontSizeOverride: null as number | null,
+    cliFlavor: 'auto' as CliFlavor, autoCommands: [] as string[],
+    sftpStartPath: '', terminalTheme: null as string | null,
+    fontFamily: null as string | null,
+  }, [session, defaultFolderId]);
+
+  const currentSnapshot = {
+    name, host, port, folderId, selectedProfileId, protocol, jumpSelection,
+    legacySsh, portForwards, autoReconnect, reconnectDelay, scrollbackLines,
+    localEcho, fontSizeOverride, cliFlavor, autoCommands, sftpStartPath,
+    terminalTheme, fontFamily,
+  };
+
+  const { confirmDiscard, reset: resetDirty } = useDirtyGuard(currentSnapshot, {
+    initial: initialSnapshot,
+    resetKey: `${session?.id ?? 'new'}:${isOpen ? '1' : '0'}`,
+  });
 
   const handleSave = async () => {
     // Validation
@@ -320,6 +360,9 @@ function SessionSettingsDialog({
         savedSession = await createSession(sessionData);
       }
 
+      // Mark snapshot clean before invoking the close — otherwise the
+      // confirmDiscard guard above would re-prompt for these saved edits.
+      resetDirty();
       onSessionSaved(savedSession);
       onClose();
     } catch (err) {
@@ -383,12 +426,18 @@ function SessionSettingsDialog({
     onPreviewFont?.(fontSizeOverride, newFamily);
   };
 
-  // Handle dialog close - reset font preview to original values
-  const handleClose = () => {
-    // Reset font preview to original values
+  // Handle dialog close - reset font preview to original values, and
+  // prompt to discard any unsaved edits before actually closing.
+  const handleClose = async () => {
+    if (!(await confirmDiscard())) return;
     onPreviewFont?.(originalFontSize, originalFontFamily);
     onClose();
   };
+
+  const { backdropProps, contentProps } = useOverlayDismiss({
+    onDismiss: handleClose,
+    enabled: isOpen && !saving,
+  });
 
   // Drag handlers
   const handleDragStart = (e: React.MouseEvent) => {
@@ -477,14 +526,14 @@ function SessionSettingsDialog({
   const availableTabs = tabs.filter(tab => !tab.requiresSession || isEditing);
 
   return (
-    <div className="settings-dialog-overlay">
+    <div className="settings-dialog-overlay" {...backdropProps}>
       <div
         ref={dialogRef}
         className="settings-dialog"
         style={{
           transform: `translate(${position.x}px, ${position.y}px)`,
         }}
-        onClick={(e) => e.stopPropagation()}
+        {...contentProps}
       >
         <div
           className="settings-dialog-header"
