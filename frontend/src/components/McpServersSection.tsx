@@ -2,13 +2,18 @@ import { useState, useEffect } from 'react';
 import {
   listMcpServers,
   addMcpServer,
+  updateMcpServer,
   deleteMcpServer,
   connectMcpServer,
   disconnectMcpServer,
+  restartMcpServer,
+  testMcpServer,
   setMcpToolEnabled,
   type McpServer,
   type AddMcpServerRequest,
+  type UpdateMcpServerRequest,
 } from '../api/mcp';
+import { showToast } from './Toast';
 import './McpServersSection.css';
 
 // Icons
@@ -84,9 +89,14 @@ interface AddServerDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onAdd: (req: AddMcpServerRequest) => Promise<void>;
+  /** When present, dialog is in edit mode: form pre-fills from this
+   *  server and submit calls onUpdate instead of onAdd. */
+  editingServer?: McpServer | null;
+  onUpdate?: (id: string, req: UpdateMcpServerRequest) => Promise<void>;
 }
 
-function AddServerDialog({ isOpen, onClose, onAdd }: AddServerDialogProps) {
+function AddServerDialog({ isOpen, onClose, onAdd, editingServer, onUpdate }: AddServerDialogProps) {
+  const isEditing = !!editingServer;
   const [name, setName] = useState('');
   const [transportType, setTransportType] = useState<'stdio' | 'sse'>('stdio');
   const [command, setCommand] = useState('');
@@ -97,6 +107,32 @@ function AddServerDialog({ isOpen, onClose, onAdd }: AddServerDialogProps) {
   const [serverType, setServerType] = useState('custom');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Pre-fill form when entering edit mode (or reset to defaults on add).
+  useEffect(() => {
+    if (!isOpen) return;
+    if (editingServer) {
+      setName(editingServer.name);
+      setTransportType(editingServer.transport_type);
+      setCommand(editingServer.command);
+      setArgsText(editingServer.args.join('\n'));
+      setUrl(editingServer.url || '');
+      setAuthType(editingServer.auth_type);
+      setAuthToken(''); // never echoed — empty means "keep existing"
+      setServerType(editingServer.server_type || 'custom');
+      setError(null);
+    } else {
+      setName('');
+      setTransportType('stdio');
+      setCommand('');
+      setArgsText('');
+      setUrl('');
+      setAuthType('none');
+      setAuthToken('');
+      setServerType('custom');
+      setError(null);
+    }
+  }, [isOpen, editingServer]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -142,19 +178,20 @@ function AddServerDialog({ isOpen, onClose, onAdd }: AddServerDialogProps) {
         }
       }
 
-      await onAdd(req);
-      // Reset form
-      setName('');
-      setTransportType('stdio');
-      setCommand('');
-      setArgsText('');
-      setUrl('');
-      setAuthType('none');
-      setAuthToken('');
-      setServerType('custom');
+      if (isEditing && onUpdate && editingServer) {
+        // For edits, only send auth_token when the user actually typed a
+        // new one — otherwise the backend would clear the stored token.
+        const updateReq: UpdateMcpServerRequest = { ...req };
+        if (!authToken.trim()) {
+          delete updateReq.auth_token;
+        }
+        await onUpdate(editingServer.id, updateReq);
+      } else {
+        await onAdd(req);
+      }
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add server');
+      setError(err instanceof Error ? err.message : `Failed to ${isEditing ? 'update' : 'add'} server`);
     } finally {
       setSaving(false);
     }
@@ -170,7 +207,7 @@ function AddServerDialog({ isOpen, onClose, onAdd }: AddServerDialogProps) {
   return (
     <div className="mcp-dialog-overlay" onClick={onClose}>
       <div className="mcp-dialog" onClick={e => e.stopPropagation()}>
-        <h3>Add MCP Server</h3>
+        <h3>{isEditing ? `Edit MCP Server: ${editingServer?.name}` : 'Add MCP Server'}</h3>
         <form className="mcp-dialog-form" onSubmit={handleSubmit}>
           <div className="mcp-form-field">
             <label htmlFor="mcp-name">Name</label>
@@ -268,7 +305,13 @@ function AddServerDialog({ isOpen, onClose, onAdd }: AddServerDialogProps) {
                     type="password"
                     value={authToken}
                     onChange={e => setAuthToken(e.target.value)}
-                    placeholder={authType === 'bearer' ? 'Enter bearer token' : 'Enter API key'}
+                    placeholder={
+                      isEditing
+                        ? 'Leave blank to keep stored token'
+                        : authType === 'bearer'
+                        ? 'Enter bearer token'
+                        : 'Enter API key'
+                    }
                   />
                 </div>
               )}
@@ -300,7 +343,9 @@ function AddServerDialog({ isOpen, onClose, onAdd }: AddServerDialogProps) {
               className="btn-add-source"
               disabled={saving || !isValid}
             >
-              {saving ? 'Adding...' : 'Add Server'}
+              {saving
+                ? isEditing ? 'Saving…' : 'Adding…'
+                : isEditing ? 'Save' : 'Add Server'}
             </button>
           </div>
         </form>
@@ -313,13 +358,17 @@ interface ServerItemProps {
   server: McpServer;
   onConnect: () => void;
   onDisconnect: () => void;
+  onEdit: () => void;
+  onTest: () => void;
+  onRestart: () => void;
   onDelete: () => void;
   onToolToggle: (toolId: string, enabled: boolean) => void;
   connecting: boolean;
+  testing: boolean;
   error: string | null;
 }
 
-function ServerItem({ server, onConnect, onDisconnect, onDelete, onToolToggle, connecting, error }: ServerItemProps) {
+function ServerItem({ server, onConnect, onDisconnect, onEdit, onTest, onRestart, onDelete, onToolToggle, connecting, testing, error }: ServerItemProps) {
   const [expanded, setExpanded] = useState(false);
   const [togglingToolId, setTogglingToolId] = useState<string | null>(null);
 
@@ -423,26 +472,54 @@ function ServerItem({ server, onConnect, onDisconnect, onDelete, onToolToggle, c
       </div>
       <div className="source-actions">
         {server.connected ? (
-          <button
-            className="source-action-btn"
-            onClick={onDisconnect}
-            disabled={connecting}
-            title="Disconnect"
-          >
-            {Icons.disconnect}
-            <span>Disconnect</span>
-          </button>
+          <>
+            <button
+              className="source-action-btn"
+              onClick={onRestart}
+              disabled={connecting}
+              title="Disconnect + reconnect — re-discovers tools"
+            >
+              <span>Restart</span>
+            </button>
+            <button
+              className="source-action-btn"
+              onClick={onDisconnect}
+              disabled={connecting}
+              title="Disconnect"
+            >
+              {Icons.disconnect}
+              <span>Disconnect</span>
+            </button>
+          </>
         ) : (
-          <button
-            className="source-action-btn"
-            onClick={onConnect}
-            disabled={connecting}
-            title="Connect"
-          >
-            {Icons.connect}
-            <span>{connecting ? 'Connecting...' : 'Connect'}</span>
-          </button>
+          <>
+            <button
+              className="source-action-btn"
+              onClick={onTest}
+              disabled={connecting || testing}
+              title="Test connection (does not persist tools)"
+            >
+              <span>{testing ? 'Testing…' : 'Test'}</span>
+            </button>
+            <button
+              className="source-action-btn"
+              onClick={onConnect}
+              disabled={connecting || testing}
+              title="Connect"
+            >
+              {Icons.connect}
+              <span>{connecting ? 'Connecting...' : 'Connect'}</span>
+            </button>
+          </>
         )}
+        <button
+          className="source-action-btn"
+          onClick={onEdit}
+          disabled={connecting}
+          title="Edit — drops the current connection so changes take effect"
+        >
+          <span>Edit</span>
+        </button>
         <button
           className="source-action-btn delete"
           onClick={onDelete}
@@ -462,6 +539,8 @@ export default function McpServersSection() {
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [editingServer, setEditingServer] = useState<McpServer | null>(null);
   const [serverErrors, setServerErrors] = useState<Record<string, string | null>>({});
   const [deleteConfirm, setDeleteConfirm] = useState<McpServer | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -487,6 +566,46 @@ export default function McpServersSection() {
   const handleAddServer = async (req: AddMcpServerRequest) => {
     await addMcpServer(req);
     await fetchServers();
+  };
+
+  const handleUpdateServer = async (id: string, req: UpdateMcpServerRequest) => {
+    await updateMcpServer(id, req);
+    setEditingServer(null);
+    await fetchServers();
+    showToast('Server updated — reconnect to apply', 'success');
+  };
+
+  const handleTest = async (id: string) => {
+    setTestingId(id);
+    setServerErrors((prev) => ({ ...prev, [id]: null }));
+    try {
+      const result = await testMcpServer(id);
+      showToast(result.message, result.success ? 'success' : 'error');
+      if (!result.success) {
+        setServerErrors((prev) => ({ ...prev, [id]: result.message }));
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Test failed';
+      showToast(message, 'error');
+      setServerErrors((prev) => ({ ...prev, [id]: message }));
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  const handleRestart = async (id: string) => {
+    setConnectingId(id);
+    setServerErrors((prev) => ({ ...prev, [id]: null }));
+    try {
+      const updated = await restartMcpServer(id);
+      setServers((prev) => prev.map((s) => (s.id === id ? updated : s)));
+      showToast(`Restarted '${updated.name}'`, 'success');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Restart failed';
+      setServerErrors((prev) => ({ ...prev, [id]: message }));
+    } finally {
+      setConnectingId(null);
+    }
   };
 
   const handleConnect = async (id: string) => {
@@ -595,9 +714,13 @@ export default function McpServersSection() {
               server={server}
               onConnect={() => handleConnect(server.id)}
               onDisconnect={() => handleDisconnect(server.id)}
+              onEdit={() => setEditingServer(server)}
+              onTest={() => handleTest(server.id)}
+              onRestart={() => handleRestart(server.id)}
               onDelete={() => handleDeleteClick(server)}
               onToolToggle={handleToolToggle}
               connecting={connectingId === server.id}
+              testing={testingId === server.id}
               error={serverErrors[server.id] || null}
             />
           ))
@@ -616,6 +739,15 @@ export default function McpServersSection() {
         isOpen={dialogOpen}
         onClose={() => setDialogOpen(false)}
         onAdd={handleAddServer}
+      />
+
+      {/* Edit Server Dialog — same component, edit mode */}
+      <AddServerDialog
+        isOpen={!!editingServer}
+        onClose={() => setEditingServer(null)}
+        onAdd={handleAddServer}
+        editingServer={editingServer}
+        onUpdate={handleUpdateServer}
       />
 
       {/* Delete Confirmation */}

@@ -1011,9 +1011,14 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -
         .route("/smtp/test", post(api::test_smtp_connection))
         // MCP Server Management (Phase 06-03)
         .route("/mcp/servers", get(api::list_mcp_servers).post(api::add_mcp_server))
-        .route("/mcp/servers/:id", delete(api::delete_mcp_server))
+        .route(
+            "/mcp/servers/:id",
+            put(api::update_mcp_server).delete(api::delete_mcp_server),
+        )
         .route("/mcp/servers/:id/connect", post(api::connect_mcp_server))
         .route("/mcp/servers/:id/disconnect", post(api::disconnect_mcp_server))
+        .route("/mcp/servers/:id/test", post(api::test_mcp_server))
+        .route("/mcp/servers/:id/restart", post(api::restart_mcp_server))
         // MCP Tool Approval (Phase 06-04)
         .route("/mcp/tools/:id/enabled", put(api::set_mcp_tool_enabled))
         .route("/mcp/tools/:id/execute", post(api::execute_mcp_tool))

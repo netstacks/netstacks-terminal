@@ -53,6 +53,25 @@ export interface AddMcpServerRequest {
   server_type?: string;
 }
 
+/** Patch shape for updateMcpServer — all fields optional. Empty string
+ *  for `auth_token` clears the stored token; absent leaves it alone. */
+export interface UpdateMcpServerRequest {
+  name?: string;
+  transport_type?: 'stdio' | 'sse';
+  command?: string;
+  args?: string[];
+  url?: string;
+  auth_type?: string;
+  auth_token?: string;
+  server_type?: string;
+}
+
+export interface TestMcpServerResponse {
+  success: boolean;
+  message: string;
+  tools_discovered: number;
+}
+
 /**
  * List all configured MCP servers
  */
@@ -131,6 +150,69 @@ export async function disconnectMcpServer(id: string): Promise<void> {
   } catch (err: unknown) {
     const axiosErr = err as { response?: { data?: { error?: string } } };
     throw new Error(axiosErr.response?.data?.error || 'Failed to disconnect from MCP server');
+  }
+}
+
+/**
+ * Update an existing MCP server configuration. Backend disconnects the
+ * server first (config changes need a fresh connect to take effect).
+ */
+export async function updateMcpServer(
+  id: string,
+  update: UpdateMcpServerRequest,
+): Promise<McpServer> {
+  try {
+    const { data } = await getClient().http.put(`/mcp/servers/${id}`, update);
+    notifyMcpStateChanged();
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string; code?: string } } };
+    if (axiosErr.response?.data?.code === 'VAULT_LOCKED') {
+      throw new Error(
+        'Unlock the vault before changing the MCP auth token — tokens are stored encrypted.',
+      );
+    }
+    throw new Error(axiosErr.response?.data?.error || 'Failed to update MCP server');
+  }
+}
+
+/**
+ * Test an MCP server connection without persisting tools. Returns a
+ * `{ success, message, tools_discovered }` payload. If the server is
+ * already connected, just reports the live tool count rather than
+ * tearing down the session.
+ */
+export async function testMcpServer(id: string): Promise<TestMcpServerResponse> {
+  try {
+    const { data } = await getClient().http.post(`/mcp/servers/${id}/test`);
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string; code?: string } } };
+    if (axiosErr.response?.data?.code === 'VAULT_LOCKED') {
+      throw new Error(
+        'Unlock the vault before testing this MCP server — its auth token is encrypted.',
+      );
+    }
+    throw new Error(axiosErr.response?.data?.error || 'Failed to test MCP server');
+  }
+}
+
+/**
+ * Restart an MCP server — disconnect followed by reconnect. Useful when
+ * a tool definition has changed on the server side and you need a fresh
+ * discovery.
+ */
+export async function restartMcpServer(id: string): Promise<McpServer> {
+  try {
+    const { data } = await getClient().http.post(`/mcp/servers/${id}/restart`);
+    notifyMcpStateChanged();
+    return data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { error?: string; code?: string } } };
+    if (axiosErr.response?.data?.code === 'VAULT_LOCKED') {
+      throw new Error('Unlock the vault before restarting this MCP server.');
+    }
+    throw new Error(axiosErr.response?.data?.error || 'Failed to restart MCP server');
   }
 }
 

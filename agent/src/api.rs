@@ -8628,6 +8628,214 @@ pub async fn connect_mcp_server(
     }))
 }
 
+/// Request to update an existing MCP server
+#[derive(Debug, Deserialize)]
+pub struct UpdateMcpServerRequest {
+    pub name: Option<String>,
+    pub transport_type: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub url: Option<String>,
+    pub auth_type: Option<String>,
+    pub server_type: Option<String>,
+    /// Empty string clears the stored token; non-empty rotates it; absent leaves it alone.
+    pub auth_token: Option<String>,
+}
+
+/// Update an existing MCP server configuration. Disconnects the server
+/// first so the new config takes effect on the next connect.
+pub async fn update_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateMcpServerRequest>,
+) -> Result<Json<McpServerResponse>, ApiError> {
+    let pool = state.provider.get_pool();
+
+    let row: Option<(String, String, String, String, String, i32, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT id, name, transport_type, command, args, enabled, url, auth_type, server_type FROM mcp_servers WHERE id = ?"
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError { error: format!("Database error: {}", e), code: "DATABASE_ERROR".to_string() })?;
+    let (existing_id, name, transport_type, command, args_json, _enabled, url, auth_type, server_type) = row.ok_or_else(|| ApiError {
+        error: "MCP server not found".to_string(),
+        code: "NOT_FOUND".to_string(),
+    })?;
+
+    if req.auth_token.is_some() && !state.provider.is_unlocked() {
+        return Err(ApiError {
+            error: "Unlock the vault before changing the MCP auth token".to_string(),
+            code: "VAULT_LOCKED".to_string(),
+        });
+    }
+
+    let new_name = req.name.unwrap_or(name);
+    let new_transport_type = req.transport_type.unwrap_or(transport_type);
+    let new_command = req.command.unwrap_or(command);
+    let new_args: Vec<String> = req.args.unwrap_or_else(|| serde_json::from_str(&args_json).unwrap_or_default());
+    let new_args_json = serde_json::to_string(&new_args).unwrap_or_else(|_| "[]".to_string());
+    let new_url = req.url.or(url);
+    let new_auth_type = req.auth_type.unwrap_or(auth_type);
+    let new_server_type = req.server_type.unwrap_or(server_type);
+
+    // Drop the live connection so the new config takes effect on next
+    // connect; also flip enabled=0 so the row matches reality.
+    let _ = state.mcp_client_manager.read().await.disconnect(&existing_id).await;
+
+    sqlx::query(
+        "UPDATE mcp_servers SET name = ?, transport_type = ?, command = ?, args = ?, url = ?, auth_type = ?, server_type = ?, enabled = 0 WHERE id = ?",
+    )
+    .bind(&new_name)
+    .bind(&new_transport_type)
+    .bind(&new_command)
+    .bind(&new_args_json)
+    .bind(&new_url)
+    .bind(&new_auth_type)
+    .bind(&new_server_type)
+    .bind(&existing_id)
+    .execute(pool)
+    .await
+    .map_err(|e| ApiError { error: format!("Database error: {}", e), code: "DATABASE_ERROR".to_string() })?;
+
+    if let Some(token) = req.auth_token.as_deref() {
+        if token.is_empty() {
+            let _ = state.provider.delete_mcp_auth_token(&existing_id).await;
+        } else {
+            state.provider.store_mcp_auth_token(&existing_id, token).await
+                .map_err(|e| ApiError { error: format!("Failed to encrypt MCP auth token: {}", e), code: "VAULT_ERROR".to_string() })?;
+        }
+    }
+
+    let tool_rows: Vec<(String, String, Option<String>, i32, String)> = sqlx::query_as(
+        "SELECT id, name, description, enabled, COALESCE(input_schema, '{}') FROM mcp_tools WHERE server_id = ? ORDER BY name"
+    )
+    .bind(&existing_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError { error: format!("Database error: {}", e), code: "DATABASE_ERROR".to_string() })?;
+    let tools: Vec<McpToolResponse> = tool_rows
+        .into_iter()
+        .map(|(tool_id, tool_name, description, tool_enabled, schema_str)| McpToolResponse {
+            id: tool_id,
+            name: tool_name,
+            description,
+            enabled: tool_enabled != 0,
+            input_schema: serde_json::from_str(&schema_str).unwrap_or(serde_json::json!({})),
+        })
+        .collect();
+
+    Ok(Json(McpServerResponse {
+        id: existing_id,
+        name: new_name,
+        transport_type: new_transport_type,
+        command: new_command,
+        args: new_args,
+        url: new_url,
+        auth_type: new_auth_type,
+        server_type: new_server_type,
+        enabled: false,
+        connected: false,
+        tools,
+    }))
+}
+
+/// Test response — boolean + reason + tools-discovered count.
+#[derive(Debug, Serialize)]
+pub struct TestMcpServerResponse {
+    pub success: bool,
+    pub message: String,
+    pub tools_discovered: usize,
+}
+
+/// Test an MCP server without persisting anything. If the server is
+/// already connected, return the live tool count instead of yanking
+/// the session. Otherwise: connect, count tools, disconnect.
+pub async fn test_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<TestMcpServerResponse>, ApiError> {
+    let pool = state.provider.get_pool();
+
+    let row: Option<(String, String, String, String, String, i32, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT id, name, transport_type, command, args, enabled, url, auth_type, server_type FROM mcp_servers WHERE id = ?"
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError { error: format!("Database error: {}", e), code: "DATABASE_ERROR".to_string() })?;
+    let (server_id, name, transport_type, command, args_json, enabled, url, auth_type, server_type) = row.ok_or_else(|| ApiError {
+        error: "MCP server not found".to_string(),
+        code: "NOT_FOUND".to_string(),
+    })?;
+    let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+
+    if state.mcp_client_manager.read().await.is_connected(&server_id).await {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM mcp_tools WHERE server_id = ?")
+            .bind(&server_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| ApiError { error: format!("Database error: {}", e), code: "DATABASE_ERROR".to_string() })?;
+        return Ok(Json(TestMcpServerResponse {
+            success: true,
+            message: format!("'{}' is already connected", name),
+            tools_discovered: count as usize,
+        }));
+    }
+
+    let auth_token = match state.provider.get_mcp_auth_token(&server_id).await {
+        Ok(t) => t,
+        Err(crate::providers::ProviderError::VaultLocked) => {
+            return Err(ApiError {
+                error: "Unlock the vault before testing this MCP server".to_string(),
+                code: "VAULT_LOCKED".to_string(),
+            });
+        }
+        Err(e) => return Err(ApiError { error: format!("Failed to load MCP auth token: {}", e), code: "VAULT_ERROR".to_string() }),
+    };
+
+    let config = crate::integrations::McpServerConfig {
+        id: server_id.clone(),
+        name: name.clone(),
+        transport_type,
+        command,
+        args,
+        url,
+        auth_type,
+        auth_token,
+        server_type,
+        enabled: enabled != 0,
+    };
+
+    let mgr = state.mcp_client_manager.read().await;
+    let result = mgr.connect(config).await;
+    let _ = mgr.disconnect(&server_id).await;
+    drop(mgr);
+
+    match result {
+        Ok(tools) => Ok(Json(TestMcpServerResponse {
+            success: true,
+            message: format!("'{}' connected — discovered {} tool{}", name, tools.len(), if tools.len() == 1 { "" } else { "s" }),
+            tools_discovered: tools.len(),
+        })),
+        Err(e) => Ok(Json(TestMcpServerResponse {
+            success: false,
+            message: format!("'{}' failed: {}", name, e),
+            tools_discovered: 0,
+        })),
+    }
+}
+
+/// Restart = disconnect followed by reconnect.
+pub async fn restart_mcp_server(
+    state: State<Arc<AppState>>,
+    path: Path<String>,
+) -> Result<Json<McpServerResponse>, ApiError> {
+    // Best-effort disconnect — if not connected, just proceed.
+    let _ = state.mcp_client_manager.read().await.disconnect(&path.0).await;
+    connect_mcp_server(state, path).await
+}
+
 /// Disconnect from an MCP server
 pub async fn disconnect_mcp_server(
     State(state): State<Arc<AppState>>,
