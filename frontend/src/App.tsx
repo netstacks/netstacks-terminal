@@ -101,7 +101,7 @@ import { ToastContainer, showToast } from './components/Toast'
 import { ConfirmDialogHost, confirmDialog } from './components/ConfirmDialog'
 import UpdateChecker from './components/UpdateChecker'
 import type { Connection } from './types/topology'
-import { loadPanelSettings, PANEL_SETTINGS_CHANGED, type PanelSettings } from './api/panelSettings'
+import { loadPanelSettings, setActivityBarOrder, PANEL_SETTINGS_CHANGED, type PanelSettings } from './api/panelSettings'
 import { useSettings } from './hooks/useSettings'
 import { useMode } from './hooks/useMode'
 import { useCapabilitiesStore } from './stores/capabilitiesStore'
@@ -467,6 +467,13 @@ function AppContent() {
   const [aiPanelPinned, setAiPanelPinned] = useState(() => loadPanelSettings().aiPanelPinned)
   const [sidebarOverlay, setSidebarOverlay] = useState(() => loadPanelSettings().sidebarOverlay)
   const [hotEdgesEnabled, setHotEdgesEnabled] = useState(() => loadPanelSettings().hotEdgesEnabled)
+
+  // Activity bar drag-and-drop state
+  const [draggedItemId, setDraggedItemId] = useState<string | null>(null)
+  const [dragOverItemId, setDragOverItemId] = useState<string | null>(null)
+  const [dragOverPosition, setDragOverPosition] = useState<'top' | 'bottom' | null>(null)
+  const [isReordering, setIsReordering] = useState(false)
+  const [activityBarContextMenu, setActivityBarContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
 
   // Mode detection (for conditional feature gating)
   const { isEnterprise } = useMode()
@@ -5725,6 +5732,243 @@ def main(command: str = "show version"):
     }
   }, [closeTerminal, handleTerminalAIAction, handleTerminalAIFloatingChat, updateTerminalStatus, updateTabSessionId, broadcast, registerListener, handleVisualizeTraceroute, handleTopologyDeviceDoubleClick, handleDeviceContextMenu, handleAIDiscover, handleSaveTopology, handleOpenDeviceDetailTab, handleOpenLinkDetailTab, handleSaveDeviceToDocs, handleSaveLinkToDocs, documentCache, handleDocumentSave, handleDocumentModified, tabs, topologyRefreshKeys, deviceEnrichments, getLinkEnrichment, profiles, isTroubleshootingActive, isTroubleshootingCapturing, handleTroubleshootingCapture, aiCopilotActive])
 
+  // Activity bar built-in items (draggable)
+  interface ActivityBarItem {
+    id: string
+    label: string
+    testId?: string
+    icon: React.ReactNode
+    visible: boolean
+    onClick: () => void
+  }
+
+  const builtInItems: ActivityBarItem[] = useMemo(() => {
+    const items: ActivityBarItem[] = [
+      {
+        id: 'sessions',
+        label: 'Sessions',
+        testId: 'nav-sessions',
+        icon: Icons.sessions,
+        visible: showSessionsTab,
+        onClick: () => handleActivityClick('sessions'),
+      },
+      {
+        id: 'topology',
+        label: 'Network Topology',
+        testId: 'nav-topology',
+        icon: Icons.topology,
+        visible: canTopology,
+        onClick: () => handleActivityClick('topology'),
+      },
+      {
+        id: 'docs',
+        label: 'Documents',
+        testId: 'nav-docs',
+        icon: Icons.docs,
+        visible: canDocs,
+        onClick: () => handleActivityClick('docs'),
+      },
+      {
+        id: 'changes',
+        label: 'Changes',
+        testId: 'nav-changes',
+        icon: Icons.changes,
+        visible: canChanges && showChangesTab,
+        onClick: () => handleActivityClick('changes'),
+      },
+      {
+        id: 'agents',
+        label: 'AI Agents',
+        testId: 'nav-agents',
+        icon: Icons.agents,
+        visible: canAgents && showAgentsTab,
+        onClick: () => handleActivityClick('agents'),
+      },
+      {
+        id: 'stacks',
+        label: 'Stacks',
+        icon: Icons.stacks,
+        visible: canStacks,
+        onClick: () => handleActivityClick('stacks'),
+      },
+      {
+        id: 'sftp',
+        label: `SFTP Browser (${sftpConnectionCount})`,
+        icon: (
+          <svg viewBox="0 0 16 16" fill="currentColor" width="24" height="24">
+            <path d="M14.5 3H7.71l-.85-.85A.5.5 0 006.5 2h-5a.5.5 0 00-.5.5v11a.5.5 0 00.5.5h13a.5.5 0 00.5-.5v-10a.5.5 0 00-.5-.5z" />
+          </svg>
+        ),
+        visible: sftpConnectionCount > 0,
+        onClick: () => handleActivityClick('sftp' as ViewType),
+      },
+      {
+        id: 'workspaces',
+        label: 'Workspaces',
+        icon: (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="24" height="24">
+            <path d="M3 7V17C3 18.1046 3.89543 19 5 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H13L11 5H5C3.89543 5 3 5.89543 3 7Z" />
+            <path d="M12 11V17M9 14H15" strokeLinecap="round" />
+          </svg>
+        ),
+        visible: true,
+        onClick: () => handleActivityClick('workspaces'),
+      },
+    ]
+
+    // Apply saved order if available
+    const savedOrder = loadPanelSettings().activityBarOrder
+    if (savedOrder && savedOrder.length > 0) {
+      const orderedItems: ActivityBarItem[] = []
+      const itemMap = new Map(items.map(item => [item.id, item]))
+
+      // Add items in saved order
+      savedOrder.forEach(id => {
+        const item = itemMap.get(id)
+        if (item) {
+          orderedItems.push(item)
+          itemMap.delete(id)
+        }
+      })
+
+      // Append any new items not in saved order (preserve source order)
+      itemMap.forEach(item => orderedItems.push(item))
+
+      return orderedItems
+    }
+
+    return items
+  }, [showSessionsTab, canTopology, canDocs, canChanges, showChangesTab, canAgents, showAgentsTab, canStacks, sftpConnectionCount])
+
+  // Drag-and-drop handlers
+  const handleDragStart = useCallback((e: React.DragEvent, itemId: string) => {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', itemId)
+    setDraggedItemId(itemId)
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent, targetId: string) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+
+    // Determine if we're hovering over top or bottom half
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const midpoint = rect.top + rect.height / 2
+    const position = e.clientY < midpoint ? 'top' : 'bottom'
+
+    setDragOverItemId(targetId)
+    setDragOverPosition(position)
+  }, [])
+
+  const handleDragLeave = useCallback(() => {
+    setDragOverItemId(null)
+    setDragOverPosition(null)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent, targetId: string) => {
+    e.preventDefault()
+    const draggedId = e.dataTransfer.getData('text/plain')
+
+    if (!draggedId || draggedId === targetId) {
+      setDraggedItemId(null)
+      setDragOverItemId(null)
+      setDragOverPosition(null)
+      return
+    }
+
+    // Reorder items
+    const currentOrder = builtInItems.map(item => item.id)
+    const draggedIndex = currentOrder.indexOf(draggedId)
+    const targetIndex = currentOrder.indexOf(targetId)
+
+    if (draggedIndex === -1 || targetIndex === -1) {
+      setDraggedItemId(null)
+      setDragOverItemId(null)
+      setDragOverPosition(null)
+      return
+    }
+
+    // Remove dragged item
+    const newOrder = [...currentOrder]
+    newOrder.splice(draggedIndex, 1)
+
+    // Insert at new position
+    let insertIndex = targetIndex
+    if (draggedIndex < targetIndex) {
+      insertIndex = dragOverPosition === 'top' ? targetIndex - 1 : targetIndex
+    } else {
+      insertIndex = dragOverPosition === 'top' ? targetIndex : targetIndex + 1
+    }
+
+    newOrder.splice(insertIndex, 0, draggedId)
+
+    // Persist new order
+    setActivityBarOrder(newOrder)
+
+    // Clear drag state
+    setDraggedItemId(null)
+    setDragOverItemId(null)
+    setDragOverPosition(null)
+
+    // Force re-render by updating a dummy state (activityBarOrder is read from localStorage)
+    // The component will re-render on next update naturally
+  }, [builtInItems, dragOverPosition])
+
+  const handleDragEnd = useCallback(() => {
+    setDraggedItemId(null)
+    setDragOverItemId(null)
+    setDragOverPosition(null)
+  }, [])
+
+  // Activity bar context menu handler
+  const handleActivityContext = useCallback((e: React.MouseEvent, _itemId: string) => {
+    e.preventDefault()
+    setActivityBarContextMenu({
+      position: { x: e.clientX, y: e.clientY },
+      items: [
+        {
+          id: 'reorder-toggle',
+          label: isReordering ? 'Done Reordering' : 'Reorder Items',
+          action: () => setIsReordering(!isReordering)
+        },
+        {
+          id: 'reset-order',
+          label: 'Reset Order',
+          action: () => {
+            setActivityBarOrder([])
+            setIsReordering(false)
+          }
+        }
+      ]
+    })
+  }, [isReordering])
+
+  // Exit reorder mode on Escape or outside click
+  useEffect(() => {
+    if (!isReordering) return
+
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsReordering(false)
+      }
+    }
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (!target.closest('.activity-bar-item')) {
+        setIsReordering(false)
+      }
+    }
+
+    document.addEventListener('keydown', handleEscape)
+    document.addEventListener('click', handleClickOutside)
+
+    return () => {
+      document.removeEventListener('keydown', handleEscape)
+      document.removeEventListener('click', handleClickOutside)
+    }
+  }, [isReordering])
+
   return (
     <AuthProvider>
       <div className="app" onContextMenu={handleGlobalContextMenu}>
@@ -5732,60 +5976,30 @@ def main(command: str = "show version"):
         {/* Activity Bar */}
         <div className="activity-bar" data-testid="activity-bar">
           <div className="activity-bar-top">
-            {showSessionsTab && (
-            <button
-              className={`activity-bar-item ${activeView === 'sessions' ? 'active' : ''}`}
-              onClick={() => handleActivityClick('sessions')}
-              title="Sessions" data-testid="nav-sessions"
-            >
-              {Icons.sessions}
-            </button>
-            )}
-            {canTopology && (
-            <button
-              className={`activity-bar-item ${activeView === 'topology' ? 'active' : ''}`}
-              onClick={() => handleActivityClick('topology')}
-              title="Network Topology" data-testid="nav-topology"
-            >
-              {Icons.topology}
-            </button>
-            )}
-            {canDocs && (
-            <button
-              className={`activity-bar-item ${activeView === 'docs' ? 'active' : ''}`}
-              onClick={() => handleActivityClick('docs')}
-              title="Documents" data-testid="nav-docs"
-            >
-              {Icons.docs}
-            </button>
-            )}
-            {canChanges && showChangesTab && (
-            <button
-              className={`activity-bar-item ${activeView === 'changes' ? 'active' : ''}`}
-              onClick={() => handleActivityClick('changes')}
-              title="Changes" data-testid="nav-changes"
-            >
-              {Icons.changes}
-            </button>
-            )}
-            {canAgents && showAgentsTab && (
+            {builtInItems.filter(item => item.visible).map((item) => (
               <button
-                className={`activity-bar-item ${activeView === 'agents' ? 'active' : ''}`}
-                onClick={() => handleActivityClick('agents')}
-                title="AI Agents" data-testid="nav-agents"
+                key={item.id}
+                draggable={isReordering}
+                className={`activity-bar-item ${activeView === item.id ? 'active' : ''} ${isReordering ? 'activity-bar-item--reordering' : ''} ${draggedItemId === item.id ? 'dragging' : ''} ${dragOverItemId === item.id && dragOverPosition === 'top' ? 'drag-over-top' : ''} ${dragOverItemId === item.id && dragOverPosition === 'bottom' ? 'drag-over-bottom' : ''}`}
+                onClick={(e) => {
+                  if (isReordering) {
+                    e.preventDefault()
+                    return
+                  }
+                  item.onClick()
+                }}
+                onContextMenu={(e) => handleActivityContext(e, item.id)}
+                onDragStart={(e) => handleDragStart(e, item.id)}
+                onDragOver={(e) => handleDragOver(e, item.id)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, item.id)}
+                onDragEnd={handleDragEnd}
+                title={item.label}
+                data-testid={item.testId}
               >
-                {Icons.agents}
+                {item.icon}
               </button>
-            )}
-            {canStacks && (
-              <button
-                className={`activity-bar-item ${activeView === 'stacks' ? 'active' : ''}`}
-                onClick={() => handleActivityClick('stacks')}
-                title="Stacks"
-              >
-                {Icons.stacks}
-              </button>
-            )}
+            ))}
             {allPluginPanels.length > 0 && allPluginPanels.map((pp) => {
               const viewId = `plugin:${pp.pluginName}:${pp.panel.id}`
               return (
@@ -5799,27 +6013,6 @@ def main(command: str = "show version"):
                 </button>
               )
             })}
-            {sftpConnectionCount > 0 && (
-              <button
-                className={`activity-bar-item ${activeView === 'sftp' ? 'active' : ''}`}
-                onClick={() => handleActivityClick('sftp' as ViewType)}
-                title={`SFTP Browser (${sftpConnectionCount})`}
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" width="24" height="24">
-                  <path d="M14.5 3H7.71l-.85-.85A.5.5 0 006.5 2h-5a.5.5 0 00-.5.5v11a.5.5 0 00.5.5h13a.5.5 0 00.5-.5v-10a.5.5 0 00-.5-.5z" />
-                </svg>
-              </button>
-            )}
-            <button
-              className={`activity-bar-item ${activeView === 'workspaces' ? 'active' : ''}`}
-              onClick={() => handleActivityClick('workspaces')}
-              title="Workspaces"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="24" height="24">
-                <path d="M3 7V17C3 18.1046 3.89543 19 5 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H13L11 5H5C3.89543 5 3 5.89543 3 7Z" />
-                <path d="M12 11V17M9 14H15" strokeLinecap="round" />
-              </svg>
-            </button>
           </div>
           <div className="activity-bar-bottom">
             <button
@@ -7385,6 +7578,15 @@ def main(command: str = "show version"):
           onConnect={handleEnterpriseCredentialSelected}
           onCancel={() => setEnterpriseConnectSession(null)}
           deviceName={enterpriseConnectSession.id.startsWith('device-') ? enterpriseConnectSession.name : undefined}
+        />
+      )}
+
+      {/* Activity bar context menu */}
+      {activityBarContextMenu && (
+        <ContextMenu
+          position={activityBarContextMenu.position}
+          items={activityBarContextMenu.items}
+          onClose={() => setActivityBarContextMenu(null)}
         />
       )}
 

@@ -15,6 +15,8 @@ export interface PanelSettings {
   sidebarOverlay: boolean
   /** If true, moving mouse to screen edges reveals hidden panels */
   hotEdgesEnabled: boolean
+  /** Custom order for activity bar built-in items (array of item IDs). Empty/undefined = default order. */
+  activityBarOrder?: string[]
 }
 
 const STORAGE_KEY = 'netstacks:panelSettings'
@@ -63,4 +65,12 @@ export function savePanelSettings(settings: PanelSettings): void {
 export function resetPanelSettings(): PanelSettings {
   savePanelSettings(DEFAULT_SETTINGS)
   return DEFAULT_SETTINGS
+}
+
+/**
+ * Set activity bar order
+ */
+export function setActivityBarOrder(order: string[]): void {
+  const current = loadPanelSettings()
+  savePanelSettings({ ...current, activityBarOrder: order })
 }
