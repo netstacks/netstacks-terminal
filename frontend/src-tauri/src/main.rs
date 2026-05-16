@@ -859,34 +859,13 @@ fn main() {
                 return;
             }
 
-            let event_name = match id.as_ref() {
-                "new-session" => Some("menu://new-session"),
-                "new-terminal" => Some("menu://new-terminal"),
-                "new-document" => Some("menu://new-document"),
-                "quick-connect" => Some("menu://quick-connect"),
-                "save" => Some("menu://save"),
-                "close-tab" => Some("menu://close-tab"),
-                "settings" => Some("menu://settings"),
-                "find" => Some("menu://find"),
-                "command-palette" => Some("menu://command-palette"),
-                "toggle-sidebar" => Some("menu://toggle-sidebar"),
-                "toggle-ai-panel" => Some("menu://toggle-ai-panel"),
-                "zoom-reset" => Some("menu://zoom-reset"),
-                "zoom-in" => Some("menu://zoom-in"),
-                "zoom-out" => Some("menu://zoom-out"),
-                "reconnect" => Some("menu://reconnect"),
-                "toggle-multi-send" => Some("menu://toggle-multi-send"),
-                "connect-selected" => Some("menu://connect-selected"),
-                "start-troubleshooting" => Some("menu://start-troubleshooting"),
-                "next-tab" => Some("menu://next-tab"),
-                "previous-tab" => Some("menu://previous-tab"),
-                "open-docs" => Some("menu://open-docs"),
-                "about" => Some("menu://about"),
-                _ => None,
-            };
-            if let Some(name) = event_name {
-                app.emit(name, ()).ok();
-            }
+            // Every other menu item just emits `menu://<id>`. The
+            // frontend's MenuBridge maps that to a CommandRegistry id
+            // and dispatches. Keeping the Rust side data-free means
+            // adding a new menu item is one line in build_menu() and
+            // one line in MENU_ID_TO_COMMAND — no Rust round-trip.
+            let event_name = format!("menu://{}", id.as_ref());
+            app.emit(&event_name, ()).ok();
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1072,6 +1051,61 @@ fn build_menu(
         .item(&start_troubleshooting)
         .build()?;
 
+    // === Tools Menu ===
+    // Settings tab shortcuts — clicking jumps the user to the relevant
+    // Settings tab. Commands handle the actual openSettingsTab(tab)
+    // call (registered in App.tsx alongside the existing settings
+    // command), so this menu is data-only here.
+    let open_quick_actions = track!("open-quick-actions",
+        MenuItemBuilder::with_id("open-quick-actions", "Quick Actions\u{2026}").build(handle)?);
+    let open_snippets = track!("open-snippets",
+        MenuItemBuilder::with_id("open-snippets", "Snippets\u{2026}").build(handle)?);
+    let open_mapped_keys = track!("open-mapped-keys",
+        MenuItemBuilder::with_id("open-mapped-keys", "Mapped Keys\u{2026}").build(handle)?);
+    let open_vault = track!("open-vault",
+        MenuItemBuilder::with_id("open-vault", "Credential Vault\u{2026}").build(handle)?);
+    let open_recordings = track!("open-recordings",
+        MenuItemBuilder::with_id("open-recordings", "Recordings\u{2026}").build(handle)?);
+    let open_layouts = track!("open-layouts",
+        MenuItemBuilder::with_id("open-layouts", "Saved Layouts\u{2026}").build(handle)?);
+    let open_session_logs = track!("open-session-logs",
+        MenuItemBuilder::with_id("open-session-logs", "Session Logs\u{2026}").build(handle)?);
+    let open_host_keys = track!("open-host-keys",
+        MenuItemBuilder::with_id("open-host-keys", "Trusted Host Keys\u{2026}").build(handle)?);
+
+    let tools_menu = SubmenuBuilder::new(handle, "Tools")
+        .item(&open_quick_actions)
+        .item(&open_snippets)
+        .item(&open_mapped_keys)
+        .separator()
+        .item(&open_vault)
+        .item(&open_host_keys)
+        .separator()
+        .item(&open_recordings)
+        .item(&open_session_logs)
+        .item(&open_layouts)
+        .build()?;
+
+    // === AI Menu ===
+    let open_ai_settings = track!("open-ai-settings",
+        MenuItemBuilder::with_id("open-ai-settings", "AI Settings\u{2026}").build(handle)?);
+    let open_mcp_servers = track!("open-mcp-servers",
+        MenuItemBuilder::with_id("open-mcp-servers", "MCP Servers\u{2026}").build(handle)?);
+    let open_ai_memory = track!("open-ai-memory",
+        MenuItemBuilder::with_id("open-ai-memory", "AI Memory\u{2026}").build(handle)?);
+    let toggle_ai_chat = track!("toggle-ai-chat",
+        MenuItemBuilder::with_id("toggle-ai-chat", "Toggle AI Chat Panel")
+            .accelerator("CmdOrCtrl+J")
+            .build(handle)?);
+
+    let ai_menu = SubmenuBuilder::new(handle, "AI")
+        .item(&toggle_ai_chat)
+        .separator()
+        .item(&open_ai_settings)
+        .item(&open_mcp_servers)
+        .item(&open_ai_memory)
+        .build()?;
+
     // === Window Menu ===
     let new_window = track!("new-window", MenuItemBuilder::with_id("new-window", "New Window")
         .accelerator("CmdOrCtrl+Shift+N")
@@ -1082,6 +1116,19 @@ fn build_menu(
     let prev_tab = track!("previous-tab", MenuItemBuilder::with_id("previous-tab", "Show Previous Tab")
         .accelerator("CmdOrCtrl+Shift+[")
         .build(handle)?);
+    // Tabs submenu — close-all / close-to-right / reopen-closed
+    // already implemented on TabGroup's context menu; surfacing them
+    // in the native menu makes the tab management discoverable.
+    let close_all_tabs = track!("close-all-tabs",
+        MenuItemBuilder::with_id("close-all-tabs", "Close All Tabs")
+            .accelerator("CmdOrCtrl+Shift+W")
+            .build(handle)?);
+    let close_tabs_right = track!("close-tabs-right",
+        MenuItemBuilder::with_id("close-tabs-right", "Close Tabs to the Right").build(handle)?);
+    let reopen_closed_tab = track!("reopen-closed-tab",
+        MenuItemBuilder::with_id("reopen-closed-tab", "Reopen Closed Tab")
+            .accelerator("CmdOrCtrl+Shift+T")
+            .build(handle)?);
 
     let window_menu = SubmenuBuilder::new(handle, "Window")
         .item(&new_window)
@@ -1091,6 +1138,10 @@ fn build_menu(
         .separator()
         .item(&next_tab)
         .item(&prev_tab)
+        .separator()
+        .item(&close_all_tabs)
+        .item(&close_tabs_right)
+        .item(&reopen_closed_tab)
         .build()?;
 
     // === Help Menu ===
@@ -1112,12 +1163,16 @@ fn build_menu(
 
     let help_menu = help_builder.build()?;
 
-    // Build the complete menu bar
+    // Build the complete menu bar. Order follows macOS HIG: app menu,
+    // File, Edit, View, then domain-specific menus (Session, Tools, AI)
+    // before Window/Help.
     let menu = menu_builder
         .item(&file_menu)
         .item(&edit_menu)
         .item(&view_menu)
         .item(&session_menu)
+        .item(&tools_menu)
+        .item(&ai_menu)
         .item(&window_menu)
         .item(&help_menu)
         .build()?;

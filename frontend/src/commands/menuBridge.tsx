@@ -74,6 +74,27 @@ export const MENU_ID_TO_COMMAND: Record<string, string> = {
   'next-tab': 'window.next-tab',
   'previous-tab': 'window.previous-tab',
 
+  // Tools
+  'open-quick-actions': 'tools.quick-actions',
+  'open-snippets': 'tools.snippets',
+  'open-mapped-keys': 'tools.mapped-keys',
+  'open-vault': 'tools.vault',
+  'open-recordings': 'tools.recordings',
+  'open-layouts': 'tools.layouts',
+  'open-session-logs': 'tools.session-logs',
+  'open-host-keys': 'tools.host-keys',
+
+  // AI
+  'open-ai-settings': 'ai.settings',
+  'open-mcp-servers': 'ai.mcp-servers',
+  'open-ai-memory': 'ai.memory',
+  'toggle-ai-chat': 'ai.toggle-chat',
+
+  // Tabs (under Window)
+  'close-all-tabs': 'window.close-all-tabs',
+  'close-tabs-right': 'window.close-tabs-right',
+  'reopen-closed-tab': 'window.reopen-closed-tab',
+
   // Help
   'open-docs': 'help.docs',
 }

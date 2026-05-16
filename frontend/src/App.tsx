@@ -65,7 +65,10 @@ import { useMultiSend } from './hooks/useMultiSend'
 import { useKeyboard } from './hooks/useKeyboard'
 import { TabSelectionProvider, useTabSelection } from './hooks/useTabSelection'
 import { useEnrichment } from './hooks/useEnrichment'
-import { useMenuEvents } from './hooks/useMenuEvents'
+// useMenuEvents is no longer mounted — every native-menu item is
+// routed through the CommandRegistry (see useCommand registrations
+// below). Hook left in tree for now; remove when no other importer
+// remains.
 import { listSessions, getSession, type Session } from './api/sessions'
 import { type EnterpriseSession, getSessionDefinition, updateSessionDefinition } from './api/enterpriseSessions'
 import { type DeviceSummary } from './api/enterpriseDevices'
@@ -114,7 +117,7 @@ import WorkspaceTab from './components/workspace/WorkspaceTab'
 import WorkspaceNewDialog from './components/workspace/WorkspaceNewDialog'
 import WorkspacesPanel, { addSavedWorkspace } from './components/workspace/WorkspacesPanel'
 import { MenuBridge } from './commands/menuBridge'
-import { useActiveContextStore, type ActiveContext } from './commands'
+import { useActiveContextStore, useCommand, type ActiveContext } from './commands'
 import type { WorkspaceConfig } from './types/workspace'
 import { useTroubleshootingSession, type OnTimeoutCallback } from './hooks/useTroubleshootingSession'
 import { useCertRenewal } from './hooks/useCertRenewal'
@@ -5226,97 +5229,280 @@ def main(command: str = "show version"):
     }
   }, [keyboard, createTerminal, closeTerminal, activeTabId, tabs, selectedSessionIds, handleBulkConnect, handleSaveActiveDocument, handleOpenAIChatFromTerminal, isTroubleshootingActive])
 
-  // Native OS menu event handlers
-  useMenuEvents({
-    onNewSession: () => {
-      setQuickConnectOpen(true)
+  // ── Native menu commands ──────────────────────────────────────────
+  // Every native-menu item is registered here as a Command so the
+  // MenuBridge can dispatch it AND keep the menu item enabled/disabled
+  // based on the ActiveContext. Right-click context menus and the
+  // forthcoming Command Palette read from the same registry, so each
+  // entry only needs to be defined once.
+
+  // File ----------------------------------------------------------
+  useCommand({
+    id: 'file.new-session', label: 'New Session', category: 'file',
+    accelerator: 'CmdOrCtrl+N',
+    run: () => setQuickConnectOpen(true),
+  })
+  useCommand({
+    id: 'file.new-terminal', label: 'New Terminal Tab', category: 'file',
+    accelerator: 'CmdOrCtrl+T',
+    run: () => createTerminal(),
+  })
+  useCommand({
+    id: 'file.new-document', label: 'New Document', category: 'file',
+    accelerator: 'CmdOrCtrl+Shift+N',
+    run: () => handleNewDocument('notes'),
+  })
+  useCommand({
+    id: 'file.quick-connect', label: 'Quick Connect…', category: 'file',
+    accelerator: 'CmdOrCtrl+Shift+Q',
+    run: () => setQuickConnectOpen(true),
+  })
+  useCommand({
+    id: 'file.save', label: 'Save', category: 'file',
+    accelerator: 'CmdOrCtrl+S',
+    // Enabled only when an editable tab is active. handleSaveActiveDocument
+    // is itself a no-op for non-editable tab types, but greying out the
+    // menu communicates that intentionally.
+    when: (ctx) =>
+      ctx.activeTabType === 'document' ||
+      ctx.activeTabType === 'script' ||
+      ctx.activeTabType === 'sftp-editor' ||
+      ctx.activeTabType === 'mop',
+    run: () => handleSaveActiveDocument(),
+  })
+  useCommand({
+    id: 'file.close-tab', label: 'Close Tab', category: 'file',
+    accelerator: 'CmdOrCtrl+W',
+    when: (ctx) => ctx.activeTabId !== null,
+    run: () => {
+      if (activeTabId) closeTerminal(activeTabId)
     },
-    onNewTerminal: () => {
-      createTerminal()
+  })
+
+  // App / global -------------------------------------------------
+  useCommand({
+    id: 'app.settings', label: 'Settings…', category: 'view',
+    accelerator: 'CmdOrCtrl+,',
+    run: () => openSettingsTab(),
+  })
+
+  // Edit ----------------------------------------------------------
+  useCommand({
+    id: 'edit.find', label: 'Find…', category: 'edit',
+    accelerator: 'CmdOrCtrl+F',
+    // Find dispatches a DOM event to the active terminal, so only
+    // make sense when one is focused.
+    when: (ctx) => ctx.activeTabType === 'terminal',
+    run: () => {
+      if (!activeTabId) return
+      const el = document.querySelector(`[data-terminal-id="${activeTabId}"]`)
+      el?.dispatchEvent(new CustomEvent('terminal-find', { bubbles: true }))
     },
-    onNewDocument: () => {
-      handleNewDocument('notes')
-    },
-    onQuickConnect: () => {
-      setQuickConnectOpen(true)
-    },
-    onSave: () => {
-      handleSaveActiveDocument()
-    },
-    onCloseTab: () => {
-      if (activeTabId) {
-        closeTerminal(activeTabId)
-      }
-    },
-    onSettings: () => {
-      openSettingsTab()
-    },
-    onFind: () => {
-      if (activeTabId) {
-        const terminalEl = document.querySelector(`[data-terminal-id="${activeTabId}"]`)
-        if (terminalEl) {
-          terminalEl.dispatchEvent(new CustomEvent('terminal-find', { bubbles: true }))
-        }
-      }
-    },
-    onCommandPalette: () => {
-      setCommandPaletteOpen(true)
-    },
-    onToggleSidebar: () => {
-      setSidebarOpen(prev => !prev)
-    },
-    onToggleAiPanel: () => {
-      setAiCopilotActive(prev => !prev)
-    },
-    onZoomReset: () => {
-      document.body.style.zoom = '1'
-    },
-    onZoomIn: () => {
+  })
+
+  // View ----------------------------------------------------------
+  useCommand({
+    id: 'view.command-palette', label: 'Command Palette…', category: 'view',
+    accelerator: 'CmdOrCtrl+Shift+P',
+    run: () => setCommandPaletteOpen(true),
+  })
+  useCommand({
+    id: 'view.toggle-sidebar', label: 'Toggle Sidebar', category: 'view',
+    accelerator: 'CmdOrCtrl+B',
+    run: () => setSidebarOpen(prev => !prev),
+  })
+  useCommand({
+    id: 'view.toggle-ai-panel', label: 'Toggle AI Panel', category: 'view',
+    accelerator: 'CmdOrCtrl+I',
+    run: () => setAiCopilotActive(prev => !prev),
+  })
+  useCommand({
+    id: 'view.zoom-reset', label: 'Actual Size', category: 'view',
+    accelerator: 'CmdOrCtrl+0',
+    run: () => { document.body.style.zoom = '1' },
+  })
+  useCommand({
+    id: 'view.zoom-in', label: 'Zoom In', category: 'view',
+    accelerator: 'CmdOrCtrl+=',
+    run: () => {
       const current = parseFloat(document.body.style.zoom || '1')
       document.body.style.zoom = String(Math.min(current + 0.1, 2))
     },
-    onZoomOut: () => {
+  })
+  useCommand({
+    id: 'view.zoom-out', label: 'Zoom Out', category: 'view',
+    accelerator: 'CmdOrCtrl+-',
+    run: () => {
       const current = parseFloat(document.body.style.zoom || '1')
       document.body.style.zoom = String(Math.max(current - 0.1, 0.5))
     },
-    onReconnect: () => {
-      if (activeTabId) {
-        const terminalEl = document.querySelector(`[data-terminal-id="${activeTabId}"]`)
-        if (terminalEl) {
-          terminalEl.dispatchEvent(new CustomEvent('terminal-reconnect', { bubbles: true }))
-        }
-      }
+  })
+
+  // Session -------------------------------------------------------
+  useCommand({
+    id: 'session.reconnect', label: 'Reconnect', category: 'session',
+    accelerator: 'CmdOrCtrl+Shift+R',
+    // Reconnect only makes sense on a terminal that's in an
+    // interruptible state. Greying it out for documents/topology is
+    // the whole point of context-aware menus.
+    when: (ctx) =>
+      ctx.activeTabType === 'terminal' &&
+      (ctx.terminalStatus === 'connected' ||
+        ctx.terminalStatus === 'disconnected' ||
+        ctx.terminalStatus === 'error'),
+    run: () => {
+      if (!activeTabId) return
+      const el = document.querySelector(`[data-terminal-id="${activeTabId}"]`)
+      el?.dispatchEvent(new CustomEvent('terminal-reconnect', { bubbles: true }))
     },
-    onToggleMultiSend: () => {
-      if (activeTabId) {
-        toggleMultiSend(activeTabId)
-      }
+  })
+  useCommand({
+    id: 'session.toggle-multi-send', label: 'Toggle Multi-Send', category: 'session',
+    accelerator: 'CmdOrCtrl+Shift+M',
+    when: (ctx) => ctx.activeTabType === 'terminal',
+    run: () => {
+      if (activeTabId) toggleMultiSend(activeTabId)
     },
-    onConnectSelected: () => {
-      if (selectedSessionIds.length > 0) {
-        handleBulkConnect(selectedSessionIds)
-      }
+  })
+  useCommand({
+    id: 'session.connect-selected', label: 'Connect Selected Sessions', category: 'session',
+    accelerator: 'CmdOrCtrl+Shift+Return',
+    when: (ctx) => ctx.selectionCount > 0,
+    run: () => {
+      if (selectedSessionIds.length > 0) handleBulkConnect(selectedSessionIds)
     },
-    onStartTroubleshooting: () => {
-      if (!isTroubleshootingActive) {
-        setTroubleshootingDialogOpen(true)
-      }
+  })
+  useCommand({
+    id: 'session.start-troubleshooting', label: 'Start Troubleshooting…', category: 'session',
+    accelerator: 'CmdOrCtrl+Shift+K',
+    // Predicate doesn't read isTroubleshootingActive from context yet
+    // (would require plumbing it through ActiveContext). For now the
+    // dialog-open handler is the gate.
+    run: () => {
+      if (!isTroubleshootingActive) setTroubleshootingDialogOpen(true)
     },
-    onNextTab: () => {
+  })
+
+  // Window --------------------------------------------------------
+  useCommand({
+    id: 'window.next-tab', label: 'Show Next Tab', category: 'window',
+    accelerator: 'CmdOrCtrl+Shift+]',
+    // Disable when there's only one (or zero) tabs — there's nowhere
+    // to navigate to.
+    when: () => tabs.length > 1,
+    run: () => {
       if (tabs.length > 1 && activeTabId) {
-        const currentIndex = tabs.findIndex(t => t.id === activeTabId)
-        const nextIndex = (currentIndex + 1) % tabs.length
-        setActiveTabId(tabs[nextIndex].id)
+        const i = tabs.findIndex(t => t.id === activeTabId)
+        setActiveTabId(tabs[(i + 1) % tabs.length].id)
       }
     },
-    onPreviousTab: () => {
+  })
+  useCommand({
+    id: 'window.previous-tab', label: 'Show Previous Tab', category: 'window',
+    accelerator: 'CmdOrCtrl+Shift+[',
+    when: () => tabs.length > 1,
+    run: () => {
       if (tabs.length > 1 && activeTabId) {
-        const currentIndex = tabs.findIndex(t => t.id === activeTabId)
-        const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length
-        setActiveTabId(tabs[prevIndex].id)
+        const i = tabs.findIndex(t => t.id === activeTabId)
+        setActiveTabId(tabs[(i - 1 + tabs.length) % tabs.length].id)
       }
     },
-    onOpenDocs: async () => {
+  })
+
+  // Tools ---------------------------------------------------------
+  // Each entry jumps to the corresponding Settings tab. openSettingsTab
+  // already accepts an optional initial-tab arg.
+  useCommand({
+    id: 'tools.quick-actions', label: 'Quick Actions…', category: 'tools',
+    run: () => openSettingsTab('quickCalls'),
+  })
+  useCommand({
+    id: 'tools.snippets', label: 'Snippets…', category: 'tools',
+    when: (ctx) => !ctx.isEnterprise,
+    run: () => openSettingsTab('snippets'),
+  })
+  useCommand({
+    id: 'tools.mapped-keys', label: 'Mapped Keys…', category: 'tools',
+    run: () => openSettingsTab('mappedKeys'),
+  })
+  useCommand({
+    id: 'tools.vault', label: 'Credential Vault…', category: 'tools',
+    when: (ctx) => !ctx.isEnterprise,
+    run: () => openSettingsTab('security'),
+  })
+  useCommand({
+    id: 'tools.recordings', label: 'Recordings…', category: 'tools',
+    when: (ctx) => !ctx.isEnterprise,
+    run: () => openSettingsTab('recordings'),
+  })
+  useCommand({
+    id: 'tools.layouts', label: 'Saved Layouts…', category: 'tools',
+    when: (ctx) => !ctx.isEnterprise,
+    run: () => openSettingsTab('layouts'),
+  })
+  useCommand({
+    id: 'tools.session-logs', label: 'Session Logs…', category: 'tools',
+    when: (ctx) => !ctx.isEnterprise,
+    run: () => openSettingsTab('sessionLogs'),
+  })
+  useCommand({
+    id: 'tools.host-keys', label: 'Trusted Host Keys…', category: 'tools',
+    run: () => openSettingsTab('hostKeys'),
+  })
+
+  // AI ------------------------------------------------------------
+  useCommand({
+    id: 'ai.settings', label: 'AI Settings…', category: 'ai',
+    run: () => openSettingsTab('ai'),
+  })
+  useCommand({
+    id: 'ai.mcp-servers', label: 'MCP Servers…', category: 'ai',
+    // McpServersSection is gated !isEnterprise — so is this command.
+    when: (ctx) => !ctx.isEnterprise,
+    run: () => openSettingsTab('ai'),
+  })
+  useCommand({
+    id: 'ai.memory', label: 'AI Memory…', category: 'ai',
+    run: () => openSettingsTab('ai'),
+  })
+  useCommand({
+    id: 'ai.toggle-chat', label: 'Toggle AI Chat Panel', category: 'ai',
+    accelerator: 'CmdOrCtrl+J',
+    // Same target state as view.toggle-ai-panel — having both
+    // surfaces is intentional ("AI" feels right for an AI menu).
+    run: () => setAiCopilotActive(prev => !prev),
+  })
+
+  // Window — Tabs submenu -----------------------------------------
+  useCommand({
+    id: 'window.close-all-tabs', label: 'Close All Tabs', category: 'window',
+    accelerator: 'CmdOrCtrl+Shift+W',
+    when: () => tabs.length > 0,
+    run: () => closeAllTabs(),
+  })
+  useCommand({
+    id: 'window.close-tabs-right', label: 'Close Tabs to the Right', category: 'window',
+    // Needs an active tab AND at least one tab to its right.
+    when: () => {
+      if (!activeTabId) return false
+      const i = tabs.findIndex(t => t.id === activeTabId)
+      return i >= 0 && i < tabs.length - 1
+    },
+    run: () => {
+      if (activeTabId) closeTabsToRight(activeTabId)
+    },
+  })
+  useCommand({
+    id: 'window.reopen-closed-tab', label: 'Reopen Closed Tab', category: 'window',
+    accelerator: 'CmdOrCtrl+Shift+T',
+    when: () => closedTabs.length > 0,
+    run: () => { void reopenLastClosedTab() },
+  })
+
+  // Help ----------------------------------------------------------
+  useCommand({
+    id: 'help.docs', label: 'NetStacks Documentation', category: 'help',
+    run: async () => {
       try {
         const { open } = await import('@tauri-apps/plugin-shell')
         await open('https://www.netstacks.net/docs')
@@ -5324,9 +5510,10 @@ def main(command: str = "show version"):
         window.open('https://www.netstacks.net/docs', '_blank')
       }
     },
-    onAbout: () => {
-      setShowAbout(true)
-    },
+  })
+  useCommand({
+    id: 'help.about', label: 'About NetStacks', category: 'help',
+    run: () => setShowAbout(true),
   })
 
   // Default context menu for areas without custom context menus
@@ -5807,14 +5994,14 @@ def main(command: str = "show version"):
       // will overwrite this via setContext when they mount/update.
       isDirty: false,
       activeSidebarView: activeView,
-      // Selection count — for now read from sessions selection. Other
-      // sidebar panels will need to push their own selection counts
-      // when commands gate on them.
-      selectionCount: 0,
+      // Sessions panel selection (drives e.g. session.connect-selected).
+      // Other sidebar panels with their own selection state will need to
+      // push to ActiveContext directly when their commands depend on it.
+      selectionCount: selectedSessionIds.length,
       isEnterprise,
     }
     useActiveContextStore.getState().setContext(next)
-  }, [activeTabId, tabs, activeView, isEnterprise])
+  }, [activeTabId, tabs, activeView, isEnterprise, selectedSessionIds])
 
   return (
     <AuthProvider>
