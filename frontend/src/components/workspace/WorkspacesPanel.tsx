@@ -3,6 +3,7 @@ import type { WorkspaceConfig } from '../../types/workspace'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
 import { confirmDialog } from '../ConfirmDialog'
+import { usePersistedState } from '../../hooks/usePersistedState'
 import ScriptsPanel from '../ScriptsPanel'
 import type { Script } from '../../api/scripts'
 
@@ -63,9 +64,18 @@ export default function WorkspacesPanel({
   onAIGenerate,
 }: WorkspacesPanelProps) {
   const [savedWorkspaces, setSavedWorkspaces] = useState<WorkspaceConfig[]>([])
-  const [pyEngineCollapsed, setPyEngineCollapsed] = useState(false)
-  const [wsCollapsed, setWsCollapsed] = useState(false)
-  const [explorerCollapsed, setExplorerCollapsed] = useState(false)
+  // Collapsed states persist across panel mount/unmount and app restarts
+  // — the panel was forgetting its layout every time the user switched
+  // away from the Workspaces sidebar view.
+  const [pyEngineCollapsed, setPyEngineCollapsed] = usePersistedState(
+    'workspacesPanel.pyEngineCollapsed', false,
+  )
+  const [wsCollapsed, setWsCollapsed] = usePersistedState(
+    'workspacesPanel.wsCollapsed', false,
+  )
+  const [explorerCollapsed, setExplorerCollapsed] = usePersistedState(
+    'workspacesPanel.explorerCollapsed', false,
+  )
 
   const load = useCallback(async () => {
     setSavedWorkspaces(await loadSavedWorkspaces())
