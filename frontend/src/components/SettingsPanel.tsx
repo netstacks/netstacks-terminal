@@ -21,6 +21,7 @@ import JumpHostsTab from './JumpHostsTab'
 import HostKeysTab from './HostKeysTab'
 import RecordingsTab from './RecordingsTab'
 import LayoutsTab from './LayoutsTab'
+import SessionLogsTab from './SessionLogsTab'
 import ApiResourcesTab from './ApiResourcesTab'
 import WorkspaceSettingsTab from './WorkspaceSettingsTab'
 import { useKeyboard } from '../hooks/useKeyboard'
@@ -44,7 +45,7 @@ interface Setting {
   options?: { label: string; value: string }[]
 }
 
-export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'quickCalls' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'hostKeys' | 'recordings' | 'layouts' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
+export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'quickCalls' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'hostKeys' | 'recordings' | 'layouts' | 'sessionLogs' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
 
 interface SettingsPanelProps {
   onSettingChange?: (id: string, value: unknown) => void
@@ -70,6 +71,7 @@ const TAB_SEARCH_INDEX: { tab: SettingsTab; label: string; keywords: string[] }[
   { tab: 'hostKeys', label: 'Trusted Hosts', keywords: ['host key', 'known hosts', 'ssh', 'tofu', 'trust', 'fingerprint', 'revoke', 'mitm'] },
   { tab: 'recordings', label: 'Recordings', keywords: ['recording', 'asciicast', 'session', 'capture', 'playback', 'replay'] },
   { tab: 'layouts', label: 'Layouts', keywords: ['layout', 'tab', 'split', 'arrangement', 'saved'] },
+  { tab: 'sessionLogs', label: 'Session Logs', keywords: ['log', 'session', 'capture', 'output', 'transcript'] },
   { tab: 'integrations', label: 'Integrations', keywords: ['integration', 'netbox', 'netdisco', 'librenms'] },
   { tab: 'apiResources', label: 'API Resources', keywords: ['api', 'resource', 'quick', 'action', 'endpoint', 'solarwinds', 'prtg', 'http', 'rest'] },
   { tab: 'troubleshooting', label: 'Troubleshooting', keywords: ['troubleshoot', 'recording', 'session', 'capture'] },
@@ -433,6 +435,14 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         )}
         {!isEnterprise && (
           <button
+            className={`settings-nav-item ${activeTab === 'sessionLogs' ? 'active' : ''}${matchingTabs && !matchingTabs.has('sessionLogs') ? ' dimmed' : ''}`}
+            onClick={() => setActiveTab('sessionLogs')}
+          >
+            Session Logs
+          </button>
+        )}
+        {!isEnterprise && (
+          <button
             className={`settings-nav-item ${activeTab === 'workspaces' ? 'active' : ''}${matchingTabs && !matchingTabs.has('workspaces') ? ' dimmed' : ''}`}
             onClick={() => setActiveTab('workspaces')}
           >
@@ -629,6 +639,9 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
         {/* Recordings library */}
         {activeTab === 'layouts' && (
           <LayoutsTab />
+        )}
+        {activeTab === 'sessionLogs' && (
+          <SessionLogsTab />
         )}
         {activeTab === 'recordings' && (
           <RecordingsTab />
