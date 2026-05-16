@@ -299,8 +299,14 @@ function SessionPanelContent({
   const [showRecent, setShowRecent] = usePersistedState('session-panel-show-recent', true);
   const [broadcastDialogOpen, setBroadcastDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  // Sub-tab state for Sessions/Groups navigation (Phase 25)
-  const [activeSubTab, setActiveSubTab] = useState<'sessions' | 'groups'>('sessions');
+  // Sub-tab state for Sessions/Groups navigation (Phase 25). Persisted
+  // so the user stays on Groups across panel re-mounts (tab switches,
+  // settings dialogs, hot reload in dev).
+  const [activeSubTab, setActiveSubTab] = usePersistedState<'sessions' | 'groups'>(
+    'session-panel-sub-tab',
+    'sessions',
+    { validate: (v): v is 'sessions' | 'groups' => v === 'sessions' || v === 'groups' },
+  );
   // Sort order: 'default' = folders first, 'reverse' = sessions first
   const [sortOrder, setSortOrder] = usePersistedState<'default' | 'reverse'>(
     'session-panel-sort-order',
