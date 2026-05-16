@@ -95,7 +95,7 @@ export default function WorkspacesPanel({
       </div>
 
       {!wsCollapsed && (
-        <div className="workspace-panel-list" style={{ flex: explorerCollapsed ? 1 : undefined }}>
+        <div className="workspace-panel-list" style={{ flex: explorerCollapsed ? 1 : undefined, maxHeight: explorerCollapsed ? 'none' : undefined }}>
           {savedWorkspaces.length === 0 && (
             <div className="workspace-panel-empty">
               <p>No saved workspaces</p>
