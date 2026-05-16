@@ -174,11 +174,14 @@ impl LspHost {
             plugin.runtime.clone()
         };
 
-        let workspace_path = match &workspace {
-            WorkspaceKey::Path(p) => Some(p.as_path()),
-            WorkspaceKey::Scratch(_) => None,
+        let workspace_path: Option<PathBuf> = match &workspace {
+            WorkspaceKey::Path(p) => Some(p.clone()),
+            WorkspaceKey::Scratch(uuid) => Some(
+                crate::lsp::scratch::ensure_scratch_dir(&self.data_dir, uuid)
+                    .map_err(|e| LspHostError::InvalidConfig(format!("scratch dir: {}", e)))?
+            ),
         };
-        let session = LspSession::spawn(&runtime, workspace_path)
+        let session = LspSession::spawn(&runtime, workspace_path.as_deref())
             .map_err(|e| LspHostError::InvalidConfig(format!("spawn LSP for {}: {}", plugin_id, e)))?;
         self.sessions.insert(key, session.clone());
         Ok(session)
@@ -250,8 +253,20 @@ impl LspHost {
             return Ok(()); // No-op for system path / bundled plugins
         };
 
-        // Kill any active sessions for this plugin
-        self.sessions.retain(|key, _| key.0 != plugin_id);
+        // Kill any active sessions for this plugin and clean up scratch dirs
+        let keys_to_remove: Vec<_> = self.sessions
+            .iter()
+            .filter(|e| e.key().0 == plugin_id)
+            .map(|e| e.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            if let Some((k, _)) = self.sessions.remove(&key) {
+                if let WorkspaceKey::Scratch(uuid) = &k.1 {
+                    crate::lsp::scratch::remove_scratch_dir(&self.data_dir, uuid);
+                }
+            }
+        }
 
         // Delete the plugin directory
         let plugin_dir = self.data_dir.join("lsp").join(plugin_id);
@@ -444,8 +459,12 @@ impl LspHost {
             .collect();
 
         for key in keys_to_remove {
-            if let Some((_, session)) = self.sessions.remove(&key) {
+            if let Some((k, session)) = self.sessions.remove(&key) {
                 session.shutdown().await;
+                // Clean up scratch dir if it was a scratch session
+                if let WorkspaceKey::Scratch(uuid) = &k.1 {
+                    crate::lsp::scratch::remove_scratch_dir(&self.data_dir, uuid);
+                }
             }
         }
 

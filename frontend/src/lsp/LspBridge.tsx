@@ -3,6 +3,7 @@ import type * as Monaco from 'monaco-editor'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import { useLspClient } from './useLspClient'
 import { LspInstallBanner } from './LspInstallBanner'
+import { EnterpriseUnavailableBanner } from './EnterpriseUnavailableBanner'
 
 interface LspBridgeProps {
   monaco: typeof Monaco
@@ -24,13 +25,15 @@ export const LspBridge: FC<LspBridgeProps> = (props) => {
   const { plugin, needsInstall, isEnterpriseUnavailable, refresh } = useLspClient(props)
   const [bannerDismissed, setBannerDismissed] = useState(false)
 
-  // Show banner if:
-  // - Plugin exists and needs install
-  // - Not in enterprise mode (where it's unavailable)
-  // - User hasn't dismissed it
-  const showBanner = needsInstall && !isEnterpriseUnavailable && !bannerDismissed && plugin
+  // Enterprise unavailable takes precedence over install banner
+  if (isEnterpriseUnavailable && plugin) {
+    return <EnterpriseUnavailableBanner plugin={plugin} />
+  }
 
-  return showBanner ? (
+  // Show install banner if plugin needs install and user hasn't dismissed it
+  const showInstallBanner = needsInstall && !bannerDismissed && plugin
+
+  return showInstallBanner ? (
     <LspInstallBanner
       plugin={plugin}
       onInstalled={() => {

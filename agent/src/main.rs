@@ -416,6 +416,8 @@ async fn async_main() {
     // Built-in plugins are added in Phase 4 (Pyrefly); v1 ships with an
     // empty registry plus whatever the user has added via Settings.
     let lsp_data_dir = tls::data_dir(); // Same base as TLS cert
+    // Sweep stale scratch directories older than 24h (Phase 6).
+    crate::lsp::scratch::sweep_stale_scratch_dirs(&lsp_data_dir);
     let lsp_host = Arc::new(LspHost::new(pool.clone(), lsp_data_dir));
     let lsp_state = LspState {
         host: lsp_host.clone(),

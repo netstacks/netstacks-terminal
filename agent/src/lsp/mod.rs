@@ -4,6 +4,7 @@ pub mod host;
 pub mod install;
 pub mod plugins;
 pub mod routes;
+pub mod scratch;
 pub mod session;
 pub mod test_cmd;
 pub mod types;

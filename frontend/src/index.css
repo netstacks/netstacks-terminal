@@ -139,6 +139,30 @@ body {
 .lsp-install-banner__actions button.primary {
   background: var(--color-accent);
   color: #fff;
+}
+
+.lsp-enterprise-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--color-bg-elevated, #2a2a30);
+  border-bottom: 1px solid var(--color-border, #3a3a40);
+  font-size: 13px;
+}
+.lsp-enterprise-banner__icon { font-size: 18px; }
+.lsp-enterprise-banner__body { display: flex; flex-direction: column; flex: 1; }
+.lsp-enterprise-banner__body strong { color: var(--color-text-primary); }
+.lsp-enterprise-banner__body span { color: var(--color-text-secondary); font-size: 12px; }
+.lsp-enterprise-banner button {
+  padding: 4px 10px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
   border-color: var(--color-accent);
 }
 .lsp-install-banner__actions button.primary:hover {
