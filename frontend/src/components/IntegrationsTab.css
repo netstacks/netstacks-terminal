@@ -386,3 +386,31 @@
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* P3-2: inline add/edit form for LibreNMS + Netdisco sections */
+.source-inline-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin: 8px 0;
+  background: var(--color-bg-tertiary, #1e1e1e);
+  border: 1px solid var(--color-border, #3c3c3c);
+  border-radius: 4px;
+}
+
+.source-inline-form input,
+.source-inline-form select {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border, #3c3c3c);
+  background: var(--color-bg-secondary, #252526);
+  color: var(--color-text-primary, #cccccc);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.source-inline-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}

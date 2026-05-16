@@ -5,12 +5,29 @@ import {
   deleteNetBoxSource,
   type NetBoxSource,
 } from '../api/netboxSources';
+import {
+  listLibreNmsSources,
+  createLibreNmsSource,
+  deleteLibreNmsSource,
+  testLibreNmsConnection,
+  type LibreNmsSource,
+} from '../api/librenms';
+import {
+  listNetdiscoSources,
+  createNetdiscoSource,
+  updateNetdiscoSource,
+  deleteNetdiscoSource,
+  testNetdiscoSource,
+  type NetdiscoSource,
+} from '../api/netdisco';
 import NetBoxSourceDialog from './NetBoxSourceDialog';
 import NetBoxImportDialog from './NetBoxImportDialog';
 import SmtpSettingsSection from './SmtpSettingsSection';
 import SecureCRTImportDialog from './SecureCRTImportDialog';
 import { downloadFile } from '../lib/formatters';
 import { showToast } from './Toast';
+import { confirmDialog } from './ConfirmDialog';
+import { useSubmitting } from '../hooks/useSubmitting';
 import './IntegrationsTab.css';
 
 // Icons
@@ -85,9 +102,29 @@ export default function IntegrationsTab() {
   // SecureCRT import dialog state
   const [secureCRTDialogOpen, setSecureCRTDialogOpen] = useState(false);
 
+  // LibreNMS state — add-only (backend has no PUT for librenms-sources yet)
+  const [libreSources, setLibreSources] = useState<LibreNmsSource[]>([]);
+  const [libreAddOpen, setLibreAddOpen] = useState(false);
+  const [libreForm, setLibreForm] = useState({ name: '', url: '', token: '' });
+  const libreSubmit = useSubmitting();
+
+  // Netdisco state — full CRUD (backend supports PUT)
+  const [netdiscoSources, setNetdiscoSources] = useState<NetdiscoSource[]>([]);
+  const [netdiscoEditingId, setNetdiscoEditingId] = useState<string | 'new' | null>(null);
+  const [netdiscoForm, setNetdiscoForm] = useState<{
+    name: string;
+    url: string;
+    authType: 'basic' | 'api_key';
+    username: string;
+    credential: string;
+  }>({ name: '', url: '', authType: 'api_key', username: '', credential: '' });
+  const netdiscoSubmit = useSubmitting();
+
   // Fetch sources on mount
   useEffect(() => {
     fetchSources();
+    fetchLibreSources();
+    fetchNetdiscoSources();
   }, []);
 
   const fetchSources = async () => {
@@ -102,6 +139,169 @@ export default function IntegrationsTab() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchLibreSources = async () => {
+    try {
+      setLibreSources(await listLibreNmsSources());
+    } catch (err) {
+      console.error('Failed to fetch LibreNMS sources:', err);
+    }
+  };
+
+  const fetchNetdiscoSources = async () => {
+    try {
+      setNetdiscoSources(await listNetdiscoSources());
+    } catch (err) {
+      console.error('Failed to fetch Netdisco sources:', err);
+    }
+  };
+
+  // === LibreNMS handlers ===
+
+  const handleLibreAdd = async () => {
+    if (!libreForm.name.trim() || !libreForm.url.trim() || !libreForm.token.trim()) {
+      showToast('Name, URL, and API token are required', 'warning');
+      return;
+    }
+    await libreSubmit.run(async () => {
+      try {
+        await createLibreNmsSource(libreForm.name.trim(), libreForm.url.trim(), libreForm.token.trim());
+        setLibreForm({ name: '', url: '', token: '' });
+        setLibreAddOpen(false);
+        await fetchLibreSources();
+        showToast('LibreNMS source added', 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to add LibreNMS source', 'error');
+      }
+    });
+  };
+
+  const handleLibreTest = async (s: LibreNmsSource) => {
+    showToast(`Testing ${s.name}…`, 'info');
+    try {
+      const result = await testLibreNmsConnection(s.id);
+      if (result.success) {
+        showToast(`${s.name}: ${result.message}${result.version ? ` (v${result.version})` : ''}`, 'success');
+      } else {
+        showToast(`${s.name}: ${result.message}`, 'error');
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Test failed', 'error');
+    }
+  };
+
+  const handleLibreDelete = async (s: LibreNmsSource) => {
+    const ok = await confirmDialog({
+      title: 'Delete LibreNMS source?',
+      body: <>Remove <strong>{s.name}</strong>? Topologies already discovered through it stay intact.</>,
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
+    await libreSubmit.run(async () => {
+      try {
+        await deleteLibreNmsSource(s.id);
+        await fetchLibreSources();
+        showToast('LibreNMS source deleted', 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Delete failed', 'error');
+      }
+    });
+  };
+
+  // === Netdisco handlers ===
+
+  const openNetdiscoAdd = () => {
+    setNetdiscoForm({ name: '', url: '', authType: 'api_key', username: '', credential: '' });
+    setNetdiscoEditingId('new');
+  };
+
+  const openNetdiscoEdit = (s: NetdiscoSource) => {
+    setNetdiscoForm({
+      name: s.name,
+      url: s.url,
+      authType: s.auth_type,
+      username: s.username ?? '',
+      credential: '', // never echoed
+    });
+    setNetdiscoEditingId(s.id);
+  };
+
+  const closeNetdiscoForm = () => {
+    setNetdiscoEditingId(null);
+  };
+
+  const handleNetdiscoSave = async () => {
+    if (!netdiscoForm.name.trim() || !netdiscoForm.url.trim()) {
+      showToast('Name and URL are required', 'warning');
+      return;
+    }
+    const isNew = netdiscoEditingId === 'new';
+    if (isNew && !netdiscoForm.credential.trim()) {
+      showToast('Credential (API key or password) is required for new sources', 'warning');
+      return;
+    }
+    if (netdiscoForm.authType === 'basic' && !netdiscoForm.username.trim()) {
+      showToast('Username is required for basic auth', 'warning');
+      return;
+    }
+    await netdiscoSubmit.run(async () => {
+      try {
+        if (isNew) {
+          await createNetdiscoSource({
+            name: netdiscoForm.name.trim(),
+            url: netdiscoForm.url.trim(),
+            auth_type: netdiscoForm.authType,
+            username: netdiscoForm.authType === 'basic' ? netdiscoForm.username.trim() : undefined,
+            credential: netdiscoForm.credential.trim(),
+          });
+        } else if (netdiscoEditingId) {
+          await updateNetdiscoSource(netdiscoEditingId, {
+            name: netdiscoForm.name.trim(),
+            url: netdiscoForm.url.trim(),
+            auth_type: netdiscoForm.authType,
+            username: netdiscoForm.authType === 'basic' ? netdiscoForm.username.trim() : null,
+            // Only send credential when the user typed a new one — empty means "keep stored value"
+            ...(netdiscoForm.credential.trim() ? { credential: netdiscoForm.credential.trim() } : {}),
+          });
+        }
+        await fetchNetdiscoSources();
+        closeNetdiscoForm();
+        showToast(`Netdisco source ${isNew ? 'added' : 'updated'}`, 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Save failed', 'error');
+      }
+    });
+  };
+
+  const handleNetdiscoTest = async (s: NetdiscoSource) => {
+    showToast(`Testing ${s.name}…`, 'info');
+    try {
+      const result = await testNetdiscoSource(s.id);
+      showToast(`${s.name}: ${result.message}`, result.success ? 'success' : 'error');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Test failed', 'error');
+    }
+  };
+
+  const handleNetdiscoDelete = async (s: NetdiscoSource) => {
+    const ok = await confirmDialog({
+      title: 'Delete Netdisco source?',
+      body: <>Remove <strong>{s.name}</strong>? Topologies already discovered through it stay intact.</>,
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
+    await netdiscoSubmit.run(async () => {
+      try {
+        await deleteNetdiscoSource(s.id);
+        await fetchNetdiscoSources();
+        showToast('Netdisco source deleted', 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Delete failed', 'error');
+      }
+    });
   };
 
   const handleAddSource = () => {
@@ -284,6 +484,220 @@ export default function IntegrationsTab() {
             <span>Add NetBox Source</span>
           </button>
         </div>
+      </section>
+
+      {/* LibreNMS Sources Section */}
+      <section className="integrations-section">
+        <div className="section-header">
+          <h3>LIBRENMS SOURCES</h3>
+        </div>
+
+        <div className="sources-list">
+          {libreSources.length === 0 && !libreAddOpen ? (
+            <div className="sources-empty">
+              <p>No LibreNMS sources configured.</p>
+              <p>Add a LibreNMS instance to pull devices and CDP/LLDP links into topology discovery.</p>
+            </div>
+          ) : (
+            libreSources.map((s) => (
+              <div key={s.id} className="source-item">
+                <div className="source-status"><span className="status-dot inactive" /></div>
+                <div className="source-info">
+                  <div className="source-header">
+                    <span className="source-name">{s.name}</span>
+                  </div>
+                  <div className="source-details">
+                    <span className="source-url">{s.url}</span>
+                  </div>
+                </div>
+                <div className="source-actions">
+                  <button
+                    className="source-action-btn"
+                    onClick={() => handleLibreTest(s)}
+                    title="Test connection"
+                  >
+                    <span>Test</span>
+                  </button>
+                  <button
+                    className="source-action-btn delete"
+                    onClick={() => handleLibreDelete(s)}
+                    title="Delete"
+                    disabled={libreSubmit.submitting}
+                  >
+                    {Icons.trash}
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {libreAddOpen && (
+          <div className="source-inline-form">
+            <input
+              type="text"
+              placeholder="Name (e.g. Prod LibreNMS)"
+              value={libreForm.name}
+              onChange={(e) => setLibreForm({ ...libreForm, name: e.target.value })}
+              disabled={libreSubmit.submitting}
+            />
+            <input
+              type="url"
+              placeholder="URL (e.g. https://librenms.example.com)"
+              value={libreForm.url}
+              onChange={(e) => setLibreForm({ ...libreForm, url: e.target.value })}
+              disabled={libreSubmit.submitting}
+            />
+            <input
+              type="password"
+              placeholder="API token"
+              value={libreForm.token}
+              onChange={(e) => setLibreForm({ ...libreForm, token: e.target.value })}
+              autoComplete="new-password"
+              disabled={libreSubmit.submitting}
+            />
+            <div className="source-inline-form-actions">
+              <button
+                className="btn-secondary"
+                onClick={() => { setLibreAddOpen(false); setLibreForm({ name: '', url: '', token: '' }); }}
+                disabled={libreSubmit.submitting}
+              >
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={handleLibreAdd} disabled={libreSubmit.submitting}>
+                {libreSubmit.submitting ? 'Adding…' : 'Add'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!libreAddOpen && (
+          <div className="section-footer">
+            <button className="btn-add-source" onClick={() => setLibreAddOpen(true)}>
+              {Icons.plus}
+              <span>Add LibreNMS Source</span>
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* Netdisco Sources Section */}
+      <section className="integrations-section">
+        <div className="section-header">
+          <h3>NETDISCO SOURCES</h3>
+        </div>
+
+        <div className="sources-list">
+          {netdiscoSources.length === 0 && netdiscoEditingId === null ? (
+            <div className="sources-empty">
+              <p>No Netdisco sources configured.</p>
+              <p>Add a Netdisco instance for L2 topology and neighbor discovery.</p>
+            </div>
+          ) : (
+            netdiscoSources.map((s) => (
+              <div key={s.id} className="source-item">
+                <div className="source-status"><span className="status-dot inactive" /></div>
+                <div className="source-info">
+                  <div className="source-header">
+                    <span className="source-name">{s.name}</span>
+                  </div>
+                  <div className="source-details">
+                    <span className="source-url">{s.url}</span>
+                    <span className="source-separator">|</span>
+                    <span>{s.auth_type === 'basic' ? `basic (${s.username || 'no user'})` : 'api key'}</span>
+                  </div>
+                </div>
+                <div className="source-actions">
+                  <button className="source-action-btn" onClick={() => handleNetdiscoTest(s)} title="Test connection">
+                    <span>Test</span>
+                  </button>
+                  <button
+                    className="source-action-btn"
+                    onClick={() => openNetdiscoEdit(s)}
+                    title="Edit"
+                    disabled={netdiscoSubmit.submitting}
+                  >
+                    {Icons.edit}
+                    <span>Edit</span>
+                  </button>
+                  <button
+                    className="source-action-btn delete"
+                    onClick={() => handleNetdiscoDelete(s)}
+                    title="Delete"
+                    disabled={netdiscoSubmit.submitting}
+                  >
+                    {Icons.trash}
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {netdiscoEditingId !== null && (
+          <div className="source-inline-form">
+            <input
+              type="text"
+              placeholder="Name (e.g. Prod Netdisco)"
+              value={netdiscoForm.name}
+              onChange={(e) => setNetdiscoForm({ ...netdiscoForm, name: e.target.value })}
+              disabled={netdiscoSubmit.submitting}
+            />
+            <input
+              type="url"
+              placeholder="URL (e.g. https://netdisco.example.com)"
+              value={netdiscoForm.url}
+              onChange={(e) => setNetdiscoForm({ ...netdiscoForm, url: e.target.value })}
+              disabled={netdiscoSubmit.submitting}
+            />
+            <select
+              value={netdiscoForm.authType}
+              onChange={(e) => setNetdiscoForm({ ...netdiscoForm, authType: e.target.value as 'basic' | 'api_key' })}
+              disabled={netdiscoSubmit.submitting}
+            >
+              <option value="api_key">API key</option>
+              <option value="basic">Basic auth (username + password)</option>
+            </select>
+            {netdiscoForm.authType === 'basic' && (
+              <input
+                type="text"
+                placeholder="Username"
+                value={netdiscoForm.username}
+                onChange={(e) => setNetdiscoForm({ ...netdiscoForm, username: e.target.value })}
+                disabled={netdiscoSubmit.submitting}
+              />
+            )}
+            <input
+              type="password"
+              placeholder={netdiscoEditingId === 'new' ? 'API key / password' : 'New API key / password (leave blank to keep current)'}
+              value={netdiscoForm.credential}
+              onChange={(e) => setNetdiscoForm({ ...netdiscoForm, credential: e.target.value })}
+              autoComplete="new-password"
+              disabled={netdiscoSubmit.submitting}
+            />
+            <div className="source-inline-form-actions">
+              <button className="btn-secondary" onClick={closeNetdiscoForm} disabled={netdiscoSubmit.submitting}>
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={handleNetdiscoSave} disabled={netdiscoSubmit.submitting}>
+                {netdiscoSubmit.submitting
+                  ? 'Saving…'
+                  : netdiscoEditingId === 'new'
+                  ? 'Add'
+                  : 'Save'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {netdiscoEditingId === null && (
+          <div className="section-footer">
+            <button className="btn-add-source" onClick={openNetdiscoAdd}>
+              {Icons.plus}
+              <span>Add Netdisco Source</span>
+            </button>
+          </div>
+        )}
       </section>
 
       {/* SMTP Email Settings Section */}
