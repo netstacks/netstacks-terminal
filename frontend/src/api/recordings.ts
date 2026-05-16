@@ -26,10 +26,26 @@ export interface UpdateRecording {
   duration_ms?: number;
 }
 
+// List every recording (newest first per backend ordering).
+export async function listRecordings(): Promise<Recording[]> {
+  const { data } = await getClient().http.get('/recordings');
+  return Array.isArray(data) ? data : [];
+}
+
 // Get a single recording
 export async function getRecording(id: string): Promise<Recording> {
   const { data } = await getClient().http.get(`/recordings/${id}`);
   return data;
+}
+
+// Delete a recording (removes the DB row and the on-disk asciicast file).
+export async function deleteRecording(id: string): Promise<void> {
+  await getClient().http.delete(`/recordings/${id}`);
+}
+
+// Rename a recording in-place (no other fields).
+export async function renameRecording(id: string, name: string): Promise<Recording> {
+  return updateRecording(id, { name });
 }
 
 // Create a new recording
