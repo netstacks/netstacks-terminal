@@ -34,7 +34,6 @@ export function LanguageFeaturesTab() {
 
   return (
     <div className="language-features-tab">
-      <h3>Language Features</h3>
       <p className="settings-description">
         Configure LSP language servers for syntax intelligence in Monaco editors.
       </p>
