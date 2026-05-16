@@ -14,6 +14,7 @@ import {
   exportFolder,
   importSessions,
   listHistory,
+  deleteHistory,
   moveSession,
   moveFolder,
   type Session,
@@ -1599,6 +1600,23 @@ function SessionPanelContent({
                               {session?.name || `${entry.username}@${entry.host}`}
                             </span>
                             <span className="recent-time">{formatRelativeTime(entry.connected_at)}</span>
+                            <button
+                              className="recent-clear-btn"
+                              title="Remove from history"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                // Optimistic remove; if delete fails the next
+                                // fetchData() re-adds it.
+                                setRecentConnections(prev => prev.filter(r => r.id !== entry.id));
+                                try {
+                                  await deleteHistory(entry.id);
+                                } catch (err) {
+                                  console.error('Failed to delete history entry:', err);
+                                }
+                              }}
+                            >
+                              &times;
+                            </button>
                           </div>
                         );
                       })}
