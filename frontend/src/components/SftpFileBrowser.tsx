@@ -121,6 +121,12 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   // Tracks IDs cancelled mid-flight. Reads are synchronous, unlike `transfers`
   // state which is stale inside async closures captured before the cancel.
   const cancelledTransferIdsRef = useRef<Set<string>>(new Set());
+  // Per-transfer AbortControllers so cancel actually interrupts the
+  // in-flight axios request instead of just flagging it for post-hoc
+  // discard. The previous implementation only checked the cancel flag
+  // AFTER the full file had downloaded — useless for the multi-GB case
+  // pause/resume was meant to address.
+  const transferAbortRef = useRef<Map<string, AbortController>>(new Map());
 
   const sftp = sftpId || sessionId;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -225,9 +231,17 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
     [navigateTo]
   );
 
-  // Handle transfer cancellation
+  // Handle transfer cancellation — abort the in-flight axios request
+  // (if any) AND flag the id so any late-resolving handler skips its
+  // success path. Keeps the historical cancelledTransferIdsRef as a
+  // belt-and-suspenders against AbortController not firing fast enough.
   const handleCancelTransfer = useCallback((id: string) => {
     cancelledTransferIdsRef.current.add(id);
+    const ac = transferAbortRef.current.get(id);
+    if (ac) {
+      ac.abort();
+      transferAbortRef.current.delete(id);
+    }
     setTransfers(prev => prev.map(t =>
       t.id === id && (t.status === 'active' || t.status === 'pending')
         ? { ...t, status: 'cancelled' as const }
@@ -276,8 +290,11 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       }));
     }, 200);
 
+    const ac = new AbortController();
+    transferAbortRef.current.set(transferId, ac);
+
     try {
-      const blob = await sftpDownload(sftp, entry.path);
+      const blob = await sftpDownload(sftp, entry.path, ac.signal);
 
       // Check cancellation via ref (latest state, not the stale closure)
       if (cancelledTransferIdsRef.current.has(transferId)) {
@@ -294,14 +311,20 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       // Trigger browser download
       downloadFile(blob, entry.name);
     } catch (err) {
-      setTransfers(prev => prev.map(t =>
-        t.id === transferId
-          ? { ...t, status: 'error' as const, error: err instanceof Error ? err.message : 'Download failed' }
-          : t
-      ));
-      setError(err instanceof Error ? err.message : 'Download failed');
+      // Abort is the user explicitly cancelling — already reflected in
+      // state by handleCancelTransfer, no error toast needed.
+      const isAbort = (err as Error).name === 'AbortError' || (err as Error).name === 'CanceledError';
+      if (!isAbort) {
+        setTransfers(prev => prev.map(t =>
+          t.id === transferId
+            ? { ...t, status: 'error' as const, error: err instanceof Error ? err.message : 'Download failed' }
+            : t
+        ));
+        setError(err instanceof Error ? err.message : 'Download failed');
+      }
     } finally {
       clearInterval(progressInterval);
+      transferAbortRef.current.delete(transferId);
     }
   };
 
@@ -364,9 +387,12 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         }));
       }, 200);
 
+      const ac = new AbortController();
+      transferAbortRef.current.set(transfer.id, ac);
+
       try {
         const buffer = await file.arrayBuffer();
-        await sftpUpload(sftp, transfer.path, buffer);
+        await sftpUpload(sftp, transfer.path, buffer, ac.signal);
 
         if (cancelledTransferIdsRef.current.has(transfer.id)) {
           continue;
@@ -379,14 +405,18 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
             : t
         ));
       } catch (err) {
-        setTransfers(prev => prev.map(t =>
-          t.id === transfer.id
-            ? { ...t, status: 'error' as const, error: err instanceof Error ? err.message : 'Upload failed' }
-            : t
-        ));
-        setError(err instanceof Error ? err.message : 'Upload failed');
+        const isAbort = (err as Error).name === 'AbortError' || (err as Error).name === 'CanceledError';
+        if (!isAbort) {
+          setTransfers(prev => prev.map(t =>
+            t.id === transfer.id
+              ? { ...t, status: 'error' as const, error: err instanceof Error ? err.message : 'Upload failed' }
+              : t
+          ));
+          setError(err instanceof Error ? err.message : 'Upload failed');
+        }
       } finally {
         clearInterval(progressInterval);
+        transferAbortRef.current.delete(transfer.id);
       }
     }
 

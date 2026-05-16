@@ -65,35 +65,48 @@ export async function sftpLs(
   }
 }
 
-// Download a file
+// Download a file. `signal` lets the caller cancel a large transfer
+// mid-stream — without it the cancel-flag was only checked after the
+// full blob landed, which defeats the purpose for multi-GB files.
 export async function sftpDownload(
   sftpId: string,
-  path: string
+  path: string,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   try {
     const { data } = await getClient().http.get(`/sftp/${sftpId}/download`, {
       params: { path },
       responseType: 'blob',
+      signal,
     });
     return data;
   } catch (err: unknown) {
+    if ((err as Error).name === 'AbortError' || (err as Error).name === 'CanceledError') {
+      throw err;
+    }
     const axiosErr = err as { response?: { data?: { error?: string } } };
     throw new Error(axiosErr.response?.data?.error || 'Failed to download file');
   }
 }
 
-// Upload a file
+// Upload a file. Same signal semantics as sftpDownload — abort mid-upload
+// closes the request rather than waiting for the full body to flush.
 export async function sftpUpload(
   sftpId: string,
   path: string,
-  data: Blob | ArrayBuffer
+  data: Blob | ArrayBuffer,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
     await getClient().http.post(`/sftp/${sftpId}/upload`, data, {
       params: { path },
       headers: { 'Content-Type': 'application/octet-stream' },
+      signal,
     });
   } catch (err: unknown) {
+    if ((err as Error).name === 'AbortError' || (err as Error).name === 'CanceledError') {
+      throw err;
+    }
     const axiosErr = err as { response?: { data?: { error?: string } } };
     throw new Error(axiosErr.response?.data?.error || 'Failed to upload file');
   }
