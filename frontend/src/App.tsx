@@ -5499,6 +5499,76 @@ def main(command: str = "show version"):
     run: () => { void reopenLastClosedTab() },
   })
 
+  // Navigation — Cmd+1..9 jumps to the Nth tab. Standard browser /
+  // terminal-emulator convention; these don't appear in the native menu
+  // (would clutter Window) but they're available via Palette and the
+  // global keyboard accelerator.
+  useCommand({
+    id: 'navigation.go-to-tab-1', label: 'Go to Tab 1', category: 'navigation',
+    accelerator: 'CmdOrCtrl+1',
+    when: () => tabs.length >= 1,
+    run: () => { if (tabs[0]) setActiveTabId(tabs[0].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-tab-2', label: 'Go to Tab 2', category: 'navigation',
+    accelerator: 'CmdOrCtrl+2',
+    when: () => tabs.length >= 2,
+    run: () => { if (tabs[1]) setActiveTabId(tabs[1].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-tab-3', label: 'Go to Tab 3', category: 'navigation',
+    accelerator: 'CmdOrCtrl+3',
+    when: () => tabs.length >= 3,
+    run: () => { if (tabs[2]) setActiveTabId(tabs[2].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-tab-4', label: 'Go to Tab 4', category: 'navigation',
+    accelerator: 'CmdOrCtrl+4',
+    when: () => tabs.length >= 4,
+    run: () => { if (tabs[3]) setActiveTabId(tabs[3].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-tab-5', label: 'Go to Tab 5', category: 'navigation',
+    accelerator: 'CmdOrCtrl+5',
+    when: () => tabs.length >= 5,
+    run: () => { if (tabs[4]) setActiveTabId(tabs[4].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-last-tab', label: 'Go to Last Tab', category: 'navigation',
+    accelerator: 'CmdOrCtrl+9',
+    when: () => tabs.length > 0,
+    run: () => { if (tabs.length > 0) setActiveTabId(tabs[tabs.length - 1].id) },
+  })
+
+  // Sidebar view switchers — equivalents to clicking the activity bar.
+  // Available from the Palette so users can keyboard-navigate the app
+  // without leaving home row.
+  useCommand({
+    id: 'navigation.view-sessions', label: isEnterprise ? 'Show Devices' : 'Show Sessions',
+    category: 'navigation',
+    run: () => { setActiveView('sessions'); setSidebarOpen(true) },
+  })
+  useCommand({
+    id: 'navigation.view-topology', label: 'Show Topology', category: 'navigation',
+    run: () => { setActiveView('topology'); setSidebarOpen(true) },
+  })
+  useCommand({
+    id: 'navigation.view-docs', label: 'Show Documents', category: 'navigation',
+    run: () => { setActiveView('docs'); setSidebarOpen(true) },
+  })
+  useCommand({
+    id: 'navigation.view-changes', label: 'Show MOPs', category: 'navigation',
+    run: () => { setActiveView('changes'); setSidebarOpen(true) },
+  })
+  useCommand({
+    id: 'navigation.view-agents', label: 'Show Agents', category: 'navigation',
+    run: () => { setActiveView('agents'); setSidebarOpen(true) },
+  })
+  useCommand({
+    id: 'navigation.view-workspaces', label: 'Show Workspaces', category: 'navigation',
+    run: () => { setActiveView('workspaces'); setSidebarOpen(true) },
+  })
+
   // Help ----------------------------------------------------------
   useCommand({
     id: 'help.docs', label: 'NetStacks Documentation', category: 'help',
