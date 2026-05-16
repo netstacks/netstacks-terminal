@@ -4,13 +4,42 @@ import type { AiToolType } from '../types/workspace'
 import GitAccountsSettingsTab from './GitAccountsSettingsTab'
 import { LanguageFeaturesTab } from './settings/LanguageFeaturesTab'
 
-interface WorkspaceDefaults {
+export interface WorkspaceDefaults {
   defaultAiTool: AiToolType
   defaultCustomCommand: string
   defaultLaunchArgs: string
   autoLaunchAi: boolean
   defaultTerminalPanelHeight: number
   defaultFileExplorerWidth: number
+}
+
+// localStorage key shared with WorkspaceNewDialog so the dialog picks
+// up the same values the Settings tab writes. Backend /settings/
+// workspace-defaults doesn't exist yet — when it lands, the same payload
+// is also written there for cross-device sync.
+export const WORKSPACE_DEFAULTS_LS_KEY = 'netstacks.workspaceDefaults'
+
+export const DEFAULT_WORKSPACE_DEFAULTS: WorkspaceDefaults = {
+  defaultAiTool: 'claude',
+  defaultCustomCommand: '',
+  defaultLaunchArgs: '',
+  autoLaunchAi: true,
+  defaultTerminalPanelHeight: 250,
+  defaultFileExplorerWidth: 220,
+}
+
+/** Read the saved workspace defaults from localStorage. Returns the
+ *  hardcoded defaults if nothing's saved or the stored value is corrupt. */
+export function loadWorkspaceDefaults(): WorkspaceDefaults {
+  if (typeof window === 'undefined') return DEFAULT_WORKSPACE_DEFAULTS
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_DEFAULTS_LS_KEY)
+    if (!raw) return DEFAULT_WORKSPACE_DEFAULTS
+    const parsed = JSON.parse(raw) as Partial<WorkspaceDefaults>
+    return { ...DEFAULT_WORKSPACE_DEFAULTS, ...parsed }
+  } catch {
+    return DEFAULT_WORKSPACE_DEFAULTS
+  }
 }
 
 const AI_TOOLS: { value: AiToolType; label: string }[] = [
@@ -24,32 +53,44 @@ const AI_TOOLS: { value: AiToolType; label: string }[] = [
 ]
 
 export default function WorkspaceSettingsTab() {
-  const [defaults, setDefaults] = useState<WorkspaceDefaults>({
-    defaultAiTool: 'claude',
-    defaultCustomCommand: '',
-    defaultLaunchArgs: '',
-    autoLaunchAi: true,
-    defaultTerminalPanelHeight: 250,
-    defaultFileExplorerWidth: 220,
-  })
+  // Source of truth: localStorage. Backend /settings/workspace-defaults
+  // doesn't exist yet, so reading from there before was a no-op and the
+  // catch silently swallowed the 404 — settings appeared to save but
+  // never actually persisted. Reading from localStorage on mount means
+  // saved tweaks survive reloads even without backend support.
+  const [defaults, setDefaults] = useState<WorkspaceDefaults>(() => loadWorkspaceDefaults())
   const [wsSection, setWsSection] = useState(true)
   const [gitSection, setGitSection] = useState(true)
   const [langSection, setLangSection] = useState(true)
 
   useEffect(() => {
+    // Best-effort: if the backend ever gains the endpoint, prefer the
+    // server-stored value (for cross-device sync). Until then this 404s
+    // and we keep the localStorage value already loaded above.
     getClient().http.get('/settings/workspace-defaults').then(({ data }) => {
       if (data && typeof data === 'object') {
-        setDefaults(prev => ({ ...prev, ...data }))
+        const merged = { ...loadWorkspaceDefaults(), ...data }
+        setDefaults(merged)
+        try {
+          window.localStorage.setItem(WORKSPACE_DEFAULTS_LS_KEY, JSON.stringify(merged))
+        } catch { /* full disk etc. — fine to skip */ }
       }
     }).catch(() => {})
   }, [])
 
   const saveDefaults = useCallback(async (updated: WorkspaceDefaults) => {
     setDefaults(updated)
+    // Write to localStorage first so the value survives even if the
+    // backend round-trip fails (which it currently always does — see
+    // class comment above).
+    try {
+      window.localStorage.setItem(WORKSPACE_DEFAULTS_LS_KEY, JSON.stringify(updated))
+    } catch { /* fail silently — in-memory state still works */ }
     try {
       await getClient().http.put('/settings/workspace-defaults', updated)
     } catch {
-      // Settings endpoint may not exist yet — save locally
+      // Backend endpoint may not exist yet — localStorage is the
+      // source of truth for now. No toast/error: this is expected.
     }
   }, [])
 

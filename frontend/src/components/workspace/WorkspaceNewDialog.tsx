@@ -6,6 +6,7 @@ import { LocalFileOps } from '../../lib/fileOps'
 import { getClient } from '../../api/client'
 import { showToast } from '../Toast'
 import { useOverlayDismiss } from '../../hooks/useOverlayDismiss'
+import { loadWorkspaceDefaults } from '../WorkspaceSettingsTab'
 import type { WorkspaceConfig, AiToolType } from '../../types/workspace'
 
 type DialogMode = 'local' | 'remote' | 'clone'
@@ -53,6 +54,11 @@ export default function WorkspaceNewDialog({
   const [customCommand, setCustomCommand] = useState('')
   const [launchArgs, setLaunchArgs] = useState('')
   const [autoLaunch, setAutoLaunch] = useState(true)
+  // Track which fields the user has manually touched so loading saved
+  // defaults doesn't clobber a value they're already typing.
+  const [touched, setTouched] = useState<{ aiTool: boolean; customCommand: boolean; launchArgs: boolean; autoLaunch: boolean }>({
+    aiTool: false, customCommand: false, launchArgs: false, autoLaunch: false,
+  })
   const [gitCheck, setGitCheck] = useState<{
     checking: boolean
     isRepo: boolean
@@ -60,6 +66,24 @@ export default function WorkspaceNewDialog({
     isEmpty: boolean
   } | null>(null)
   const [initGit, setInitGit] = useState(false)
+
+  // Apply saved workspace defaults from Settings → Workspaces. Was an
+  // open bug: the settings tab persisted defaultAiTool /
+  // defaultLaunchArgs / autoLaunchAi / defaultCustomCommand but this
+  // dialog never read them, so every new workspace started with hard-
+  // coded 'claude' / empty / true regardless of what the user saved.
+  // Reads from localStorage synchronously (no flash of hardcoded
+  // defaults) — see loadWorkspaceDefaults().
+  useEffect(() => {
+    const d = loadWorkspaceDefaults()
+    if (!touched.aiTool) setAiTool(d.defaultAiTool)
+    if (!touched.customCommand) setCustomCommand(d.defaultCustomCommand)
+    if (!touched.launchArgs) setLaunchArgs(d.defaultLaunchArgs)
+    if (!touched.autoLaunch) setAutoLaunch(d.autoLaunchAi)
+    // Run once on mount; later defaults edits don't retroactively rewrite
+    // an open dialog. touched is read inside but should not retrigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleBrowse = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false })
@@ -321,7 +345,10 @@ export default function WorkspaceNewDialog({
           <select
             className="workspace-new-dialog-select"
             value={aiTool}
-            onChange={e => setAiTool(e.target.value as AiToolType)}
+            onChange={e => {
+              setAiTool(e.target.value as AiToolType)
+              setTouched(t => ({ ...t, aiTool: true }))
+            }}
           >
             {AI_TOOLS.map(t => (
               <option key={t.value} value={t.value}>{t.label}</option>
@@ -335,7 +362,10 @@ export default function WorkspaceNewDialog({
             <input
               className="workspace-new-dialog-input"
               value={customCommand}
-              onChange={e => setCustomCommand(e.target.value)}
+              onChange={e => {
+                setCustomCommand(e.target.value)
+                setTouched(t => ({ ...t, customCommand: true }))
+              }}
               placeholder="e.g. aider --model claude-3.5-sonnet"
             />
           </div>
@@ -347,7 +377,10 @@ export default function WorkspaceNewDialog({
             <input
               className="workspace-new-dialog-input"
               value={launchArgs}
-              onChange={e => setLaunchArgs(e.target.value)}
+              onChange={e => {
+                setLaunchArgs(e.target.value)
+                setTouched(t => ({ ...t, launchArgs: true }))
+              }}
               placeholder="e.g. --dangerously-skip-permissions --continue"
             />
             <span style={{ fontSize: 10, color: 'var(--color-text-secondary)', marginTop: 2, display: 'block' }}>
@@ -358,7 +391,14 @@ export default function WorkspaceNewDialog({
 
         <div className="workspace-new-dialog-field">
           <label className="workspace-new-dialog-checkbox">
-            <input type="checkbox" checked={autoLaunch} onChange={e => setAutoLaunch(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={autoLaunch}
+              onChange={e => {
+                setAutoLaunch(e.target.checked)
+                setTouched(t => ({ ...t, autoLaunch: true }))
+              }}
+            />
             Auto-launch AI tool on open
           </label>
         </div>
