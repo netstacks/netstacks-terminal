@@ -1159,9 +1159,18 @@ function AppContent() {
     }
   }, [isWorkspaceTabActive])
 
-  // Auto-collapse sidebar when unpinned and clicking main area
-  const handleMainAreaClick = useCallback(() => {
+  // Auto-collapse sidebar when unpinned and clicking main area.
+  // React events bubble through portal trees, so a click on a file in the
+  // workspace file explorer (portaled INTO the sidebar DOM but still a
+  // React child of the workspace tab inside main-area) would close the
+  // sidebar. Check the DOM target — if it's inside .sidebar or
+  // .activity-bar, leave the sidebar open.
+  const handleMainAreaClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!sidebarPinned && sidebarOpen) {
+      const target = e.target as HTMLElement
+      if (target.closest('.sidebar') || target.closest('.activity-bar')) {
+        return
+      }
       setSidebarOpen(false)
     }
   }, [sidebarPinned, sidebarOpen])
