@@ -5,6 +5,7 @@ import type { editor } from 'monaco-editor'
 import type { FileOps } from '../../types/workspace'
 import { showToast } from '../Toast'
 import { useMonacoCopilot } from '../../hooks/useMonacoCopilot'
+import { useEditorFontSettings } from '../../hooks/useEditorFontSettings'
 import MonacoCopilotWidget from '../MonacoCopilotWidget'
 import { LspBridge } from '../../lsp/LspBridge'
 
@@ -68,6 +69,7 @@ export default function WorkspaceCodeEditor({
   onRunFileRef.current = onRunFile
 
   const copilot = useMonacoCopilot()
+  const editorFont = useEditorFontSettings()
 
   const ext = filePath.split('.').pop()?.toLowerCase() || ''
   const language = EXT_TO_LANG[ext] || 'plaintext'
@@ -179,7 +181,8 @@ export default function WorkspaceCodeEditor({
         onMount={handleEditorMount}
         options={{
           minimap: { enabled: false },
-          fontSize: 13,
+          // fontSize / fontFamily honor Settings → Appearance.
+          ...editorFont,
           lineNumbers: 'on',
           scrollBeyondLastLine: false,
           automaticLayout: true,

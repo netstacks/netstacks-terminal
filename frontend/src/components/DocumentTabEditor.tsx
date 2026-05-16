@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import Editor from '@monaco-editor/react';
+import { useEditorFontSettings } from '../hooks/useEditorFontSettings';
 import './DocumentTabEditor.css';
 import CsvViewer from './CsvViewer';
 import JsonViewer from './JsonViewer';
@@ -118,6 +119,7 @@ function countLines(content: string): number {
 
 function DocumentTabEditor({ document, tabId, onSave, onModified }: DocumentTabEditorProps) {
   const copilot = useMonacoCopilot();
+  const editorFont = useEditorFontSettings();
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(document.content);
   const [isSaving, setIsSaving] = useState(false);
@@ -296,7 +298,8 @@ ${editContent}`;
               minimap: { enabled: false },
               lineNumbers: 'on',
               wordWrap: 'on',
-              fontSize: 14,
+              // fontSize / fontFamily honor Settings → Appearance.
+              ...editorFont,
               scrollBeyondLastLine: false,
               automaticLayout: true,
               padding: { top: 12, bottom: 12 },

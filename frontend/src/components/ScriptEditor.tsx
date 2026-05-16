@@ -4,6 +4,7 @@ import * as monaco from 'monaco-editor';
 import type { editor } from 'monaco-editor';
 import './ScriptEditor.css';
 import { useMonacoCopilot } from '../hooks/useMonacoCopilot';
+import { useEditorFontSettings } from '../hooks/useEditorFontSettings';
 import MonacoCopilotWidget from './MonacoCopilotWidget';
 import AITabInput from './AITabInput';
 import { LspBridge } from '../lsp/LspBridge';
@@ -148,6 +149,7 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
 
   // Cmd+I inline AI copilot
   const copilot = useMonacoCopilot();
+  const editorFont = useEditorFontSettings();
 
   // LSP client state
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -875,7 +877,8 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
                 lineNumbers: 'on',
                 wordWrap: 'on',
                 tabSize: 4,
-                fontSize: 14,
+                // fontSize / fontFamily honor Settings → Appearance.
+                ...editorFont,
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
                 padding: { top: 12, bottom: 12 },

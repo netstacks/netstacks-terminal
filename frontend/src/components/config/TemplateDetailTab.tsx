@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import './TemplateDetailTab.css'
 import { useMonacoCopilot } from '../../hooks/useMonacoCopilot'
+import { useEditorFontSettings } from '../../hooks/useEditorFontSettings'
 import MonacoCopilotWidget from '../MonacoCopilotWidget'
 import './VariableInputs.css'
 import VariableInputs from './VariableInputs'
@@ -59,6 +60,7 @@ export default function TemplateDetailTab({
 
   // Editor state
   const copilot = useMonacoCopilot()
+  const editorFont = useEditorFontSettings()
   const [source, setSource] = useState('')
   const [readOnly, setReadOnly] = useState(!isCreate)
   const [dirty, setDirty] = useState(false)
@@ -413,7 +415,8 @@ export default function TemplateDetailTab({
                 lineNumbers: 'on',
                 wordWrap: 'on',
                 tabSize: 2,
-                fontSize: 13,
+                // fontSize / fontFamily honor Settings → Appearance.
+                ...editorFont,
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
                 padding: { top: 8, bottom: 8 },
@@ -494,7 +497,10 @@ export default function TemplateDetailTab({
                           minimap: { enabled: false },
                           lineNumbers: 'off',
                           wordWrap: 'on',
-                          fontSize: 12,
+                          // Preview pane — keep one step smaller than the
+                          // main editor so the eye reads it as secondary.
+                          fontSize: Math.max(8, editorFont.fontSize - 1),
+                          fontFamily: editorFont.fontFamily,
                           scrollBeyondLastLine: false,
                           automaticLayout: true,
                           padding: { top: 4, bottom: 4 },
@@ -575,7 +581,11 @@ export default function TemplateDetailTab({
                                   minimap: { enabled: false },
                                   renderSideBySide: false,
                                   wordWrap: 'on',
-                                  fontSize: 11,
+                                  // Diff strip — two steps smaller than
+                                  // the main editor to fit dense per-line
+                                  // change context.
+                                  fontSize: Math.max(8, editorFont.fontSize - 2),
+                                  fontFamily: editorFont.fontFamily,
                                   scrollBeyondLastLine: false,
                                   automaticLayout: true,
                                 }}
