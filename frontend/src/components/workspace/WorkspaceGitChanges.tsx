@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useLayoutEffect } from 'react'
 import type { GitOps, GitFileStatus, GitBranchInfo, GitStatusCode } from '../../types/workspace'
 import { showToast } from '../Toast'
 import { sendChatMessage } from '../../api/ai'
@@ -34,9 +34,22 @@ export default function WorkspaceGitChanges({
   const [isCommitting, setIsCommitting] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
+  const commitInputRef = useRef<HTMLTextAreaElement | null>(null)
 
   const staged = statuses.filter(s => s.staged)
   const unstaged = statuses.filter(s => !s.staged && s.status !== 'clean')
+
+  // Auto-grow the commit message textarea to fit its content. Caps at 50% of
+  // the parent panel's height so the Commit buttons stay reachable.
+  useLayoutEffect(() => {
+    const el = commitInputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    const parentHeight = el.parentElement?.parentElement?.clientHeight ?? 600
+    const max = Math.max(120, Math.floor(parentHeight * 0.5))
+    el.style.height = `${Math.min(el.scrollHeight, max)}px`
+    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
+  }, [commitMsg])
 
   const handleStageAll = useCallback(async () => {
     try {
@@ -227,6 +240,7 @@ export default function WorkspaceGitChanges({
       <div className="workspace-git-commit-form">
         <div style={{ position: 'relative' }}>
           <textarea
+            ref={commitInputRef}
             className="workspace-git-commit-input"
             placeholder={
               generating
@@ -238,6 +252,7 @@ export default function WorkspaceGitChanges({
             value={commitMsg}
             onChange={e => setCommitMsg(e.target.value)}
             rows={3}
+            style={{ resize: 'none', minHeight: '3.5em' }}
             disabled={generating || !hasChanges}
             onKeyDown={async e => {
               if (e.key === 'Tab' && !e.shiftKey && !commitMsg.trim() && hasChanges) {
