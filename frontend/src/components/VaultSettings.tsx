@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { getVaultStatus, setMasterPassword, unlockVault } from '../api/sessions'
 import {
   getApiKey,
@@ -50,6 +50,19 @@ export default function VaultSettings() {
   })
   const [editingKey, setEditingKey] = useState<ApiKeyType | null>(null)
   const [editingValue, setEditingValue] = useState('')
+
+  // Reveal-key state — auto-hides after 15s so the value doesn't sit on
+  // screen indefinitely if the user walks away from their machine. One
+  // pending hide timer at a time; revealing a different key cancels the
+  // previous timer and clears the previous value.
+  const [revealedKey, setRevealedKey] = useState<{ type: ApiKeyType; value: string } | null>(null)
+  const revealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (revealTimerRef.current) clearTimeout(revealTimerRef.current)
+    }
+  }, [])
 
   // Touch ID state
   const [biometric, setBiometric] = useState<BiometricStatus | null>(null)
@@ -333,6 +346,34 @@ export default function VaultSettings() {
         setError(`Failed to save ${API_KEY_LABELS[keyType]} API key`)
       }
     })
+  }
+
+  const handleRevealApiKey = async (keyType: ApiKeyType) => {
+    // Toggle off if this key is already revealed.
+    if (revealedKey?.type === keyType) {
+      if (revealTimerRef.current) clearTimeout(revealTimerRef.current)
+      revealTimerRef.current = null
+      setRevealedKey(null)
+      return
+    }
+    setError(null)
+    setSuccess(null)
+    try {
+      const result = await getApiKey(keyType)
+      if (!result?.value) {
+        setError(`No ${API_KEY_LABELS[keyType]} key is stored.`)
+        return
+      }
+      if (revealTimerRef.current) clearTimeout(revealTimerRef.current)
+      setRevealedKey({ type: keyType, value: result.value })
+      // Auto-hide after 15s so the key doesn't sit on screen.
+      revealTimerRef.current = setTimeout(() => {
+        setRevealedKey(null)
+        revealTimerRef.current = null
+      }, 15000)
+    } catch {
+      setError(`Failed to read ${API_KEY_LABELS[keyType]} key from vault.`)
+    }
   }
 
   const handleDeleteApiKey = async (keyType: ApiKeyType) => {
@@ -714,6 +755,33 @@ export default function VaultSettings() {
                       <div className="api-key-actions">
                         {isStored ? (
                           <>
+                            {revealedKey?.type === keyType && (
+                              <code
+                                className="api-key-revealed"
+                                style={{
+                                  fontFamily: 'var(--font-mono, monospace)',
+                                  fontSize: '11px',
+                                  padding: '2px 6px',
+                                  background: 'var(--color-bg-subtle, rgba(255,255,255,0.05))',
+                                  borderRadius: '3px',
+                                  maxWidth: '320px',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title={`${revealedKey.value} — auto-hides in 15s`}
+                              >
+                                {revealedKey.value}
+                              </code>
+                            )}
+                            <button
+                              className="btn-secondary"
+                              onClick={() => handleRevealApiKey(keyType)}
+                              disabled={submitting}
+                              title={revealedKey?.type === keyType ? 'Hide key' : 'Show stored key (auto-hides in 15s)'}
+                            >
+                              {revealedKey?.type === keyType ? 'Hide' : 'Reveal'}
+                            </button>
                             <button
                               className="btn-update"
                               onClick={() => handleStartEdit(keyType)}
