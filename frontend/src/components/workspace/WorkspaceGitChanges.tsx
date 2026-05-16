@@ -3,6 +3,7 @@ import type { GitOps, GitFileStatus, GitBranchInfo, GitStatusCode } from '../../
 import { showToast } from '../Toast'
 import ContextMenu from '../ContextMenu'
 import type { MenuItem } from '../ContextMenu'
+import AITabInput from '../AITabInput'
 
 interface WorkspaceGitChangesProps {
   gitOps: GitOps
@@ -31,7 +32,6 @@ export default function WorkspaceGitChanges({
 }: WorkspaceGitChangesProps) {
   const [commitMsg, setCommitMsg] = useState('')
   const [isCommitting, setIsCommitting] = useState(false)
-  const [generating, setGenerating] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ position: { x: number; y: number }; items: MenuItem[] } | null>(null)
 
   const staged = statuses.filter(s => s.staged)
@@ -118,18 +118,6 @@ export default function WorkspaceGitChanges({
     }
     setContextMenu({ position: { x: e.clientX, y: e.clientY }, items })
   }, [onViewDiff, handleStageFile, handleUnstageFile, handleRevertFile])
-
-  const handleGenerate = useCallback(async () => {
-    setGenerating(true)
-    try {
-      const msg = await gitOps.generateCommitMessage()
-      setCommitMsg(msg)
-    } catch (err) {
-      showToast(`Generate failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-    } finally {
-      setGenerating(false)
-    }
-  }, [gitOps])
 
   const handleCommit = useCallback(async (andPush: boolean) => {
     if (!commitMsg.trim()) return
@@ -228,11 +216,17 @@ export default function WorkspaceGitChanges({
       )}
 
       <div className="workspace-git-commit-form">
-        <textarea
+        <AITabInput
+          as="textarea"
           className="workspace-git-commit-input"
-          placeholder="Commit message..."
+          placeholder="Commit message... (Tab to generate)"
           value={commitMsg}
           onChange={e => setCommitMsg(e.target.value)}
+          aiField="commit message"
+          aiPlaceholder="Git commit message summarizing the staged changes"
+          aiContext={{ files: staged.map(s => `${s.status}: ${s.path}`).join(', '), branch: branch?.name }}
+          onAIValue={setCommitMsg}
+          rows={3}
           onKeyDown={e => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canCommit) {
               e.preventDefault()
@@ -240,17 +234,6 @@ export default function WorkspaceGitChanges({
             }
           }}
         />
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
-          <button
-            className="workspace-git-changes-section-btn"
-            onClick={handleGenerate}
-            disabled={generating || !hasChanges}
-            title="Generate commit message from changes"
-            style={{ fontSize: 11 }}
-          >
-            {generating ? 'Generating...' : '✨ Generate'}
-          </button>
-        </div>
         <div className="workspace-git-commit-actions">
           <button
             className="workspace-git-commit-btn primary"
