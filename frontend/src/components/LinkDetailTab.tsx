@@ -1046,7 +1046,7 @@ export default function LinkDetailTab({
             sourceHost,
             targetHost,
           },
-        } as any,
+        },
         provider,
         model,
       });

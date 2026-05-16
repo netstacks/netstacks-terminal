@@ -624,8 +624,9 @@ export default function InstanceDetailTab({
   }, [allDevices, deviceSearch])
 
   // Deployment procedure checks
-  const hasProcedure = !!(stack?.deployment_procedure as any)
-  const procedureRequiresMop = hasProcedure && (stack?.deployment_procedure as any)?.require_mop
+  const procedure = stack?.deployment_procedure
+  const hasProcedure = !!procedure
+  const procedureRequiresMop = !!procedure?.require_mop
 
   if (loading) {
     return (
@@ -1103,9 +1104,9 @@ export default function InstanceDetailTab({
             <div className="instance-deploy-dialog-body">
               <p className="instance-deploy-dialog-summary">
                 This stack has a deployment procedure with{' '}
-                {(stack.deployment_procedure as any)?.pre_checks?.length || 0} pre-checks,{' '}
-                {(stack.deployment_procedure as any)?.post_checks?.length || 0} post-checks.
-                On failure: {(stack.deployment_procedure as any)?.on_post_check_failure || 'pause'}.
+                {stack.deployment_procedure?.pre_checks?.length || 0} pre-checks,{' '}
+                {stack.deployment_procedure?.post_checks?.length || 0} post-checks.
+                On failure: {stack.deployment_procedure?.on_post_check_failure || 'pause'}.
               </p>
               <div className="instance-deploy-dialog-field">
                 <label>Control Mode</label>

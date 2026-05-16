@@ -4922,6 +4922,10 @@ def main(command: str = "show version"):
 
       // Open directly with saved credential
       const newId = `enterprise-ssh-${session.id}-${Date.now()}`
+      // Enterprise sessions don't carry profile_id — credential_override_id
+      // is the auth handle on the controller side. The (session as any).profile_id
+      // cast that used to live here always read undefined; drop the field
+      // rather than launder a non-existent value.
       const newTab: Tab = {
         id: newId,
         type: 'terminal',
@@ -4930,7 +4934,6 @@ def main(command: str = "show version"):
         cliFlavor: session.cli_flavor,
         status: 'connecting',
         sessionId: session.id,
-        profileId: (session as any).profile_id,
         enterpriseCredentialId: session.credential_override_id,
         enterpriseSessionDefinitionId: session.id,
         enterpriseTargetHost: session.host,

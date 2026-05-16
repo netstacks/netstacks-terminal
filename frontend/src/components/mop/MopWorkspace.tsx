@@ -1968,7 +1968,7 @@ RULES:
       const device = selectedDeviceList.find(d => d.id === testDevice);
       setTestHistory(prev => [{
         device: testDevice,
-        deviceName: device ? ('name' in device ? device.name : (device as any).name || testDevice) : testDevice,
+        deviceName: device?.name || testDevice,
         command: testCommand.trim(),
         output: result.output,
         success: result.success,

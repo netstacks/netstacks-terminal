@@ -16,11 +16,26 @@ export interface ConfigTemplate {
   created_by: string; created_at: string; updated_at: string;
 }
 
+/**
+ * Optional deployment-procedure block on a ConfigStack. All fields
+ * optional because the controller may return a sparse object or null,
+ * but the keys callers actually read are listed here so consumers don't
+ * have to cast through `Record<string, any>`.
+ */
+export interface DeploymentProcedure {
+  require_mop?: boolean;
+  pre_checks?: unknown[];
+  post_checks?: unknown[];
+  on_post_check_failure?: string;
+  // Extra fields the controller may send are accepted but not narrowed.
+  [extra: string]: unknown;
+}
+
 export interface ConfigStack {
   id: string; org_id: string; name: string; description: string | null;
   atomic: boolean; services: ConfigStackService[];
   variable_config?: Record<string, any>;
-  deployment_procedure?: Record<string, any> | null;
+  deployment_procedure?: DeploymentProcedure | null;
   created_by: string;
   created_at: string; updated_at: string;
 }

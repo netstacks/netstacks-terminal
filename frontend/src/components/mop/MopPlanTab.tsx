@@ -1150,7 +1150,7 @@ export default function MopPlanTab(props: MopPlanTabProps) {
               <option value="">Select device...</option>
               {selectedDeviceList.map(d => (
                 <option key={d.id} value={d.id}>
-                  {'name' in d ? d.name : (d as any).name} — {'host' in d ? d.host : (d as any).host}
+                  {d.name} — {d.host}
                 </option>
               ))}
             </select>

@@ -262,9 +262,8 @@ export default function MopDevicesTab(props: MopDevicesTabProps) {
                     ? enterpriseDevices.find(d => d.id === deviceId)
                     : sessions.find(s => s.id === deviceId);
                   if (!device) return null;
-                  const deviceName = isEnterprise
-                    ? (device as any).name
-                    : (device as any).name;
+                  // Both DeviceSummary and Session expose `name` directly.
+                  const deviceName = device.name;
                   return (
                     <tr key={deviceId}>
                       <td className="mop-matrix-device-cell">

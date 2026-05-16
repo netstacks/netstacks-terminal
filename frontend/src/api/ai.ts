@@ -402,6 +402,13 @@ export interface SessionContextEntry {
 }
 
 // Enhanced AI context passed with chat requests
+export interface LinkContext {
+  sourceDevice: string;
+  targetDevice: string;
+  sourceHost?: string;
+  targetHost?: string;
+}
+
 export interface AiContext {
   selectedText?: string;
   sessionName?: string;
@@ -411,6 +418,7 @@ export interface AiContext {
   cliFlavor?: CliFlavor;
   documents?: DocumentContext;
   sessionContext?: SessionContextEntry[]; // Phase 14: Historical context for this device
+  link?: LinkContext; // LinkDetailTab AI enrichment uses this
 }
 
 // Chat request payload

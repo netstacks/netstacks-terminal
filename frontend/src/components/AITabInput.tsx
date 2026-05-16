@@ -123,16 +123,25 @@ Generate a smart, concise value for this field. Respond with ONLY the value — 
 
   return (
     <div className={`ai-tab-wrapper ${focused ? 'focused' : ''} ${loading ? 'loading' : ''}`}>
+      {/*
+        The three casts below paper over a real TS-vs-React limitation:
+        Tag is a runtime-dynamic component ('input' | 'textarea') so TS
+        can't unify the ref / onChange / extra-props types of the two
+        intrinsics. Both happen to accept the same JSX at runtime; the
+        casts let us hand them through without copy-pasting the JSX
+        twice. Don't try to "fix" these without first writing the
+        type-safe alternative — there isn't a clean one in current React.
+      */}
       <Tag
-        ref={inputRef as any}
+        ref={inputRef as React.Ref<HTMLInputElement & HTMLTextAreaElement>}
         value={value}
-        onChange={onChange as any}
+        onChange={onChange as React.ChangeEventHandler<HTMLInputElement & HTMLTextAreaElement>}
         onKeyDown={handleKeyDown}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         className={`ai-tab-input ${className || ''}`}
         rows={as === 'textarea' ? rows : undefined}
-        {...(rest as any)}
+        {...(rest as React.HTMLAttributes<HTMLInputElement & HTMLTextAreaElement>)}
       />
       {showHint && (
         <span className="ai-tab-badge">TAB ✨</span>

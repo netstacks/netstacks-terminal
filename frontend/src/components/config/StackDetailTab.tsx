@@ -131,8 +131,7 @@ export default function StackDetailTab({
       setVariableApiConfig(apiCfg)
 
       // Initialize deployment settings
-      const dp = (s as any).deployment_procedure as Record<string, any> | null
-      setRequireMop(dp?.require_mop ?? false)
+      setRequireMop(s.deployment_procedure?.require_mop ?? false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load stack')
     } finally {

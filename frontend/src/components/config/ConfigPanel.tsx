@@ -270,7 +270,7 @@ export default function ConfigPanel({ onOpenTemplateTab, onOpenStackTab, onOpenI
           name: s.name,
           order: i,
         })),
-        variable_config: (stack as any).variable_config || {},
+        variable_config: stack.variable_config || {},
       });
       // Open the new stack tab
       onOpenStackTab?.(created.id, created.name);

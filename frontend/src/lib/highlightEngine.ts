@@ -492,20 +492,29 @@ export class HighlightEngine {
       if (!marker) return
 
       const colorRule = entry.highlightRule || entry.detectionRule
-      const decorationOptions: Parameters<typeof this.terminal.registerDecoration>[0] = {
+      // xterm.js's IDecorationOptions doesn't declare foregroundColor /
+      // backgroundColor / overviewRulerOptions in its public types, but
+      // the renderer reads them — see xterm-addon-decoration source.
+      // Widen the options shape locally to add them safely.
+      type ExtendedDecorationOptions = Parameters<typeof this.terminal.registerDecoration>[0] & {
+        foregroundColor?: string
+        backgroundColor?: string
+        overviewRulerOptions?: { color: string }
+      }
+      const decorationOptions: ExtendedDecorationOptions = {
         marker,
         x: entry.startColumn,
         width: entry.endColumn - entry.startColumn,
       }
 
       if (colorRule?.foreground) {
-        (decorationOptions as any).foregroundColor = colorRule.foreground
+        decorationOptions.foregroundColor = colorRule.foreground
       }
       if (colorRule?.background) {
-        (decorationOptions as any).backgroundColor = colorRule.background
+        decorationOptions.backgroundColor = colorRule.background
       }
       if (colorRule?.foreground || colorRule?.background) {
-        (decorationOptions as any).overviewRulerOptions = {
+        decorationOptions.overviewRulerOptions = {
           color: colorRule.foreground || colorRule.background || '#ffffff',
         }
       }
