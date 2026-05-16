@@ -12,6 +12,9 @@ import type {
   ExecuteInlineRequest,
 } from '../types/quickAction'
 
+// Re-export types for convenience
+export type { QuickAction, QuickActionResult } from '../types/quickAction'
+
 // === API Resources ===
 
 export async function listApiResources(): Promise<ApiResource[]> {

@@ -59,6 +59,8 @@ import SessionSettingsDialog from './components/SessionSettingsDialog'
 import ShareSessionDialog from './components/ShareSessionDialog'
 import StatusBar from './components/StatusBar'
 import type { QuickPrompt } from './api/quickPrompts'
+import type { QuickAction } from './api/quickActions'
+import { executeQuickAction } from './api/quickActions'
 import type { GlobalSnippet } from './api/snippets'
 import { useMultiSend } from './hooks/useMultiSend'
 import { useKeyboard } from './hooks/useKeyboard'
@@ -1571,6 +1573,23 @@ update_topology_device(
   // Handle manage snippets - opens settings to snippets tab
   const handleManageSnippets = useCallback(() => {
     openSettingsTab('snippets')
+  }, [openSettingsTab])
+
+  // Handle quick call selection from status bar - execute the call
+  const handleQuickCallSelect = useCallback(async (call: QuickAction) => {
+    try {
+      const result = await executeQuickAction(call.id, {})
+      showToast(`Executed "${call.name}"`, 'success')
+      // v1: no result-tab opening (matches the Settings-side limitation noted in 5e7e18d)
+      console.debug('[quick-call]', result)
+    } catch (e) {
+      showToast(`Failed: ${e instanceof Error ? e.message : String(e)}`, 'error')
+    }
+  }, [])
+
+  // Handle manage quick calls - opens settings to quick calls tab
+  const handleManageQuickCalls = useCallback(() => {
+    openSettingsTab('quickCalls')
   }, [openSettingsTab])
 
   // Handle manage tunnels - opens settings to tunnels tab
@@ -6673,6 +6692,8 @@ def main(command: str = "show version"):
         onManagePrompts={handleManagePrompts}
         onSnippetSelect={handleSnippetSelect}
         onManageSnippets={handleManageSnippets}
+        onQuickCallSelect={handleQuickCallSelect}
+        onManageQuickCalls={handleManageQuickCalls}
         onManageTunnels={handleManageTunnels}
         troubleshootingSession={troubleshootingSession}
         onStartTroubleshootingSession={() => setTroubleshootingDialogOpen(true)}

@@ -16,6 +16,7 @@ export interface StatusBarSettings {
   showQuickLook: boolean;
   showSnippets: boolean;
   showQuickPrompts: boolean;
+  showQuickCalls: boolean;
   showAIButton: boolean;
   showCommandPalette: boolean;
   showSettings: boolean;
@@ -44,6 +45,7 @@ export const DEFAULT_STATUS_BAR_SETTINGS: StatusBarSettings = {
   showQuickLook: true,
   showSnippets: true,
   showQuickPrompts: true,
+  showQuickCalls: true,
   showAIButton: true,
   showCommandPalette: true,
   showSettings: true,

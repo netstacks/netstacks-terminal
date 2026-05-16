@@ -197,6 +197,19 @@ export default function StatusBarSettingsPanel() {
           </label>
         </div>
 
+        <div className="status-bar-settings-row compact">
+          <span>Quick Calls</span>
+          <label className="status-bar-settings-toggle">
+            <input
+              type="checkbox"
+              checked={settings.showQuickCalls}
+              onChange={() => toggleFeature('showQuickCalls')}
+              disabled={!settings.enabled}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </div>
+
       </div>
 
       {/* Style Options */}

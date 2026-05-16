@@ -12,6 +12,8 @@ import QuickPromptsMenu from './QuickPromptsMenu'
 import type { QuickPrompt } from '../api/quickPrompts'
 import SnippetsMenu from './SnippetsMenu'
 import type { GlobalSnippet } from '../api/snippets'
+import QuickCallsMenu from './QuickCallsMenu'
+import type { QuickAction } from '../api/quickActions'
 import TroubleshootingIndicator from './TroubleshootingIndicator'
 import { useTunnelStore } from '../stores/tunnelStore'
 import TunnelPopover from './TunnelPopover'
@@ -123,6 +125,11 @@ const Icons = {
       <line x1="8" y1="16" x2="12" y2="16" />
     </svg>
   ),
+  quickActions: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="14" height="14">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </svg>
+  ),
 }
 
 function formatTimeRemaining(expiresAt: string | null): string {
@@ -172,6 +179,10 @@ export interface StatusBarProps {
   onSnippetSelect?: (snippet: GlobalSnippet) => void
   /** Callback when "Manage Snippets" is clicked */
   onManageSnippets?: () => void
+  /** Callback when a quick call is selected from the menu */
+  onQuickCallSelect?: (call: QuickAction) => void
+  /** Callback when "Manage Quick Calls" is clicked */
+  onManageQuickCalls?: () => void
   /** Callback when "Manage Tunnels..." is clicked in tunnel popover */
   onManageTunnels?: () => void
   /** Callback when MCP indicator is clicked (opens settings to MCP section) */
@@ -201,6 +212,8 @@ export default function StatusBar({
   onManagePrompts,
   onSnippetSelect,
   onManageSnippets,
+  onQuickCallSelect,
+  onManageQuickCalls,
   troubleshootingSession,
   onStartTroubleshootingSession,
   onEndTroubleshootingSession,
@@ -219,6 +232,7 @@ export default function StatusBar({
   const [settings, setSettings] = useState<StatusBarSettings>(() => loadStatusBarSettings())
   const [showPromptsMenu, setShowPromptsMenu] = useState(false)
   const [showSnippetsMenu, setShowSnippetsMenu] = useState(false)
+  const [showQuickCallsMenu, setShowQuickCallsMenu] = useState(false)
   const [showTunnelPopover, setShowTunnelPopover] = useState(false)
   const tunnels = useTunnelStore(state => state.tunnels)
   const getActiveTunnelCount = useTunnelStore(state => state.getActiveTunnelCount)
@@ -765,6 +779,31 @@ export default function StatusBar({
                 onManagePrompts={() => {
                   onManagePrompts()
                   setShowPromptsMenu(false)
+                }}
+              />
+            )}
+          </div>
+        )}
+        {settings.showQuickCalls && hasFeature('local_custom_prompts') && (
+          <div style={{ position: 'relative' }}>
+            <button
+              className="status-bar-item status-bar-item-btn"
+              onClick={() => setShowQuickCallsMenu(!showQuickCallsMenu)}
+              title="Quick Calls"
+            >
+              {Icons.quickActions}
+              <span>Calls</span>
+            </button>
+            {showQuickCallsMenu && onQuickCallSelect && onManageQuickCalls && (
+              <QuickCallsMenu
+                onClose={() => setShowQuickCallsMenu(false)}
+                onSelectCall={(call) => {
+                  onQuickCallSelect(call)
+                  setShowQuickCallsMenu(false)
+                }}
+                onManageQuickCalls={() => {
+                  onManageQuickCalls()
+                  setShowQuickCallsMenu(false)
                 }}
               />
             )}
