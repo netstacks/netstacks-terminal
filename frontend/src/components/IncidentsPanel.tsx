@@ -17,6 +17,7 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastFetchAt, setLastFetchAt] = useState<number | null>(null);
   const isMountedRef = useRef(true);
   const intervalRef = useRef<number | null>(null);
 
@@ -33,6 +34,7 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
       setPage(1);
       setError(null);
       setIsLoading(false);
+      setLastFetchAt(Date.now());
     } catch (err) {
       if (!isMountedRef.current) return;
 
@@ -127,6 +129,33 @@ export const IncidentsPanel: React.FC<IncidentsPanelProps> = ({ onOpenIncidentTa
     <div className="incidents-panel">
       <div className="incidents-panel-header">
         <div className="incidents-panel-title">Incidents</div>
+        <span
+          className="incidents-panel-live-indicator"
+          title={lastFetchAt
+            ? `Auto-refreshing every 15s · last update ${new Date(lastFetchAt).toLocaleTimeString()}`
+            : 'Auto-refreshing every 15s'}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            marginLeft: 8,
+            fontSize: 10,
+            color: 'var(--color-text-secondary, #999)',
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: error ? '#f44336' : '#4caf50',
+              animation: error ? 'none' : 'alerts-panel-live-pulse 2s ease-in-out infinite',
+            }}
+            aria-hidden="true"
+          />
+          Live
+        </span>
         <div className="incidents-panel-header-actions">
           <button
             className="incidents-panel-create-btn"

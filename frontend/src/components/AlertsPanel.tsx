@@ -20,6 +20,7 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<FilterState>('all');
+  const [lastFetchAt, setLastFetchAt] = useState<number | null>(null);
   const isMountedRef = useRef(true);
   const intervalRef = useRef<number | null>(null);
 
@@ -46,6 +47,7 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
       setPage(1);
       setError(null);
       setIsLoading(false);
+      setLastFetchAt(Date.now());
     } catch (err) {
       if (!isMountedRef.current) return;
 
@@ -169,6 +171,33 @@ export const AlertsPanel: React.FC<AlertsPanelProps> = ({ onOpenAlertTab }) => {
     <div className="alerts-panel">
       <div className="alerts-panel-header">
         <div className="alerts-panel-title">Alerts</div>
+        <span
+          className="alerts-panel-live-indicator"
+          title={lastFetchAt
+            ? `Auto-refreshing every 15s · last update ${new Date(lastFetchAt).toLocaleTimeString()}`
+            : 'Auto-refreshing every 15s'}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            marginLeft: 8,
+            fontSize: 10,
+            color: 'var(--color-text-secondary, #999)',
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: error ? '#f44336' : '#4caf50',
+              animation: error ? 'none' : 'alerts-panel-live-pulse 2s ease-in-out infinite',
+            }}
+            aria-hidden="true"
+          />
+          Live
+        </span>
         <button
           className="alerts-panel-refresh-btn"
           onClick={handleRefresh}
