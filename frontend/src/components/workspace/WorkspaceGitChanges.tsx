@@ -216,24 +216,25 @@ export default function WorkspaceGitChanges({
       )}
 
       <div className="workspace-git-commit-form">
-        <AITabInput
-          as="textarea"
-          className="workspace-git-commit-input"
-          placeholder="Commit message... (Tab to generate)"
-          value={commitMsg}
-          onChange={e => setCommitMsg(e.target.value)}
-          aiField="commit message"
-          aiPlaceholder="Git commit message summarizing the staged changes"
-          aiContext={{ files: staged.map(s => `${s.status}: ${s.path}`).join(', '), branch: branch?.name }}
-          onAIValue={setCommitMsg}
-          rows={3}
-          onKeyDown={e => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canCommit) {
-              e.preventDefault()
-              handleCommit(false)
-            }
-          }}
-        />
+        <div onKeyDown={e => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canCommit) {
+            e.preventDefault()
+            handleCommit(false)
+          }
+        }}>
+          <AITabInput
+            as="textarea"
+            className="workspace-git-commit-input"
+            placeholder="Commit message... (Tab to generate)"
+            value={commitMsg}
+            onChange={e => setCommitMsg(e.target.value)}
+            aiField="commit message"
+            aiPlaceholder="Git commit message summarizing the staged changes"
+            aiContext={{ files: staged.map(s => `${s.status}: ${s.path}`).join(', '), branch: branch?.name }}
+            onAIValue={setCommitMsg}
+            rows={3}
+          />
+        </div>
         <div className="workspace-git-commit-actions">
           <button
             className="workspace-git-commit-btn primary"
