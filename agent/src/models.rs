@@ -2683,6 +2683,7 @@ pub struct MopExecution {
     pub status: ExecutionStatus,
     pub current_phase: Option<String>,
     pub ai_analysis: Option<String>,
+    pub ai_autonomy_level: Option<i32>,
     pub on_failure: String,
     pub pause_after_pre_checks: bool,
     pub pause_after_changes: bool,
@@ -2718,6 +2719,8 @@ pub struct NewMopExecution {
     #[serde(default = "default_on_failure")]
     pub on_failure: String,
     #[serde(default)]
+    pub ai_autonomy_level: Option<i32>,
+    #[serde(default)]
     pub pause_after_pre_checks: Option<bool>,
     #[serde(default)]
     pub pause_after_changes: Option<bool>,
@@ -2735,6 +2738,11 @@ pub struct UpdateMopExecution {
     pub status: Option<ExecutionStatus>,
     pub current_phase: Option<Option<String>>,
     pub ai_analysis: Option<Option<String>>,
+    pub ai_autonomy_level: Option<Option<i32>>,
+    pub on_failure: Option<String>,
+    pub pause_after_pre_checks: Option<bool>,
+    pub pause_after_changes: Option<bool>,
+    pub pause_after_post_checks: Option<bool>,
     pub started_at: Option<Option<DateTime<Utc>>>,
     pub completed_at: Option<Option<DateTime<Utc>>>,
     pub last_checkpoint: Option<Option<String>>,
@@ -2755,6 +2763,7 @@ impl MopExecution {
             status: ExecutionStatus::Pending,
             current_phase: None,
             ai_analysis: None,
+            ai_autonomy_level: data.ai_autonomy_level,
             on_failure: data.on_failure,
             pause_after_pre_checks: data.pause_after_pre_checks.unwrap_or(true),
             pause_after_changes: data.pause_after_changes.unwrap_or(true),
@@ -2790,6 +2799,21 @@ impl MopExecution {
         if let Some(analysis) = update.ai_analysis {
             self.ai_analysis = analysis;
         }
+        if let Some(autonomy) = update.ai_autonomy_level {
+            self.ai_autonomy_level = autonomy;
+        }
+        if let Some(on_failure) = update.on_failure {
+            self.on_failure = on_failure;
+        }
+        if let Some(pause) = update.pause_after_pre_checks {
+            self.pause_after_pre_checks = pause;
+        }
+        if let Some(pause) = update.pause_after_changes {
+            self.pause_after_changes = pause;
+        }
+        if let Some(pause) = update.pause_after_post_checks {
+            self.pause_after_post_checks = pause;
+        }
         if let Some(started) = update.started_at {
             self.started_at = started;
         }
@@ -2814,10 +2838,10 @@ pub struct MopExecutionDevice {
     pub device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_host: Option<String>,
+    /// Display name — always populated. Falls back to device_id/session_id/"unknown".
+    pub device_name: String,
+    /// Display host — always populated. Falls back to device_id/session_id/"unknown".
+    pub device_host: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub device_order: i32,
@@ -2866,14 +2890,21 @@ pub struct UpdateMopExecutionDevice {
 
 impl MopExecutionDevice {
     pub fn new(data: NewMopExecutionDevice) -> Self {
+        let fallback = data
+            .device_id
+            .clone()
+            .or_else(|| data.session_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let device_name = data.device_name.clone().unwrap_or_else(|| fallback.clone());
+        let device_host = data.device_host.clone().unwrap_or(fallback);
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             execution_id: data.execution_id,
             session_id: data.session_id,
             device_id: data.device_id,
             credential_id: data.credential_id,
-            device_name: data.device_name,
-            device_host: data.device_host,
+            device_name,
+            device_host,
             role: data.role,
             device_order: data.device_order,
             status: DeviceExecutionStatus::Pending,

@@ -7030,9 +7030,9 @@ pub async fn analyze_mop_execution(
         let session = if let Some(ref sid) = device.session_id {
             state.provider.get_session(sid).await.ok()
         } else { None };
-        let session_name = session.map(|s| s.name)
-            .or_else(|| device.device_name.clone())
-            .unwrap_or_else(|| device.session_id.clone().unwrap_or_else(|| "unknown".to_string()));
+        let session_name = session
+            .map(|s| s.name)
+            .unwrap_or_else(|| device.device_name.clone());
 
         context.push_str(&format!("Device: {} (Status: {:?})\n", session_name, device.status));
 
@@ -7085,9 +7085,9 @@ pub async fn analyze_mop_execution(
             let session = if let Some(ref sid) = device.session_id {
                 state.provider.get_session(sid).await.ok()
             } else { None };
-            let name = session.map(|s| s.name)
-                .or_else(|| device.device_name.clone())
-                .unwrap_or_else(|| device.session_id.clone().unwrap_or_else(|| "unknown".to_string()));
+            let name = session
+                .map(|s| s.name)
+                .unwrap_or_else(|| device.device_name.clone());
             recommendations.push(format!("Review failed device: {}", name));
             if device.error_message.is_some() {
                 recommendations.push(format!("Check error on {}: {}", name, device.error_message.as_ref().unwrap()));

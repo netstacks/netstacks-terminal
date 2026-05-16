@@ -5902,7 +5902,7 @@ impl DataProvider for LocalDataProvider {
     async fn list_mop_executions(&self) -> Result<Vec<MopExecution>, ProviderError> {
         let rows = sqlx::query(
             "SELECT id, template_id, plan_id, plan_revision, name, description, execution_strategy, control_mode,
-                    status, current_phase, ai_analysis, on_failure,
+                    status, current_phase, ai_analysis, ai_autonomy_level, on_failure,
                     pause_after_pre_checks, pause_after_changes, pause_after_post_checks,
                     created_by, created_at, updated_at,
                     started_at, completed_at, last_checkpoint
@@ -5939,6 +5939,7 @@ impl DataProvider for LocalDataProvider {
                 status: status_str.parse().unwrap_or_default(),
                 current_phase: row.get("current_phase"),
                 ai_analysis: row.get("ai_analysis"),
+                ai_autonomy_level: row.get::<Option<i32>, _>("ai_autonomy_level"),
                 on_failure: row.get::<Option<String>, _>("on_failure").unwrap_or_else(|| "pause".to_string()),
                 pause_after_pre_checks: row.get::<i32, _>("pause_after_pre_checks") != 0,
                 pause_after_changes: row.get::<i32, _>("pause_after_changes") != 0,
@@ -5957,7 +5958,7 @@ impl DataProvider for LocalDataProvider {
     async fn get_mop_execution(&self, id: &str) -> Result<MopExecution, ProviderError> {
         let row = sqlx::query(
             "SELECT id, template_id, plan_id, plan_revision, name, description, execution_strategy, control_mode,
-                    status, current_phase, ai_analysis, on_failure,
+                    status, current_phase, ai_analysis, ai_autonomy_level, on_failure,
                     pause_after_pre_checks, pause_after_changes, pause_after_post_checks,
                     created_by, created_at, updated_at,
                     started_at, completed_at, last_checkpoint
@@ -5994,6 +5995,7 @@ impl DataProvider for LocalDataProvider {
             status: status_str.parse().unwrap_or_default(),
             current_phase: row.get("current_phase"),
             ai_analysis: row.get("ai_analysis"),
+            ai_autonomy_level: row.get::<Option<i32>, _>("ai_autonomy_level"),
             on_failure: row.get::<Option<String>, _>("on_failure").unwrap_or_else(|| "pause".to_string()),
             pause_after_pre_checks: row.get::<i32, _>("pause_after_pre_checks") != 0,
             pause_after_changes: row.get::<i32, _>("pause_after_changes") != 0,
@@ -6013,12 +6015,12 @@ impl DataProvider for LocalDataProvider {
 
         sqlx::query(
             "INSERT INTO mop_executions (id, template_id, plan_id, name, description, execution_strategy,
-                                         control_mode, status, current_phase, ai_analysis,
+                                         control_mode, status, current_phase, ai_analysis, ai_autonomy_level,
                                          on_failure, pause_after_pre_checks, pause_after_changes,
                                          pause_after_post_checks,
                                          created_by, created_at, updated_at, started_at,
                                          completed_at, last_checkpoint)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&execution.id)
         .bind(&execution.template_id)
@@ -6030,6 +6032,7 @@ impl DataProvider for LocalDataProvider {
         .bind(execution.status.to_string())
         .bind(&execution.current_phase)
         .bind(&execution.ai_analysis)
+        .bind(execution.ai_autonomy_level)
         .bind(&execution.on_failure)
         .bind(if execution.pause_after_pre_checks { 1 } else { 0 })
         .bind(if execution.pause_after_changes { 1 } else { 0 })
@@ -6058,7 +6061,10 @@ impl DataProvider for LocalDataProvider {
         sqlx::query(
             "UPDATE mop_executions SET
                 name = ?, description = ?, execution_strategy = ?, control_mode = ?,
-                status = ?, current_phase = ?, ai_analysis = ?, updated_at = ?,
+                status = ?, current_phase = ?, ai_analysis = ?, ai_autonomy_level = ?,
+                on_failure = ?,
+                pause_after_pre_checks = ?, pause_after_changes = ?, pause_after_post_checks = ?,
+                updated_at = ?,
                 started_at = ?, completed_at = ?, last_checkpoint = ?
              WHERE id = ?"
         )
@@ -6069,6 +6075,11 @@ impl DataProvider for LocalDataProvider {
         .bind(execution.status.to_string())
         .bind(&execution.current_phase)
         .bind(&execution.ai_analysis)
+        .bind(execution.ai_autonomy_level)
+        .bind(&execution.on_failure)
+        .bind(if execution.pause_after_pre_checks { 1 } else { 0 })
+        .bind(if execution.pause_after_changes { 1 } else { 0 })
+        .bind(if execution.pause_after_post_checks { 1 } else { 0 })
         .bind(&now)
         .bind(&started_at)
         .bind(&completed_at)
@@ -6112,14 +6123,26 @@ impl DataProvider for LocalDataProvider {
                 None => None,
             };
 
+            let session_id: Option<String> = row.get("session_id");
+            let device_id: Option<String> = row.get("device_id");
+            let fallback_name = device_id
+                .clone()
+                .or_else(|| session_id.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let device_name: String = row
+                .get::<Option<String>, _>("device_name")
+                .unwrap_or_else(|| fallback_name.clone());
+            let device_host: String = row
+                .get::<Option<String>, _>("device_host")
+                .unwrap_or(fallback_name);
             devices.push(MopExecutionDevice {
                 id: row.get("id"),
                 execution_id: row.get("execution_id"),
-                session_id: row.get("session_id"),
-                device_id: row.get("device_id"),
+                session_id,
+                device_id,
                 credential_id: row.get("credential_id"),
-                device_name: row.get("device_name"),
-                device_host: row.get("device_host"),
+                device_name,
+                device_host,
                 role: row.get("role"),
                 device_order: row.get("device_order"),
                 status: status_str.parse().unwrap_or_default(),
@@ -6159,14 +6182,26 @@ impl DataProvider for LocalDataProvider {
             None => None,
         };
 
+        let session_id: Option<String> = row.get("session_id");
+        let device_id: Option<String> = row.get("device_id");
+        let fallback_name = device_id
+            .clone()
+            .or_else(|| session_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let device_name: String = row
+            .get::<Option<String>, _>("device_name")
+            .unwrap_or_else(|| fallback_name.clone());
+        let device_host: String = row
+            .get::<Option<String>, _>("device_host")
+            .unwrap_or(fallback_name);
         Ok(MopExecutionDevice {
             id: row.get("id"),
             execution_id: row.get("execution_id"),
-            session_id: row.get("session_id"),
-            device_id: row.get("device_id"),
+            session_id,
+            device_id,
             credential_id: row.get("credential_id"),
-            device_name: row.get("device_name"),
-            device_host: row.get("device_host"),
+            device_name,
+            device_host,
             role: row.get("role"),
             device_order: row.get("device_order"),
             status: status_str.parse().unwrap_or_default(),
