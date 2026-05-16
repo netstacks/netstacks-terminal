@@ -7,6 +7,19 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/netstacks/netstacks-terminal"
 homepage = "https://netstacks.net"
+# Force `cargo run` / `tauri dev` to use the NetStacks binary target
+# (Cargo package name stays lowercase by convention; macOS dock shows
+# the executable name, so the [[bin]] override is what gets the dock
+# label right in dev mode).
+default-run = "NetStacks"
+
+# Override the binary filename so `target/debug/NetStacks` (capitalised)
+# is what macOS displays in the dock during `tauri dev`. The bundled
+# .app already uses productName="NetStacks" from tauri.conf.json — this
+# brings dev mode in line with that.
+[[bin]]
+name = "NetStacks"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
