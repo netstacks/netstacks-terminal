@@ -32,7 +32,7 @@ const EXT_TO_LANG: Record<string, string> = {
   toml: 'ini',
   cfg: 'ini', conf: 'ini', ini: 'ini',
   j2: 'html', jinja: 'html', jinja2: 'html',
-  yang: 'plaintext',
+  yang: 'yang',
   tf: 'hcl',
   dockerfile: 'dockerfile',
   makefile: 'makefile',
