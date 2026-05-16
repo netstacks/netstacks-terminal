@@ -233,9 +233,7 @@ export default function WorkspaceGitChanges({
                 ? 'Generating...'
                 : !hasChanges
                   ? 'No changes to commit'
-                  : staged.length === 0
-                    ? 'Stage changes to commit... (Tab to generate)'
-                    : 'Commit message... (Tab to generate)'
+                  : 'Commit message... (Tab to generate)'
             }
             value={commitMsg}
             onChange={e => setCommitMsg(e.target.value)}
