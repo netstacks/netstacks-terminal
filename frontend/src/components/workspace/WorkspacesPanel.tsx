@@ -10,6 +10,9 @@ interface WorkspacesPanelProps {
   onOpenWorkspace: (config: WorkspaceConfig) => void
   onNewWorkspace: () => void
   openWorkspaceIds: Set<string>
+  /** Close the open workspace tab without deleting the saved config.
+   *  Distinct from `delete` which removes the saved workspace entirely. */
+  onCloseWorkspace?: (id: string) => void
   onOpenScript: (script: Script) => void
   onNewScript: () => void
   onAIGenerate: () => void
@@ -54,6 +57,7 @@ export default function WorkspacesPanel({
   onOpenWorkspace,
   onNewWorkspace,
   openWorkspaceIds,
+  onCloseWorkspace,
   onOpenScript,
   onNewScript,
   onAIGenerate,
@@ -158,10 +162,19 @@ export default function WorkspacesPanel({
                 {isOpen && (
                   <span className="workspace-panel-item-badge">open</span>
                 )}
+                {isOpen && onCloseWorkspace && (
+                  <button
+                    className="workspace-panel-item-close"
+                    onClick={(e) => { e.stopPropagation(); onCloseWorkspace(ws.id) }}
+                    title="Close workspace (keep saved config)"
+                  >
+                    ⌫
+                  </button>
+                )}
                 <button
                   className="workspace-panel-item-delete"
                   onClick={(e) => { e.stopPropagation(); deleteWorkspace(ws.id, ws.name) }}
-                  title="Delete"
+                  title="Delete saved workspace (does not touch the git repo on disk)"
                 >
                   ×
                 </button>

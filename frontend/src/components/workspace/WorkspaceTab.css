@@ -824,6 +824,29 @@
   background: var(--color-bg-hover);
 }
 
+/* P3-14: Close-workspace button (distinct from delete). Only rendered
+   when the workspace is currently open. */
+.workspace-panel-item-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+  border-radius: 3px;
+  opacity: 0;
+}
+
+.workspace-panel-item:hover .workspace-panel-item-close {
+  opacity: 1;
+}
+
+.workspace-panel-item-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
 /* Sidebar section headers (collapsible) */
 .workspace-panel-section-header {
   display: flex;

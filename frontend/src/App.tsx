@@ -5982,6 +5982,13 @@ def main(command: str = "show version"):
                 onOpenWorkspace={openWorkspaceTab}
                 onNewWorkspace={() => setShowNewWorkspace(true)}
                 openWorkspaceIds={new Set(tabs.filter(t => t.type === 'workspace' && t.workspaceConfig).map(t => t.workspaceConfig!.id))}
+                onCloseWorkspace={(id) => {
+                  // Close the open workspace tab WITHOUT touching the saved
+                  // config (delete on a separate path).
+                  tabs
+                    .filter(t => t.type === 'workspace' && t.workspaceConfig?.id === id)
+                    .forEach(t => closeTab(t.id, true));
+                }}
                 onOpenScript={handleOpenScript}
                 onNewScript={handleNewScript}
                 onAIGenerate={() => setAiScriptGeneratorOpen(true)}
