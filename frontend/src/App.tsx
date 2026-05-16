@@ -622,19 +622,32 @@ function AppContent() {
   }, [tabs, activeTabId])
   const isNetstacksAgentActive = activeWsConfig?.aiTool?.tool === 'netstacks-agent'
   const [aiPortalTarget, setAiPortalTarget] = useState<HTMLElement | null>(null)
+  const aiPortalObserverRef = useRef<MutationObserver | null>(null)
 
   useEffect(() => {
-    if (isNetstacksAgentActive) {
-      const findTarget = () => {
-        const el = document.getElementById('workspace-ai-panel-target')
-        setAiPortalTarget(el)
-      }
-      findTarget()
-      const timer = setTimeout(findTarget, 100)
-      return () => clearTimeout(timer)
-    } else {
-      setAiPortalTarget(null)
+    if (aiPortalObserverRef.current) {
+      aiPortalObserverRef.current.disconnect()
+      aiPortalObserverRef.current = null
     }
+
+    if (!isNetstacksAgentActive) {
+      setAiPortalTarget(null)
+      return
+    }
+
+    const findTarget = () => {
+      const el = document.getElementById('workspace-ai-panel-target')
+      const visible = el && el.style.display !== 'none'
+      setAiPortalTarget(visible ? el : null)
+    }
+
+    findTarget()
+
+    const observer = new MutationObserver(findTarget)
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] })
+    aiPortalObserverRef.current = observer
+
+    return () => observer.disconnect()
   }, [isNetstacksAgentActive, activeTabId])
 
   // Document data cache for document tabs (documentId -> Document)
