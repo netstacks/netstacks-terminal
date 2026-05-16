@@ -16,10 +16,10 @@
 .command-palette {
   width: 600px;
   max-width: 90vw;
-  max-height: 400px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+  max-height: 60vh;
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: var(--menu-radius);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   display: flex;
   flex-direction: column;
@@ -60,7 +60,7 @@
 .command-palette-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
   cursor: pointer;
   transition: background var(--transition-fast);
@@ -75,7 +75,32 @@
   background: var(--color-bg-active);
 }
 
+.command-palette-item.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.command-palette-item.disabled:hover {
+  background: transparent;
+}
+
+/* Left chip showing the command's category — gives at-a-glance
+ * grouping without spending a full row on a section header. */
+.command-palette-category {
+  flex-shrink: 0;
+  min-width: 64px;
+  padding: 2px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+  border-radius: 3px;
+  text-align: center;
+}
+
 .command-label {
+  flex: 1;
   color: var(--color-text-primary);
   font-size: var(--font-size-base);
 }
