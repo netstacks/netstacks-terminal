@@ -117,7 +117,7 @@ import WorkspaceTab from './components/workspace/WorkspaceTab'
 import WorkspaceNewDialog from './components/workspace/WorkspaceNewDialog'
 import WorkspacesPanel, { addSavedWorkspace } from './components/workspace/WorkspacesPanel'
 import { MenuBridge } from './commands/menuBridge'
-import { useActiveContextStore, useCommand, type ActiveContext } from './commands'
+import { useActiveContextStore, useCommand, dispatchCommand, getActiveContext, type ActiveContext } from './commands'
 import type { WorkspaceConfig } from './types/workspace'
 import { useTroubleshootingSession, type OnTimeoutCallback } from './hooks/useTroubleshootingSession'
 import { useCertRenewal } from './hooks/useCertRenewal'
@@ -5534,11 +5534,49 @@ def main(command: str = "show version"):
     run: () => { if (tabs[4]) setActiveTabId(tabs[4].id) },
   })
   useCommand({
+    id: 'navigation.go-to-tab-6', label: 'Go to Tab 6', category: 'navigation',
+    accelerator: 'CmdOrCtrl+6',
+    when: () => tabs.length >= 6,
+    run: () => { if (tabs[5]) setActiveTabId(tabs[5].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-tab-7', label: 'Go to Tab 7', category: 'navigation',
+    accelerator: 'CmdOrCtrl+7',
+    when: () => tabs.length >= 7,
+    run: () => { if (tabs[6]) setActiveTabId(tabs[6].id) },
+  })
+  useCommand({
+    id: 'navigation.go-to-tab-8', label: 'Go to Tab 8', category: 'navigation',
+    accelerator: 'CmdOrCtrl+8',
+    when: () => tabs.length >= 8,
+    run: () => { if (tabs[7]) setActiveTabId(tabs[7].id) },
+  })
+  useCommand({
     id: 'navigation.go-to-last-tab', label: 'Go to Last Tab', category: 'navigation',
     accelerator: 'CmdOrCtrl+9',
     when: () => tabs.length > 0,
     run: () => { if (tabs.length > 0) setActiveTabId(tabs[tabs.length - 1].id) },
   })
+
+  // Global keydown listener for Cmd/Ctrl+1..9. The accelerator field on
+  // each command above is display-only; the actual key binding lives
+  // here because these commands are intentionally excluded from the
+  // native menu (would clutter Window).
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return
+      if (!/^[1-9]$/.test(e.key)) return
+      // Skip when typing in inputs/textareas/contenteditable so users
+      // can still type digits in form fields with no modifier conflicts.
+      const tgt = e.target as HTMLElement | null
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return
+      const id = e.key === '9' ? 'navigation.go-to-last-tab' : `navigation.go-to-tab-${e.key}`
+      e.preventDefault()
+      void dispatchCommand(id, getActiveContext())
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
 
   // Sidebar view switchers — equivalents to clicking the activity bar.
   // Available from the Palette so users can keyboard-navigate the app
