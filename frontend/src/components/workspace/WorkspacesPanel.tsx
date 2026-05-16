@@ -43,14 +43,24 @@ export async function addSavedWorkspace(config: WorkspaceConfig): Promise<void> 
   }
 }
 
+/**
+ * Update an existing saved workspace in-place. UPDATE-ONLY: if the
+ * workspace isn't in the saved list (e.g. the user just deleted it
+ * from the sidebar while the tab was still open), this is a no-op.
+ *
+ * The previous implementation also pushed-when-missing, which created
+ * a resurrection bug: deleting an open workspace would write the
+ * delete to storage, then the open tab's auto-save or unmount-save
+ * effect (useWorkspace.ts ~317, ~348) would re-add it.
+ */
 export async function updateSavedWorkspace(config: WorkspaceConfig): Promise<void> {
   const existing = await loadSavedWorkspaces()
   const idx = existing.findIndex(w => w.id === config.id)
-  if (idx >= 0) {
-    existing[idx] = config
-  } else {
-    existing.push(config)
+  if (idx < 0) {
+    // Deleted while still open — let the deletion stand.
+    return
   }
+  existing[idx] = config
   await saveSavedWorkspaces(existing)
 }
 
@@ -90,22 +100,39 @@ export default function WorkspacesPanel({
   }, [openWorkspaceIds.size, load])
 
   const deleteWorkspace = useCallback(async (id: string, name: string) => {
+    const isOpen = openWorkspaceIds.has(id)
     const ok = await confirmDialog({
       title: 'Delete saved workspace?',
-      body: <>Remove the saved workspace <strong>{name}</strong>? Your git repository on disk is not touched.</>,
+      body: (
+        <>
+          Remove the saved workspace <strong>{name}</strong>? Your git
+          repository on disk is not touched.
+          {isOpen && (
+            <>
+              <br /><br />
+              <em>This workspace is currently open — the tab will be closed.</em>
+            </>
+          )}
+        </>
+      ),
       confirmLabel: 'Delete',
       destructive: true,
     })
     if (!ok) return
     const updated = savedWorkspaces.filter(w => w.id !== id)
     try {
+      // Close the open tab BEFORE persisting the delete so its
+      // unmount-save can't race the deletion. updateSavedWorkspace is
+      // now update-only (silently skips missing rows) so even with the
+      // race this would be safe, but closing first is cleaner UX.
+      if (isOpen && onCloseWorkspace) onCloseWorkspace(id)
       await saveSavedWorkspaces(updated)
       setSavedWorkspaces(updated)
       showToast(`Deleted "${name}"`, 'success')
     } catch {
       showToast('Failed to delete workspace', 'error')
     }
-  }, [savedWorkspaces])
+  }, [savedWorkspaces, openWorkspaceIds, onCloseWorkspace])
 
   return (
     <div className="workspace-panel-sidebar">
