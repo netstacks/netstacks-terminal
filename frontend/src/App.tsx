@@ -104,7 +104,7 @@ import { ToastContainer, showToast } from './components/Toast'
 import { ConfirmDialogHost, confirmDialog } from './components/ConfirmDialog'
 import UpdateChecker from './components/UpdateChecker'
 import type { Connection } from './types/topology'
-import { loadPanelSettings, PANEL_SETTINGS_CHANGED, type PanelSettings } from './api/panelSettings'
+import { loadPanelSettings, savePanelSettings, PANEL_SETTINGS_CHANGED, type PanelSettings } from './api/panelSettings'
 import { useSettings } from './hooks/useSettings'
 import { useMode } from './hooks/useMode'
 import { useCapabilitiesStore } from './stores/capabilitiesStore'
@@ -6231,7 +6231,14 @@ def main(command: str = "show version"):
             <span className="sidebar-header-extras" ref={sidebarHeaderExtrasRef} />
             <button
               className={`sidebar-pin-btn ${sidebarPinned ? 'pinned' : ''}`}
-              onClick={() => setSidebarPinned(!sidebarPinned)}
+              onClick={() => {
+                // P1-2: persist via savePanelSettings so the value
+                // survives reload. Previously only local state flipped,
+                // and reload restored the old setting from disk.
+                const next = !sidebarPinned
+                setSidebarPinned(next)
+                savePanelSettings({ ...loadPanelSettings(), leftSidebarPinned: next })
+              }}
               title={sidebarPinned ? 'Unpin sidebar (auto-collapse)' : 'Pin sidebar (stay open)'}
             >
               {sidebarPinned ? Icons.pin : Icons.pinOff}

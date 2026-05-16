@@ -14,6 +14,7 @@ import type { SessionContextEntry, AiProviderType } from '../api/ai'
 import { hasAiApiKey, checkOllamaStatus, fetchOllamaModels, getAiStatus, getAiConfig } from '../api/ai'
 import { getCurrentMode } from '../api/client'
 import { useSettings } from '../hooks/useSettings'
+import { loadPanelSettings, savePanelSettings } from '../api/panelSettings'
 import { useMode } from '../hooks/useMode'
 import { isOnboarded } from '../api/aiEngineerProfile'
 import { NeighborParser } from '../lib/neighborParser'
@@ -1092,7 +1093,13 @@ const AISidePanel = ({
           {!isOverlay && (
             <button
               className={`ai-side-panel-btn ${isPinned ? 'pinned' : ''}`}
-              onClick={() => setIsPinned(!isPinned)}
+              onClick={() => {
+                // P1-2: persist via savePanelSettings so the value
+                // survives reload. Previously only local state flipped.
+                const next = !isPinned
+                setIsPinned(next)
+                savePanelSettings({ ...loadPanelSettings(), aiPanelPinned: next })
+              }}
               title={isPinned ? 'Unpin (auto-collapse)' : 'Pin (stay open)'}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="14" height="14">

@@ -181,6 +181,12 @@ export default function WorkspaceNewDialog({
         })
 
         const name = repoName
+        // P1-3: pull defaultTerminalPanelHeight / defaultFileExplorerWidth
+        // from saved workspace defaults so those two Settings →
+        // Workspaces controls aren't dead. Other defaults (aiTool,
+        // launchArgs, autoLaunchAi) are already applied via the form
+        // state above — only the geometry defaults were hardcoded here.
+        const defaults = loadWorkspaceDefaults()
         const config: WorkspaceConfig = {
           id: crypto.randomUUID(),
           name,
@@ -188,8 +194,8 @@ export default function WorkspaceNewDialog({
           rootPath: fullPath,
           aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined, launchArgs: launchArgs.trim() || undefined },
           autoLaunchAi: autoLaunch,
-          fileExplorerWidth: 220,
-          terminalPanelHeight: 250,
+          fileExplorerWidth: defaults.defaultFileExplorerWidth,
+          terminalPanelHeight: defaults.defaultTerminalPanelHeight,
           terminalPanelCollapsed: false,
           expandedDirs: [],
           selectedPath: null,
@@ -221,6 +227,9 @@ export default function WorkspaceNewDialog({
       }
     }
 
+    // P1-3: same as the clone branch above — geometry defaults come
+    // from the saved workspace defaults, not literal 220/250.
+    const localDefaults = loadWorkspaceDefaults()
     const config: WorkspaceConfig = {
       id: crypto.randomUUID(),
       name,
@@ -229,8 +238,8 @@ export default function WorkspaceNewDialog({
       sessionId: mode === 'remote' ? remoteSessionId : undefined,
       aiTool: { tool: aiTool, customCommand: aiTool === 'custom' ? customCommand : undefined, launchArgs: launchArgs.trim() || undefined },
       autoLaunchAi: autoLaunch,
-      fileExplorerWidth: 220,
-      terminalPanelHeight: 250,
+      fileExplorerWidth: localDefaults.defaultFileExplorerWidth,
+      terminalPanelHeight: localDefaults.defaultTerminalPanelHeight,
       terminalPanelCollapsed: false,
       expandedDirs: [],
       selectedPath: null,
