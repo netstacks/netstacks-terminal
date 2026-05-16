@@ -11,6 +11,9 @@ import type { LspPluginListItem } from './types';
 import { getClient } from '../api/client';
 import { getSidecarAuthToken } from '../api/localClient';
 
+// Re-export types for consumers
+export type { LspPluginListItem } from './types';
+
 /**
  * GET /lsp/plugins — list all plugins (built-in + user-added) with
  * computed install status. Used by the Settings UI (Phase 5) and the
@@ -50,6 +53,97 @@ export async function uninstallPlugin(pluginId: string): Promise<void> {
     `/lsp/plugins/${encodeURIComponent(pluginId)}`,
     { baseURL: apiClient.baseUrl }
   );
+}
+
+/**
+ * Input for creating a user-added plugin (POST /lsp/plugins).
+ */
+export interface UserPluginInput {
+  id: string;
+  displayName: string;
+  language: string;
+  fileExtensions: string[];
+  command: string;
+  args: string[];
+  envVars: Record<string, string>;
+}
+
+/**
+ * Input for updating a plugin (PUT /lsp/plugins/:id).
+ * For built-ins, only command and args can be overridden.
+ * For user-added, any field can be updated.
+ */
+export interface PluginUpdateInput {
+  displayName?: string;
+  language?: string;
+  fileExtensions?: string[];
+  command?: string;
+  args?: string[];
+  enabled?: boolean;
+}
+
+/**
+ * Result from testing a plugin command (POST /lsp/plugins/test).
+ */
+export interface TestCommandResult {
+  success: boolean;
+  errorMessage?: string;
+  stderr?: string;
+}
+
+/**
+ * POST /lsp/plugins — create a user-added plugin.
+ * Returns 201 with descriptor on success, 409 on conflict.
+ */
+export async function createUserPlugin(input: UserPluginInput): Promise<LspPluginListItem> {
+  const apiClient = getClient();
+  const { data } = await apiClient.http.post<LspPluginListItem>(
+    '/lsp/plugins',
+    input,
+    { baseURL: apiClient.baseUrl }
+  );
+  return data;
+}
+
+/**
+ * PUT /lsp/plugins/:id — update a plugin.
+ * For built-ins: writes overrides to .netstacks-lsp/overrides.json.
+ * For user-added: updates the descriptor in .netstacks-lsp/user-plugins.json.
+ */
+export async function updatePlugin(id: string, input: PluginUpdateInput): Promise<LspPluginListItem> {
+  const apiClient = getClient();
+  const { data } = await apiClient.http.put<LspPluginListItem>(
+    `/lsp/plugins/${encodeURIComponent(id)}`,
+    input,
+    { baseURL: apiClient.baseUrl }
+  );
+  return data;
+}
+
+/**
+ * DELETE /lsp/plugins/:id — remove a plugin.
+ * For user-added: removes from user-plugins.json.
+ * For built-in: routes to uninstall (deletes binary).
+ */
+export async function deletePlugin(id: string): Promise<void> {
+  const apiClient = getClient();
+  await apiClient.http.delete(
+    `/lsp/plugins/${encodeURIComponent(id)}`,
+    { baseURL: apiClient.baseUrl }
+  );
+}
+
+/**
+ * POST /lsp/plugins/test — spawn candidate command, send LSP initialize, return result.
+ */
+export async function testPluginCommand(command: string, args: string[]): Promise<TestCommandResult> {
+  const apiClient = getClient();
+  const { data } = await apiClient.http.post<TestCommandResult>(
+    '/lsp/plugins/test',
+    { command, args },
+    { baseURL: apiClient.baseUrl }
+  );
+  return data;
 }
 
 /** Server-Sent Event payload from /lsp/plugins/:id/install-progress */

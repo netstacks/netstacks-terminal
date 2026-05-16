@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { getClient } from '../api/client'
 import type { AiToolType } from '../types/workspace'
 import GitAccountsSettingsTab from './GitAccountsSettingsTab'
+import { LanguageFeaturesTab } from './settings/LanguageFeaturesTab'
 
 interface WorkspaceDefaults {
   defaultAiTool: AiToolType
@@ -33,6 +34,7 @@ export default function WorkspaceSettingsTab() {
   })
   const [wsSection, setWsSection] = useState(true)
   const [gitSection, setGitSection] = useState(true)
+  const [langSection, setLangSection] = useState(true)
 
   useEffect(() => {
     getClient().http.get('/settings/workspace-defaults').then(({ data }) => {
@@ -189,6 +191,16 @@ export default function WorkspaceSettingsTab() {
 
       {gitSection && (
         <GitAccountsSettingsTab />
+      )}
+
+      {/* Language Features Section */}
+      <div style={sectionHeaderStyle} onClick={() => setLangSection(!langSection)}>
+        <span style={{ fontSize: 10 }}>{langSection ? '▾' : '▸'}</span>
+        Language Features
+      </div>
+
+      {langSection && (
+        <LanguageFeaturesTab />
       )}
     </div>
   )
