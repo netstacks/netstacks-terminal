@@ -1038,6 +1038,7 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -
         .route("/tunnels/:id/reconnect", post(api::reconnect_tunnel))
         // Workspace local file operations
         .route("/local/read-file", post(api::local_file_read))
+        .route("/local/read-file-binary", post(api::local_file_read_binary))
         .route("/local/write-file", post(api::local_file_write))
         .route("/local/list-dir", post(api::local_dir_list))
         .route("/local/mkdir", post(api::local_file_mkdir))

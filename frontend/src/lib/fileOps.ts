@@ -20,8 +20,11 @@ export class LocalFileOps implements FileOps {
   }
 
   async readFileBinary(path: string): Promise<Uint8Array> {
-    const { data } = await getClient().http.post('/local/read-file', { path })
-    return new TextEncoder().encode(data.content)
+    const { data } = await getClient().http.post('/local/read-file-binary', { path })
+    const binary = atob(data.content_base64 as string)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
   }
 
   async writeFile(path: string, content: string): Promise<void> {

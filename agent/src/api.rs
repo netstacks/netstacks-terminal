@@ -9562,6 +9562,26 @@ pub async fn local_file_read(
     Ok(Json(serde_json::json!({ "content": content, "path": req.path })))
 }
 
+/// Read a file as raw bytes and return base64. Used by the workspace image
+/// viewer (and any other binary preview) since `local_file_read` uses
+/// `read_to_string` which rejects non-UTF-8 input.
+pub async fn local_file_read_binary(
+    Json(req): Json<LocalFileReadRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let safe = validate_local_path(&req.path)?;
+    let bytes = tokio::fs::read(&safe).await.map_err(|e| ApiError {
+        error: format!("Failed to read {}: {}", req.path, e),
+        code: "FS_READ".to_string(),
+    })?;
+    let encoded = STANDARD.encode(&bytes);
+    Ok(Json(serde_json::json!({
+        "content_base64": encoded,
+        "size": bytes.len(),
+        "path": req.path,
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct LocalFileWriteRequest {
     pub path: String,
