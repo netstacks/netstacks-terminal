@@ -56,7 +56,7 @@ export function restoreSessionState(): SessionState | null {
     // Check TTL
     const age = Date.now() - state.timestamp;
     if (age > TTL_MS) {
-      console.log('[sessionState] Stored state is stale (age: ${age}ms), discarding');
+      console.log(`[sessionState] Stored state is stale (age: ${age}ms), discarding`);
       localStorage.removeItem(STORAGE_KEY);
       return null;
     }

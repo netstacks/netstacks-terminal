@@ -18,7 +18,7 @@ export function useResourceList<T>(
   const [error, setError] = useState<string | null>(null);
 
   const user = useAuthStore((state) => state.user);
-  const orgId = user?.org_id || '00000000-0000-0000-0000-000000000000';
+  const orgId = user?.org_id;
 
   const pluginName = options?.pluginName;
   const label = options?.label || 'resources';
@@ -26,6 +26,11 @@ export function useResourceList<T>(
   const shouldCheck = !!pluginName;
 
   const fetchData = useCallback(async () => {
+    if (!orgId) {
+      setTemplates([]);
+      setLoading(false);
+      return;
+    }
     if (shouldCheck && !hasPlugin) {
       setTemplates([]);
       setLoading(false);

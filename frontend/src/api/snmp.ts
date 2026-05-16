@@ -157,8 +157,8 @@ export async function snmpGet(req: SnmpGetRequest): Promise<SnmpGetResponse> {
       oids: req.oids,
       port: req.port,
       profileId: req.profileId,
-      jump_host_id: req.jump_host_id,
-      jump_session_id: req.jump_session_id,
+      jumpHostId: req.jump_host_id,
+      jumpSessionId: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -186,8 +186,8 @@ export async function snmpWalk(req: SnmpWalkRequest): Promise<SnmpWalkResponse> 
       rootOid: req.rootOid,
       port: req.port,
       profileId: req.profileId,
-      jump_host_id: req.jump_host_id,
-      jump_session_id: req.jump_session_id,
+      jumpHostId: req.jump_host_id,
+      jumpSessionId: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -213,8 +213,8 @@ export async function snmpTryCommunities(req: SnmpTryCommunityRequest): Promise<
       host: req.host,
       profileId: req.profileId,
       port: req.port,
-      jump_host_id: req.jump_host_id,
-      jump_session_id: req.jump_session_id,
+      jumpHostId: req.jump_host_id,
+      jumpSessionId: req.jump_session_id,
     });
     return data;
   } catch (err: unknown) {
@@ -250,8 +250,8 @@ export async function snmpInterfaceStats(req: SnmpInterfaceStatsRequest): Promis
       interfaceName: req.interfaceName,
       port: req.port,
       profileId: req.profileId,
-      jump_host_id: req.jump_host_id,
-      jump_session_id: req.jump_session_id,
+      jumpHostId: req.jump_host_id,
+      jumpSessionId: req.jump_session_id,
     }, { timeout: INTERFACE_STATS_TIMEOUT_MS });
     return data;
   } catch (err: unknown) {
@@ -279,8 +279,8 @@ export async function snmpTryInterfaceStats(req: SnmpTryInterfaceStatsRequest): 
       profileId: req.profileId,
       interfaceName: req.interfaceName,
       port: req.port,
-      jump_host_id: req.jump_host_id,
-      jump_session_id: req.jump_session_id,
+      jumpHostId: req.jump_host_id,
+      jumpSessionId: req.jump_session_id,
     }, { timeout: INTERFACE_STATS_TIMEOUT_MS });
     return data;
   } catch (err: unknown) {

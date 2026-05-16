@@ -175,7 +175,7 @@ export class RemoteGitOps implements GitOps {
 
   private async run(args: string[]): Promise<string> {
     const command = `cd ${this.shellEscape(this.cwd)} && git ${args.join(' ')}`
-    const { data } = await getClient().http.post('/api/ai-ssh-execute', {
+    const { data } = await getClient().http.post('/ai/ssh-execute', {
       session_id: this.sessionId,
       commands: [command],
     })
