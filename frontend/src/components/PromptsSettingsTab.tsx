@@ -11,6 +11,7 @@ import {
   DEFAULT_TOPOLOGY_PROMPT,
   DEFAULT_SCRIPT_PROMPT,
   DEFAULT_AGENT_PROMPT,
+  DEFAULT_WORKSPACE_INIT_PROMPT,
   getDiscoveryPrompt as apiGetDiscoveryPrompt,
   setDiscoveryPrompt as apiSetDiscoveryPrompt,
   getTopologyPrompt as apiGetTopologyPrompt,
@@ -21,12 +22,15 @@ import {
   setAiAgentConfig,
   getAllModePrompts,
   setModePrompt,
+  getWorkspaceInitPrompt,
+  setWorkspaceInitPrompt as apiSetWorkspaceInitPrompt,
 } from '../api/ai';
 import { MODE_PROMPTS, type AIMode } from '../lib/aiModes';
 import { getSettings } from '../hooks/useSettings';
 import './PromptsSettingsTab.css';
 import AITabInput from './AITabInput';
 import { confirmDialog } from './ConfirmDialog';
+import { showToast } from './Toast';
 
 type SystemKey =
   | 'chat'
@@ -36,10 +40,11 @@ type SystemKey =
   | 'discovery'
   | 'topology'
   | 'script'
-  | 'agent';
+  | 'agent'
+  | 'workspaceInit';
 
 const MODE_KEYS: SystemKey[] = ['chat', 'operator', 'troubleshoot', 'copilot'];
-const TASK_KEYS: SystemKey[] = ['discovery', 'topology', 'script', 'agent'];
+const TASK_KEYS: SystemKey[] = ['discovery', 'topology', 'script', 'agent', 'workspaceInit'];
 
 interface EditorState {
   isOpen: boolean;
@@ -89,6 +94,11 @@ const SYSTEM_PROMPT_META: Record<SystemKey, { label: string; editorTitle: string
     editorTitle: 'Edit Agent Tasks Prompt',
     default: DEFAULT_AGENT_PROMPT,
   },
+  workspaceInit: {
+    label: 'Workspace Init (seed file for AI coding tools)',
+    editorTitle: 'Edit Workspace Init Prompt',
+    default: DEFAULT_WORKSPACE_INIT_PROMPT,
+  },
 };
 
 export default function PromptsSettingsTab() {
@@ -109,6 +119,7 @@ export default function PromptsSettingsTab() {
   const [topologyPrompt, setTopologyPrompt] = useState('');
   const [scriptPrompt, setScriptPrompt] = useState('');
   const [agentPrompt, setAgentPrompt] = useState('');
+  const [workspaceInitPrompt, setWorkspaceInitPrompt] = useState('');
 
   useEffect(() => {
     listQuickPrompts()
@@ -160,6 +171,10 @@ export default function PromptsSettingsTab() {
         }
       })
       .catch(console.error);
+
+    getWorkspaceInitPrompt()
+      .then(val => { if (val) setWorkspaceInitPrompt(val); })
+      .catch(console.error);
   }, []);
 
   const getPromptValue = (key: SystemKey): string => {
@@ -173,6 +188,7 @@ export default function PromptsSettingsTab() {
       case 'topology': return topologyPrompt;
       case 'script': return scriptPrompt;
       case 'agent': return agentPrompt;
+      case 'workspaceInit': return workspaceInitPrompt;
     }
   };
 
@@ -224,6 +240,10 @@ export default function PromptsSettingsTab() {
           localStorage.setItem('netstacks-settings', JSON.stringify(parsed));
           break;
         }
+        case 'workspaceInit':
+          setWorkspaceInitPrompt('');
+          await apiSetWorkspaceInitPrompt(null);
+          break;
       }
     } catch (err) {
       console.error('Failed to reset system prompt:', err);
@@ -234,7 +254,7 @@ export default function PromptsSettingsTab() {
     const prompt = prompts.find(p => p.id === id);
     const ok = await confirmDialog({
       title: 'Delete quick prompt?',
-      body: prompt ? <>Delete quick prompt <strong>{prompt.label || prompt.id}</strong>?</> : 'Delete this quick prompt?',
+      body: prompt ? <>Delete quick prompt <strong>{prompt.name || prompt.id}</strong>?</> : 'Delete this quick prompt?',
       confirmLabel: 'Delete',
       destructive: true,
     });
@@ -318,6 +338,10 @@ export default function PromptsSettingsTab() {
               localStorage.setItem('netstacks-settings', JSON.stringify(parsed));
               break;
             }
+            case 'workspaceInit':
+              setWorkspaceInitPrompt(prompt);
+              await apiSetWorkspaceInitPrompt(prompt || null);
+              break;
           }
         }
         handleCloseEditor();
@@ -331,9 +355,23 @@ export default function PromptsSettingsTab() {
   const favorites = prompts.filter(p => p.is_favorite);
   const others = prompts.filter(p => !p.is_favorite);
 
+  const handleCopyToClipboard = useCallback(async (key: SystemKey) => {
+    const value = getPromptValue(key);
+    const effectiveValue = value || SYSTEM_PROMPT_META[key].default;
+    try {
+      await navigator.clipboard.writeText(effectiveValue);
+      showToast('Copied to clipboard', 'success', 1500);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+      showToast('Failed to copy', 'error');
+    }
+  }, [discoveryPrompt, topologyPrompt, scriptPrompt, agentPrompt, workspaceInitPrompt, modePrompts]);
+
   const renderSystemPromptItem = (key: SystemKey) => {
     const meta = SYSTEM_PROMPT_META[key];
     const value = getPromptValue(key);
+    const isWorkspaceInit = key === 'workspaceInit';
+
     return (
       <div key={key} className="prompt-item">
         <div className="prompt-item-header">
@@ -348,6 +386,14 @@ export default function PromptsSettingsTab() {
             >
               {'\u21BA'}
             </button>
+            {isWorkspaceInit && (
+              <button
+                onClick={() => handleCopyToClipboard(key)}
+                title="Copy to clipboard"
+              >
+                {'\u{1F4CB}'}
+              </button>
+            )}
           </div>
         </div>
         <div className="prompt-item-preview">

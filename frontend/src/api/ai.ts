@@ -1131,6 +1131,39 @@ Guidelines:
 /** Default Agent Tasks (Background) prompt */
 export const DEFAULT_AGENT_PROMPT = 'You are a network automation assistant. You help users gather information from network devices using SSH commands. You have access to tools for querying devices and executing read-only commands. Be concise and focus on the task at hand.';
 
+/** Default Workspace Init Prompt — seed file for AI coding tools */
+export const DEFAULT_WORKSPACE_INIT_PROMPT = `# NetStacks Workspace
+
+You are running inside an embedded NetStacks Terminal workspace. NetStacks is a network engineer's terminal app (SSH/Telnet/SFTP, AI assistant, SNMP polling, topology visualization). This workspace is a git-backed project the user has opened.
+
+## Environment
+
+- The user has both a terminal (you) AND a Monaco code editor open side-by-side in this workspace.
+- The workspace root is the current working directory.
+- Files you edit are visible immediately in the user's editor.
+
+## Opening files in the user's editor
+
+To request that a file be opened in the user's Monaco editor (Zone 2), write a JSON payload to \`.netstacks/open-request.json\`:
+
+\`\`\`json
+{"path": "absolute/or/relative/path/to/file"}
+\`\`\`
+
+NetStacks polls this file every second; opening succeeds atomically. Use this whenever you change a file the user should look at, or when you want them to review something specific.
+
+## Language support
+
+The Monaco editor has Pyrefly LSP for Python, plus syntax highlighting + format providers for YANG, XML, and JSON. The user may have additional language servers configured under Settings → Workspaces → Language Features.
+
+## Style
+
+- Keep responses concise — the user is technical and short on time.
+- Prefer surgical edits over large rewrites.
+- Run tests + commit before declaring work complete.
+- Match the project's existing style (look at neighboring files before introducing new patterns).
+`;
+
 /** Default AI Copilot prompt — used for real-time terminal output analysis */
 // --- Discovery prompt (ai.discovery_prompt) ---
 
@@ -1360,6 +1393,38 @@ export async function updateAiMemory(id: string, content: string, category: stri
 
 export async function deleteAiMemory(id: string): Promise<void> {
   await getClient().http.delete(`/ai/memory/${id}`);
+}
+
+// --- Workspace Init Prompt (ai.workspace_init_prompt) ---
+
+export async function getWorkspaceInitPrompt(): Promise<string | null> {
+  try {
+    const prefix = settingsPrefix();
+    const res = await getClient().http.get(`${prefix}/ai.workspace_init_prompt`);
+    const data = res.data;
+    if (data === null) return null;
+    if (getCurrentMode() === 'enterprise') {
+      return typeof data === 'string' && data.trim() ? data : null;
+    }
+    const val = data.value ?? null;
+    return val && val.trim() ? val : null;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) return null;
+    return null;
+  }
+}
+
+export async function setWorkspaceInitPrompt(prompt: string | null): Promise<void> {
+  const prefix = settingsPrefix();
+  if (!prompt || !prompt.trim()) {
+    try { await getClient().http.delete(`${prefix}/ai.workspace_init_prompt`); } catch { /* ok */ }
+  } else {
+    if (getCurrentMode() === 'enterprise') {
+      await getClient().http.put(`${prefix}/ai.workspace_init_prompt`, prompt);
+    } else {
+      await getClient().http.put(`${prefix}/ai.workspace_init_prompt`, { value: prompt });
+    }
+  }
 }
 
 // === AI Config Mode (AUDIT FIX EXEC-002) ===

@@ -84,7 +84,9 @@ import { updateDocument, listDocuments, getDocument, createDocument, type Docume
 import { createChange } from './api/changes'
 import { createMopStep, type MopStep } from './types/change'
 import type { AiContext } from './api/ai'
-import { getDiscoveryPrompt } from './api/ai'
+import { getDiscoveryPrompt, getWorkspaceInitPrompt, DEFAULT_WORKSPACE_INIT_PROMPT } from './api/ai'
+import { aiToolInitFilename } from './lib/aiToolInitFile'
+import { LocalFileOps } from './lib/fileOps'
 import { createTopology, addNeighborDevice, createConnection as createTopologyConnection, getTopology, deleteDevice, updateDevice } from './api/topology'
 // Note: Session topology API moved to TopologyTabEditor in Phase 20.1
 import type { Topology, Device } from './types/topology'
@@ -916,7 +918,30 @@ function AppContent() {
       setShowNewWorkspace(false)
       return
     }
+
+    const isNewWorkspace = !existingTab
     await addSavedWorkspace(config)
+
+    // Write AI tool init file if this is a new workspace and the tool expects one
+    if (isNewWorkspace && config.mode === 'local') {
+      const filename = aiToolInitFilename(config.aiTool.tool)
+      if (filename) {
+        try {
+          const fileOps = new LocalFileOps()
+          const fullPath = `${config.rootPath}/${filename}`
+          const exists = await fileOps.exists(fullPath)
+          if (!exists) {
+            const prompt = await getWorkspaceInitPrompt() || DEFAULT_WORKSPACE_INIT_PROMPT
+            await fileOps.writeFile(fullPath, prompt)
+            console.log(`Created workspace init file: ${filename}`)
+          }
+        } catch (err) {
+          console.error('Failed to write workspace init file:', err)
+          // Don't fail workspace creation if seed write fails
+        }
+      }
+    }
+
     const newTab: Tab = {
       id: `workspace-${config.id}`,
       type: 'workspace',
