@@ -10,14 +10,23 @@ import {
   listRecordings,
   deleteRecording,
   renameRecording,
+  getRecordingData,
   type Recording,
 } from '../api/recordings'
 import { confirmDialog } from './ConfirmDialog'
 import { showToast } from './Toast'
 import { useSubmitting } from '../hooks/useSubmitting'
 import { useOverlayDismiss } from '../hooks/useOverlayDismiss'
+import { downloadFile } from '../lib/formatters'
 import RecordingPlayer from './RecordingPlayer'
 import './RecordingsTab.css'
+
+// Sanitize a recording name for use as a filename — keep word chars and
+// dashes, collapse everything else to a single hyphen, trim to 80 chars.
+function safeFilename(name: string): string {
+  const cleaned = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+  return (cleaned || 'recording').slice(0, 80)
+}
 
 function formatDuration(ms: number): string {
   if (!ms || ms < 0) return '—'
@@ -120,6 +129,22 @@ export default function RecordingsTab() {
         showToast(message, 'error')
       }
     })
+  }
+
+  const handleExport = async (rec: Recording) => {
+    // "Share" = download the asciicast file. Generates a portable .cast
+    // the user can drop into any asciinema-compatible player or attach to
+    // a chat/email. Backend has no native share-link endpoint yet.
+    try {
+      const data = await getRecordingData(rec.id)
+      // The backend returns the asciicast file body as text. downloadFile
+      // handles the blob + click dance.
+      downloadFile(data, `${safeFilename(rec.name)}.cast`, 'application/x-asciicast')
+      showToast('Recording exported', 'success')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Export failed'
+      showToast(message, 'error')
+    }
   }
 
   const closePlayer = useCallback(() => setPlayingId(null), [])
@@ -254,6 +279,14 @@ export default function RecordingsTab() {
                             disabled={submitting}
                           >
                             Rename
+                          </button>
+                          <button
+                            className="btn-secondary"
+                            onClick={() => handleExport(rec)}
+                            disabled={submitting}
+                            title="Download as .cast file (asciinema-compatible)"
+                          >
+                            Share
                           </button>
                           <button
                             className="btn-danger"
