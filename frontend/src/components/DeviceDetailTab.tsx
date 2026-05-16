@@ -2134,7 +2134,7 @@ export default function DeviceDetailTab({
               <div className="device-detail-tab-filter">
                 <span className="device-detail-tab-filter-icon">{Icons.filter}</span>
                 <input
-                  type="text"
+                  type="search"
                   placeholder="Filter interfaces..."
                   value={interfaceFilter}
                   onChange={(e) => setInterfaceFilter(e.target.value)}

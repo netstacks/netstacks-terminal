@@ -324,7 +324,7 @@ export default function ChangesPanel({ sessionId, onSelectChange, onOpenMopTab }
       <div className="changes-header">
         <div className="changes-actions">
           <input
-            type="text"
+            type="search"
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
             placeholder="Search MOPs..."

@@ -498,7 +498,7 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
       <div className="settings-main">
         <div className="settings-search">
           <input
-            type="text"
+            type="search"
             placeholder="Search all settings..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}

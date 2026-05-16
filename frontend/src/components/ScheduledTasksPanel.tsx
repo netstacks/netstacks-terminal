@@ -46,6 +46,18 @@ export function ScheduledTasksPanel({ onViewHistory }: ScheduledTasksPanelProps)
     loadTasks();
   }, [loadTasks]);
 
+  // Re-render the panel every 30s so the "Next: in 5 min" labels stay
+  // honest without the user touching anything. formatNextRun is called
+  // on every render anyway; the tick is purely to invalidate the
+  // component view. Picked 30s rather than the obvious 60s so a task
+  // scheduled for "in 1 minute" doesn't sit at "in 1 minute" for the
+  // full minute before suddenly jumping to "in a few seconds".
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick(t => t + 1), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Toggle pause/resume
   const handleToggleEnabled = async (task: ScheduledTask) => {
     try {

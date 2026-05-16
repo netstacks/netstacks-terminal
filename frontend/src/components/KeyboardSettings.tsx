@@ -173,7 +173,7 @@ export default function KeyboardSettings({ keyboard }: KeyboardSettingsProps) {
       <div className="keyboard-settings-header">
         <div className="keyboard-search">
           <input
-            type="text"
+            type="search"
             placeholder="Search shortcuts..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}

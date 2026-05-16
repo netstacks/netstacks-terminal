@@ -143,7 +143,7 @@ export default function TunnelPopover({ onClose, onManageTunnels }: TunnelPopove
       <div className="tunnel-popover-search">
         <input
           ref={searchRef}
-          type="text"
+          type="search"
           placeholder="Search tunnels..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}

@@ -249,7 +249,7 @@ export default function EnterpriseDevicePanel({
       <div className="device-panel-search">
         <span className="device-panel-search-icon">{Icons.search}</span>
         <input
-          type="text"
+          type="search"
           className="device-panel-search-input"
           placeholder="Search devices..."
           value={searchQuery}

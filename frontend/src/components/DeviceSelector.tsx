@@ -56,7 +56,7 @@ function DeviceSelector({ selectedIds, onChange }: DeviceSelectorProps) {
         <div className="device-selector-dropdown">
           <div className="device-selector-search">
             <input
-              type="text"
+              type="search"
               placeholder="Search by name, host, or type..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}

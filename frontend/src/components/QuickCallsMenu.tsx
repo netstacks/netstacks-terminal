@@ -73,7 +73,7 @@ export default function QuickCallsMenu({
       <div className="quick-calls-search">
         <input
           ref={searchRef}
-          type="text"
+          type="search"
           placeholder="Search quick calls..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}

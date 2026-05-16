@@ -73,7 +73,7 @@ export default function SnippetsMenu({
       <div className="snippets-menu-search">
         <input
           ref={searchRef}
-          type="text"
+          type="search"
           placeholder="Search snippets..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
