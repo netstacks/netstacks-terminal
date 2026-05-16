@@ -103,6 +103,10 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
   const [content, setContent] = useState(script.content);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  // AbortController for the in-flight runScriptStream. Stop button calls
+  // .abort() which closes the SSE stream — the backend's tx.closed()
+  // handler then kills the underlying Python child (P1-4).
+  const runAbortRef = useRef<AbortController | null>(null);
   const [output, setOutput] = useState<ScriptOutput | MultiDeviceOutput | null>(null);
   const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
@@ -392,6 +396,8 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
         const collectedStdout: string[] = [];
         const collectedStderr: string[] = [];
 
+        const abort = new AbortController();
+        runAbortRef.current = abort;
         await runScriptStream(currentScriptId, options, (event: ScriptStreamEvent) => {
           switch (event.event) {
             case 'status':
@@ -413,7 +419,7 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
               setError(event.data);
               break;
           }
-        });
+        }, abort.signal);
 
         // Convert to ScriptOutput for final display
         setStreamStatus(null);
@@ -424,8 +430,24 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
           duration_ms: finalDuration,
         });
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to run script');
+        // Aborts (Stop button) come through as DOMException/AbortError —
+        // surface them as a friendly "Stopped" line, not an error.
+        const aborted = runAbortRef.current?.signal.aborted ||
+          (err instanceof Error && (err.name === 'AbortError' || /aborted/i.test(err.message)));
+        if (aborted) {
+          setStreamStatus(null);
+          setOutput({
+            stdout: collectedStdout.join('\n'),
+            stderr: collectedStderr.join('\n'),
+            exit_code: -1,
+            duration_ms: 0,
+          });
+          setError('Stopped by user — Python process was killed on the agent.');
+        } else {
+          setError(err instanceof Error ? err.message : 'Failed to run script');
+        }
       } finally {
+        runAbortRef.current = null;
         setRunning(false);
         setStreamStatus(null);
       }
@@ -690,6 +712,14 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
               {Icons.check}
               <span>{approving ? 'Approving...' : 'Approve to Run'}</span>
             </button>
+          ) : running ? (
+            <button
+              className="script-editor-btn danger"
+              onClick={() => runAbortRef.current?.abort()}
+              title="Stop — closes the SSE stream and kills the Python process"
+            >
+              <span>Stop</span>
+            </button>
           ) : (
             <button
               className="script-editor-btn primary"
@@ -698,7 +728,7 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
               title="Run (Cmd+Enter)"
             >
               {Icons.play}
-              <span>{running ? 'Running...' : 'Run'}</span>
+              <span>Run</span>
             </button>
           )}
         </div>

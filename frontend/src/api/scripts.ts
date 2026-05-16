@@ -221,6 +221,7 @@ export async function runScriptStream(
   id: string,
   options: RunScriptOptions | undefined,
   onEvent: (event: ScriptStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const client = getClient();
   const baseUrl = client.baseUrl;
@@ -235,10 +236,14 @@ export async function runScriptStream(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  // Signal is plumbed all the way through fetch — aborting it closes the
+  // SSE stream, which trips the backend's tx.closed() handler and kills
+  // the underlying Python child (see agent/src/scripts.rs P1-4).
   const response = await fetch(`${baseUrl}/api/scripts/${id}/stream`, {
     method: 'POST',
     headers,
     body: JSON.stringify(options || {}),
+    signal,
   });
 
   if (!response.ok) {

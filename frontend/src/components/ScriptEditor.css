@@ -528,3 +528,15 @@
 .output-exit-code + .output-exit-code {
   margin-left: 4px;
 }
+
+/* P3-13: Stop button while a streaming script is running. */
+.script-editor-btn.danger {
+  background: #d33b3b;
+  color: #fff;
+  border-color: #d33b3b;
+}
+
+.script-editor-btn.danger:hover:not(:disabled) {
+  background: #e85050;
+  border-color: #e85050;
+}
