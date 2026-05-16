@@ -1998,6 +1998,251 @@ impl DataProvider for LocalDataProvider {
         *self.master_salt.write() = None;
     }
 
+    async fn change_master_password(
+        &self,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), ProviderError> {
+        if new_password.len() < MIN_MASTER_PASSWORD_LEN {
+            return Err(ProviderError::Validation(format!(
+                "New master password must be at least {} characters",
+                MIN_MASTER_PASSWORD_LEN
+            )));
+        }
+        if old_password == new_password {
+            return Err(ProviderError::Validation(
+                "New password must differ from the old password".to_string(),
+            ));
+        }
+
+        // Vault must be unlocked — we need the cached old vault to decrypt
+        // existing blobs without an extra Argon2id per row.
+        let old_vault = self.get_vault()?;
+
+        // Verify the old password against the stored verification record
+        // before touching any data. unlock() does this with rate-limiting
+        // built in; do it inline here so we don't double-toggle lock state.
+        let verification_row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT verification_data FROM vault_config WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+        let verification_data = verification_row
+            .ok_or_else(|| ProviderError::Validation("No master password set".to_string()))?
+            .0;
+        let verification = EncryptedData::from_bytes(&verification_data)
+            .map_err(|e| ProviderError::Encryption(e.to_string()))?;
+        let decrypted = crypto::decrypt(&verification, old_password)
+            .map_err(|_| ProviderError::InvalidPassword)?;
+        if decrypted.as_bytes() != VAULT_VERIFICATION.as_bytes() {
+            return Err(ProviderError::InvalidPassword);
+        }
+
+        // Derive the new vault + salt up front so any KDF failure aborts
+        // before we open the transaction.
+        let new_salt = crypto::generate_salt();
+        let new_vault = crypto::derive_vault(new_password, &new_salt)
+            .map_err(|e| ProviderError::Encryption(e.to_string()))?;
+
+        // Re-encrypt every BLOB column that holds vault-encrypted data, all
+        // in one transaction. The list mirrors the `encrypted_data` columns
+        // in schema.sql plus `documents.encrypted_content` (Secure Notes)
+        // and `quick_actions.private_key_encrypted`.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        // (table, id-column, blob-column)
+        let table_specs: &[(&str, &str, &str)] = &[
+            ("profile_credentials", "profile_id", "encrypted_data"),
+            ("netbox_tokens", "source_id", "encrypted_data"),
+            ("librenms_tokens", "source_id", "encrypted_data"),
+            ("api_keys", "key_type", "encrypted_data"),
+            ("api_resource_credentials", "resource_id", "encrypted_data"),
+            ("quick_actions", "id", "private_key_encrypted"),
+        ];
+        for (table, id_col, blob_col) in table_specs {
+            let select_sql = format!("SELECT {}, {} FROM {}", id_col, blob_col, table);
+            let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&select_sql)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| ProviderError::Database(e.to_string()))?;
+            for (row_id, blob) in rows {
+                if blob.is_empty() {
+                    continue; // private_key_encrypted is nullable on quick_actions
+                }
+                let encrypted = EncryptedData::from_bytes(&blob)
+                    .map_err(|e| ProviderError::Encryption(format!(
+                        "{} row {}: bad blob format: {}", table, row_id, e
+                    )))?;
+                let plaintext = crypto::decrypt_with_vault(&encrypted, &old_vault)
+                    .map_err(|e| ProviderError::Encryption(format!(
+                        "{} row {}: decrypt failed: {}", table, row_id, e
+                    )))?;
+                let re_encrypted = crypto::encrypt_with_vault(&plaintext, &new_vault, &new_salt)
+                    .map_err(|e| ProviderError::Encryption(format!(
+                        "{} row {}: re-encrypt failed: {}", table, row_id, e
+                    )))?;
+                let update_sql = format!(
+                    "UPDATE {} SET {} = ? WHERE {} = ?",
+                    table, blob_col, id_col
+                );
+                sqlx::query(&update_sql)
+                    .bind(re_encrypted.to_bytes())
+                    .bind(&row_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| ProviderError::Database(e.to_string()))?;
+            }
+        }
+
+        // Secure Notes — documents.encrypted_content is nullable; rotate
+        // only the rows that have a non-null blob. The same handling for
+        // document_versions (Secure Note revision history).
+        for (table, blob_col) in &[
+            ("documents", "encrypted_content"),
+            ("document_versions", "encrypted_content"),
+        ] {
+            let select_sql = format!(
+                "SELECT id, {} FROM {} WHERE {} IS NOT NULL",
+                blob_col, table, blob_col
+            );
+            let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&select_sql)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| ProviderError::Database(e.to_string()))?;
+            for (row_id, blob) in rows {
+                let encrypted = EncryptedData::from_bytes(&blob)
+                    .map_err(|e| ProviderError::Encryption(format!(
+                        "{} row {}: bad blob format: {}", table, row_id, e
+                    )))?;
+                let plaintext = crypto::decrypt_with_vault(&encrypted, &old_vault)
+                    .map_err(|e| ProviderError::Encryption(format!(
+                        "{} row {}: decrypt failed: {}", table, row_id, e
+                    )))?;
+                let re_encrypted = crypto::encrypt_with_vault(&plaintext, &new_vault, &new_salt)
+                    .map_err(|e| ProviderError::Encryption(format!(
+                        "{} row {}: re-encrypt failed: {}", table, row_id, e
+                    )))?;
+                let update_sql = format!("UPDATE {} SET {} = ? WHERE id = ?", table, blob_col);
+                sqlx::query(&update_sql)
+                    .bind(re_encrypted.to_bytes())
+                    .bind(&row_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| ProviderError::Database(e.to_string()))?;
+            }
+        }
+
+        // Replace the verification record with one encrypted under the new
+        // password. set_master_password()'s Argon2id derivation for this
+        // single blob is fine.
+        let new_verification = crypto::encrypt(VAULT_VERIFICATION, new_password)
+            .map_err(|e| ProviderError::Encryption(e.to_string()))?;
+        sqlx::query("UPDATE vault_config SET verification_data = ? WHERE id = 1")
+            .bind(new_verification.to_bytes())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        // Swap in-memory state to the new vault. Failure mode if this point
+        // is ever reached with a panic is benign: the on-disk vault is
+        // already under the new password, and the next unlock will rebuild
+        // master_vault/master_salt from new_password.
+        *self.master_vault.write() = Some(new_vault);
+        *self.master_salt.write() = Some(new_salt);
+
+        Ok(())
+    }
+
+    async fn wipe_vault(&self, confirm_password: &str) -> Result<(), ProviderError> {
+        // Verify the password against the verification record before
+        // destroying any data. Avoids going through unlock() so we don't
+        // hit the unlock cooldown counter for a confirmed admin action.
+        let verification_row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT verification_data FROM vault_config WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ProviderError::Database(e.to_string()))?;
+        let verification_data = verification_row
+            .ok_or_else(|| ProviderError::Validation("No master password set".to_string()))?
+            .0;
+        let verification = EncryptedData::from_bytes(&verification_data)
+            .map_err(|e| ProviderError::Encryption(e.to_string()))?;
+        let decrypted = crypto::decrypt(&verification, confirm_password)
+            .map_err(|_| ProviderError::InvalidPassword)?;
+        if decrypted.as_bytes() != VAULT_VERIFICATION.as_bytes() {
+            return Err(ProviderError::InvalidPassword);
+        }
+
+        // Wipe every vault-encrypted table + the master-password record,
+        // all in one transaction so a mid-wipe failure doesn't leave a
+        // half-wiped vault.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        let tables: &[&str] = &[
+            "profile_credentials",
+            "netbox_tokens",
+            "librenms_tokens",
+            "api_keys",
+            "api_resource_credentials",
+        ];
+        for table in tables {
+            sqlx::query(&format!("DELETE FROM {}", table))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ProviderError::Database(e.to_string()))?;
+        }
+        // Quick-action private keys live alongside their action — null the
+        // blob rather than dropping the action row.
+        sqlx::query("UPDATE quick_actions SET private_key_encrypted = NULL WHERE private_key_encrypted IS NOT NULL")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+        // Secure-note bodies — clear the blob, preserve the document row.
+        sqlx::query("UPDATE documents SET encrypted_content = NULL WHERE encrypted_content IS NOT NULL")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+        sqlx::query("UPDATE document_versions SET encrypted_content = NULL WHERE encrypted_content IS NOT NULL")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+        // Drop the master-password marker so vault_status reports
+        // has_master_password=false and the UI re-prompts for a fresh setup.
+        sqlx::query("DELETE FROM vault_config WHERE id = 1")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| ProviderError::Database(e.to_string()))?;
+
+        // Zeroize the in-memory key.
+        *self.master_vault.write() = None;
+        *self.master_salt.write() = None;
+        // Reset the unlock-attempts cooldown so the user can immediately set
+        // a fresh master password.
+        let mut attempts = self.unlock_attempts.lock();
+        attempts.failures = 0;
+        attempts.next_allowed_at_epoch = 0;
+
+        Ok(())
+    }
+
     fn vault_encrypt_string(&self, value: &str) -> Result<Vec<u8>, ProviderError> {
         self.vault_store_string(value)
     }

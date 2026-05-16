@@ -445,6 +445,60 @@ pub async fn lock_vault(State(state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// Request body for changing the master password
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+impl std::fmt::Debug for ChangePasswordRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChangePasswordRequest")
+            .field("old_password", &"[REDACTED]")
+            .field("new_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Rotate the master password. Vault must be unlocked. Re-encrypts every
+/// stored credential / token / API key / secure note under the new key in
+/// a single transaction.
+pub async fn change_master_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .provider
+        .change_master_password(&req.old_password, &req.new_password)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for wiping the vault
+#[derive(Deserialize)]
+pub struct WipeVaultRequest {
+    pub confirm_password: String,
+}
+
+impl std::fmt::Debug for WipeVaultRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WipeVaultRequest")
+            .field("confirm_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Wipe every vault-encrypted value and reset the master-password record.
+/// Caller must supply the current password as confirmation.
+pub async fn wipe_vault(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WipeVaultRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.provider.wipe_vault(&req.confirm_password).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // === Vault Biometric (Touch ID) Endpoints — macOS-only meaningful ===
 
 /// Status of biometric vault unlock for the current device.

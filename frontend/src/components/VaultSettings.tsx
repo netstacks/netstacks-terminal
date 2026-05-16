@@ -11,6 +11,8 @@ import {
   type BiometricStatus,
   type ApiKeyType,
   API_KEY_LABELS,
+  changeMasterPassword,
+  wipeVault,
 } from '../api/vault'
 import { confirmDialog } from './ConfirmDialog'
 import { useSubmitting } from '../hooks/useSubmitting'
@@ -26,6 +28,16 @@ export default function VaultSettings() {
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [unlockPassword, setUnlockPassword] = useState('')
+
+  // Change-password form (visible only when unlocked)
+  const [changeMode, setChangeMode] = useState(false)
+  const [changeOldPassword, setChangeOldPassword] = useState('')
+  const [changeNewPassword, setChangeNewPassword] = useState('')
+  const [changeConfirmPassword, setChangeConfirmPassword] = useState('')
+
+  // Wipe-vault form (visible only when unlocked)
+  const [wipeMode, setWipeMode] = useState(false)
+  const [wipeConfirmPassword, setWipeConfirmPassword] = useState('')
 
   // API key management states
   const [apiKeyStatuses, setApiKeyStatuses] = useState<Record<ApiKeyType, boolean>>({
@@ -128,6 +140,79 @@ export default function VaultSettings() {
         await fetchStatus()
       } catch (err) {
         setError('Failed to lock vault')
+      }
+    })
+  }
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setSuccess(null)
+
+    if (changeNewPassword.length < 8) {
+      setError('New password must be at least 8 characters')
+      return
+    }
+    if (changeNewPassword !== changeConfirmPassword) {
+      setError('New passwords do not match')
+      return
+    }
+    if (changeOldPassword === changeNewPassword) {
+      setError('New password must differ from the old one')
+      return
+    }
+
+    await run(async () => {
+      try {
+        await changeMasterPassword(changeOldPassword, changeNewPassword)
+        setSuccess('Master password rotated. All stored credentials re-encrypted.')
+        setChangeOldPassword('')
+        setChangeNewPassword('')
+        setChangeConfirmPassword('')
+        setChangeMode(false)
+      } catch (err: unknown) {
+        const e = err as { response?: { data?: { error?: string } } }
+        setError(e?.response?.data?.error || 'Failed to change master password')
+      }
+    })
+  }
+
+  const handleWipeVault = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setSuccess(null)
+
+    if (!wipeConfirmPassword) {
+      setError('Enter your master password to confirm wipe')
+      return
+    }
+
+    const ok = await confirmDialog({
+      title: 'Wipe the vault?',
+      body: (
+        <>
+          This <strong>permanently deletes</strong> every stored credential,
+          API token, NetBox/LibreNMS token, secure-note body, and quick-action
+          private key. The master password is also cleared so you can set a
+          new one. Sessions referencing wiped credentials will fail to
+          connect until re-provisioned.
+        </>
+      ),
+      confirmLabel: 'Wipe everything',
+      destructive: true,
+    })
+    if (!ok) return
+
+    await run(async () => {
+      try {
+        await wipeVault(wipeConfirmPassword)
+        setSuccess('Vault wiped. Set a new master password to continue.')
+        setWipeConfirmPassword('')
+        setWipeMode(false)
+        await fetchStatus()
+      } catch (err: unknown) {
+        const e = err as { response?: { data?: { error?: string } } }
+        setError(e?.response?.data?.error || 'Failed to wipe vault')
       }
     })
   }
@@ -381,6 +466,140 @@ export default function VaultSettings() {
           <button className="btn-lock" onClick={handleLockVault} disabled={submitting}>
             {submitting ? 'Locking…' : 'Lock Vault'}
           </button>
+
+          {/* Change master password */}
+          <div className="vault-rotate-section">
+            <h4>Change Master Password</h4>
+            {!changeMode ? (
+              <>
+                <p className="vault-note">
+                  Rotate your master password. Every stored credential, API
+                  token, and secure-note body is re-encrypted under the new
+                  key in a single transaction.
+                </p>
+                <button
+                  className="btn-secondary"
+                  onClick={() => { setChangeMode(true); setError(null); setSuccess(null) }}
+                  disabled={submitting}
+                >
+                  Change Master Password
+                </button>
+              </>
+            ) : (
+              <form className="vault-form" onSubmit={handleChangePassword}>
+                <div className="form-group">
+                  <label htmlFor="change-old-password">Current Master Password</label>
+                  <input
+                    id="change-old-password"
+                    type="password"
+                    value={changeOldPassword}
+                    onChange={e => setChangeOldPassword(e.target.value)}
+                    autoComplete="current-password"
+                    autoFocus
+                    disabled={submitting}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="change-new-password">New Master Password</label>
+                  <input
+                    id="change-new-password"
+                    type="password"
+                    value={changeNewPassword}
+                    onChange={e => setChangeNewPassword(e.target.value)}
+                    placeholder="At least 8 characters"
+                    autoComplete="new-password"
+                    disabled={submitting}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="change-confirm-password">Confirm New Password</label>
+                  <input
+                    id="change-confirm-password"
+                    type="password"
+                    value={changeConfirmPassword}
+                    onChange={e => setChangeConfirmPassword(e.target.value)}
+                    autoComplete="new-password"
+                    disabled={submitting}
+                  />
+                </div>
+                <div className="vault-form-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setChangeMode(false)
+                      setChangeOldPassword('')
+                      setChangeNewPassword('')
+                      setChangeConfirmPassword('')
+                      setError(null)
+                    }}
+                    disabled={submitting}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn-primary" disabled={submitting}>
+                    {submitting ? 'Rotating…' : 'Change Password'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+
+          {/* Wipe vault */}
+          <div className="vault-rotate-section vault-rotate-section-danger">
+            <h4>Wipe Vault</h4>
+            {!wipeMode ? (
+              <>
+                <p className="vault-note">
+                  Permanently delete every credential, token, and secure note
+                  encrypted by this vault, and clear the master password so a
+                  fresh one can be set. Use this if you've forgotten your
+                  password and accept losing access to stored data.
+                </p>
+                <button
+                  className="btn-danger"
+                  onClick={() => { setWipeMode(true); setError(null); setSuccess(null) }}
+                  disabled={submitting}
+                >
+                  Wipe Vault…
+                </button>
+              </>
+            ) : (
+              <form className="vault-form" onSubmit={handleWipeVault}>
+                <div className="form-group">
+                  <label htmlFor="wipe-confirm-password">
+                    Confirm with current master password
+                  </label>
+                  <input
+                    id="wipe-confirm-password"
+                    type="password"
+                    value={wipeConfirmPassword}
+                    onChange={e => setWipeConfirmPassword(e.target.value)}
+                    autoComplete="current-password"
+                    autoFocus
+                    disabled={submitting}
+                  />
+                </div>
+                <div className="vault-form-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setWipeMode(false)
+                      setWipeConfirmPassword('')
+                      setError(null)
+                    }}
+                    disabled={submitting}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn-danger" disabled={submitting}>
+                    {submitting ? 'Wiping…' : 'Wipe Vault'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
 
           {/* Touch ID — macOS only */}
           {biometric?.supported && (

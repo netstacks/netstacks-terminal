@@ -57,6 +57,34 @@ export async function lockVault(): Promise<void> {
   await getClient().http.post('/vault/lock');
 }
 
+/**
+ * Rotate the master password. Vault must be unlocked. Every stored
+ * credential / token / API key / secure note is re-encrypted under the
+ * new key atomically; on any failure the vault stays on the old password.
+ */
+export async function changeMasterPassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  if (getCurrentMode() === 'enterprise') throw new Error('Local vault is not available in enterprise mode');
+  await getClient().http.put('/vault/password', {
+    old_password: oldPassword,
+    new_password: newPassword,
+  });
+}
+
+/**
+ * Wipe every vault-encrypted value and reset the master-password marker.
+ * After this call vault_status reports has_master_password=false; the
+ * caller can set a fresh password. Requires the current password.
+ */
+export async function wipeVault(confirmPassword: string): Promise<void> {
+  if (getCurrentMode() === 'enterprise') throw new Error('Local vault is not available in enterprise mode');
+  await getClient().http.post('/vault/wipe', {
+    confirm_password: confirmPassword,
+  });
+}
+
 // === Biometric (Touch ID) unlock ===
 
 export interface BiometricStatus {

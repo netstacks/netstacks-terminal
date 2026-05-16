@@ -653,9 +653,10 @@ fn create_app(app_state: Arc<AppState>, pool: SqlitePool, lsp_state: LspState) -
         )
         // Vault
         .route("/vault/status", get(api::vault_status))
-        .route("/vault/password", post(api::set_master_password))
+        .route("/vault/password", post(api::set_master_password).put(api::change_master_password))
         .route("/vault/unlock", post(api::unlock_vault))
         .route("/vault/lock", post(api::lock_vault))
+        .route("/vault/wipe", post(api::wipe_vault))
         // Touch ID / biometric vault unlock (macOS only meaningful)
         .route("/vault/biometric/status", get(api::biometric_status))
         .route("/vault/biometric/enable", post(api::enable_biometric))

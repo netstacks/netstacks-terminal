@@ -96,6 +96,24 @@ pub trait DataProvider: Send + Sync {
     /// Set the master password (first time setup)
     async fn set_master_password(&self, password: &str) -> Result<(), ProviderError>;
 
+    /// Rotate the master password. Verifies the old password, re-encrypts
+    /// every vault blob (credentials, API tokens, secure-note bodies, etc.)
+    /// under a freshly-derived key, and atomically swaps the verification
+    /// record. Vault must be unlocked. On any failure mid-rotation, the
+    /// transaction rolls back and the stored data stays under the old key.
+    async fn change_master_password(
+        &self,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), ProviderError>;
+
+    /// Wipe every vault-encrypted value (credentials, API keys, NetBox /
+    /// LibreNMS tokens, API-resource credentials, Quick-Action keys, secure
+    /// notes) and clear the master-password record. Vault is left locked
+    /// and back in the "no master password" state. Requires the current
+    /// password as confirmation.
+    async fn wipe_vault(&self, confirm_password: &str) -> Result<(), ProviderError>;
+
     /// Unlock the vault with the master password
     async fn unlock(&self, password: &str) -> Result<(), ProviderError>;
 

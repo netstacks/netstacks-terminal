@@ -356,3 +356,28 @@
   color: var(--color-warning, #dcdcaa);
   line-height: 1.5;
 }
+
+/* Master-password rotation + wipe sections (P1-10) */
+.vault-rotate-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border, #3c3c3c);
+}
+
+.vault-rotate-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary, #cccccc);
+}
+
+.vault-rotate-section-danger h4 {
+  color: var(--color-error, #f48771);
+}
+
+.vault-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
