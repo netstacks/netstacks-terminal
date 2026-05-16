@@ -9407,8 +9407,8 @@ pub struct LocalFileReadRequest {
 pub async fn local_file_read(
     Json(req): Json<LocalFileReadRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_local_path(&req.path)?;
-    let content = tokio::fs::read_to_string(&req.path).await.map_err(|e| ApiError {
+    let safe = validate_local_path(&req.path)?;
+    let content = tokio::fs::read_to_string(&safe).await.map_err(|e| ApiError {
         error: format!("Failed to read {}: {}", req.path, e),
         code: "FS_READ".to_string(),
     })?;
@@ -9424,8 +9424,8 @@ pub struct LocalFileWriteRequest {
 pub async fn local_file_write(
     Json(req): Json<LocalFileWriteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_local_path(&req.path)?;
-    tokio::fs::write(&req.path, &req.content).await.map_err(|e| ApiError {
+    let safe = validate_local_path(&req.path)?;
+    tokio::fs::write(&safe, &req.content).await.map_err(|e| ApiError {
         error: format!("Failed to write {}: {}", req.path, e),
         code: "FS_WRITE".to_string(),
     })?;
@@ -9440,8 +9440,9 @@ pub struct LocalDirListRequest {
 pub async fn local_dir_list(
     Json(req): Json<LocalDirListRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let safe = validate_local_path(&req.path)?;
     let mut entries = Vec::new();
-    let mut dir = tokio::fs::read_dir(&req.path).await.map_err(|e| ApiError {
+    let mut dir = tokio::fs::read_dir(&safe).await.map_err(|e| ApiError {
         error: format!("Failed to read dir {}: {}", req.path, e),
         code: "FS_READDIR".to_string(),
     })?;
@@ -9485,8 +9486,8 @@ pub struct LocalFileMkdirRequest {
 pub async fn local_file_mkdir(
     Json(req): Json<LocalFileMkdirRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_local_path(&req.path)?;
-    tokio::fs::create_dir_all(&req.path).await.map_err(|e| ApiError {
+    let safe = validate_local_path(&req.path)?;
+    tokio::fs::create_dir_all(&safe).await.map_err(|e| ApiError {
         error: format!("Failed to mkdir {}: {}", req.path, e),
         code: "FS_MKDIR".to_string(),
     })?;
@@ -9502,11 +9503,11 @@ pub struct LocalFileDeleteRequest {
 pub async fn local_file_delete(
     Json(req): Json<LocalFileDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_local_path(&req.path)?;
+    let safe = validate_local_path(&req.path)?;
     if req.is_dir {
-        tokio::fs::remove_dir_all(&req.path).await
+        tokio::fs::remove_dir_all(&safe).await
     } else {
-        tokio::fs::remove_file(&req.path).await
+        tokio::fs::remove_file(&safe).await
     }.map_err(|e| ApiError {
         error: format!("Failed to delete {}: {}", req.path, e),
         code: "FS_DELETE".to_string(),
@@ -9523,9 +9524,9 @@ pub struct LocalFileRenameRequest {
 pub async fn local_file_rename(
     Json(req): Json<LocalFileRenameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_local_path(&req.from)?;
-    validate_local_path(&req.to)?;
-    tokio::fs::rename(&req.from, &req.to).await.map_err(|e| ApiError {
+    let safe_from = validate_local_path(&req.from)?;
+    let safe_to = validate_local_path(&req.to)?;
+    tokio::fs::rename(&safe_from, &safe_to).await.map_err(|e| ApiError {
         error: format!("Failed to rename: {}", e),
         code: "FS_RENAME".to_string(),
     })?;
@@ -9540,7 +9541,8 @@ pub struct LocalFileExistsRequest {
 pub async fn local_file_exists(
     Json(req): Json<LocalFileExistsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let exists = tokio::fs::try_exists(&req.path).await.unwrap_or(false);
+    let safe = validate_local_path(&req.path)?;
+    let exists = tokio::fs::try_exists(&safe).await.unwrap_or(false);
     Ok(Json(serde_json::json!({ "exists": exists })))
 }
 
@@ -9553,8 +9555,8 @@ pub struct LocalRunPythonRequest {
 pub async fn local_run_python(
     Json(req): Json<LocalRunPythonRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    validate_local_path(&req.path)?;
-    let content = tokio::fs::read_to_string(&req.path).await.map_err(|e| ApiError {
+    let safe = validate_local_path(&req.path)?;
+    let content = tokio::fs::read_to_string(&safe).await.map_err(|e| ApiError {
         error: format!("Failed to read {}: {}", req.path, e),
         code: "FS_READ".to_string(),
     })?;

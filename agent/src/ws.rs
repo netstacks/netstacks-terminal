@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use subtle::ConstantTimeEq;
+
 use crate::api::AppState;
 use crate::models::{AuthType, PortForward};
 use crate::terminal::{TerminalManager, TerminalMessage};
@@ -85,9 +87,14 @@ pub async fn terminal_ws(
     State(state): State<WsState>,
     Query(query): Query<WsQuery>,
 ) -> impl IntoResponse {
-    // Validate auth token from query parameter
+    // Validate auth token from query parameter (constant-time compare,
+    // matching api.rs auth_middleware to prevent timing-based leaks)
     match &query.token {
-        Some(token) if token == &state.app_state.auth_token => {}
+        Some(token)
+            if token
+                .as_bytes()
+                .ct_eq(state.app_state.auth_token.as_bytes())
+                .into() => {}
         _ => {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -1159,9 +1166,13 @@ pub async fn topology_live_ws(
     State(state): State<WsState>,
     Query(query): Query<TopologyWsQuery>,
 ) -> impl IntoResponse {
-    // Validate auth token from query parameter (same pattern as terminal_ws)
+    // Validate auth token from query parameter (constant-time, same pattern as terminal_ws)
     match &query.token {
-        Some(token) if token == &state.app_state.auth_token => {}
+        Some(token)
+            if token
+                .as_bytes()
+                .ct_eq(state.app_state.auth_token.as_bytes())
+                .into() => {}
         _ => {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -1595,9 +1606,14 @@ pub async fn task_progress_ws(
     State(state): State<WsState>,
     Query(query): Query<TaskProgressWsQuery>,
 ) -> impl IntoResponse {
-    // Validate auth token from query parameter
+    // Validate auth token from query parameter (constant-time compare,
+    // matching api.rs auth_middleware to prevent timing-based leaks)
     match &query.token {
-        Some(token) if token == &state.app_state.auth_token => {}
+        Some(token)
+            if token
+                .as_bytes()
+                .ct_eq(state.app_state.auth_token.as_bytes())
+                .into() => {}
         _ => {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
