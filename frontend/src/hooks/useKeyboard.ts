@@ -352,6 +352,14 @@ export function useKeyboard(): UseKeyboardReturn {
   // Global keydown handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't steal shortcuts from Monaco editors. The capture-phase
+      // listener used to swallow Cmd+I (and any other binding Monaco
+      // also handled) before Monaco saw the key, breaking the inline
+      // AI copilot widget. Letting focused Monaco instances win means
+      // the per-editor addAction registrations actually fire.
+      const target = e.target as HTMLElement | null
+      if (target?.closest?.('.monaco-editor')) return
+
       // Check each registered action
       for (const [action, handler] of Object.entries(handlersRef.current)) {
         if (!handler) continue
