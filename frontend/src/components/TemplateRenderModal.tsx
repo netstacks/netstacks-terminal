@@ -29,9 +29,13 @@ export function TemplateRenderModal({
   const [isRendering, setIsRendering] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Extract variables when template content changes
+  // Extract variables when the template content changes OR when the
+  // modal is reopened (P1-6 audit: keying only off templateContent meant
+  // reopening the modal for the same template showed previously-typed
+  // values, because state survives close/reopen and the effect didn't
+  // re-fire when templateContent was unchanged).
   useEffect(() => {
-    if (templateContent) {
+    if (isOpen && templateContent) {
       const extracted = extractJinjaVariables(templateContent);
       setVariables(extracted);
 
@@ -53,7 +57,7 @@ export function TemplateRenderModal({
       setRenderedOutput(null);
       setError(null);
     }
-  }, [templateContent]);
+  }, [templateContent, isOpen]);
 
   const handleValueChange = useCallback((name: string, value: string) => {
     setValues((prev) => ({ ...prev, [name]: value }));

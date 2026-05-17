@@ -380,7 +380,27 @@ export default function IntegrationsTab() {
         const formData = new FormData();
         formData.append('file', file);
         const { data: result } = await getClient().http.post('/sessions/import', formData);
-        showToast(`Imported ${result.sessions_created || result.imported || 0} sessions successfully.`, 'success');
+        // Audit P1-12: previous code blindly toasted "Imported 0
+        // sessions successfully." for empty JSON, all-duplicates, and
+        // {success: false, errors: [...]} responses. Inspect the
+        // response shape before deciding success / warning / error.
+        const created = result.sessions_created ?? result.imported ?? 0;
+        const errors: unknown[] = Array.isArray(result.errors) ? result.errors : [];
+        if (result.success === false || (created === 0 && errors.length > 0)) {
+          showToast(
+            `Import failed: ${errors[0] ?? 'no sessions were created'}`,
+            'error',
+          );
+        } else if (created === 0) {
+          showToast('Nothing to import — the file contained no new sessions.', 'warning');
+        } else if (errors.length > 0) {
+          showToast(
+            `Imported ${created} sessions with ${errors.length} error${errors.length === 1 ? '' : 's'}.`,
+            'warning',
+          );
+        } else {
+          showToast(`Imported ${created} sessions successfully.`, 'success');
+        }
       } catch (err) {
         console.error('Import error:', err);
         showToast('Failed to import sessions. Please check the file format.', 'error');

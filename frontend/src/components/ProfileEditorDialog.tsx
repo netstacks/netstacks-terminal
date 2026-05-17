@@ -75,9 +75,18 @@ export default function ProfileEditorDialog({
   const [activeTab, setActiveTab] = useState<TabName>('auth');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Track the id of the profile we just created so a retry after a
+  // credential-storage failure becomes an update rather than another
+  // create — without this, the user got a duplicate profile per click.
+  // Audit P1-11.
+  const [persistedProfileId, setPersistedProfileId] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
-  const isEditing = !!profile;
+  // Either the parent gave us a profile to edit, OR we already
+  // persisted one this dialog session (e.g. previous save succeeded
+  // but credential storage failed). Both paths mean the next save
+  // is an update, not a create.
+  const isEditing = !!profile || !!persistedProfileId;
   const sourceProfile = cloneFrom || profile;
 
   // Auth tab state
@@ -201,6 +210,10 @@ export default function ProfileEditorDialog({
       setError(null);
       setNewCommunity('');
       setNewAutoCommand('');
+      // Reset retry-tracking — a fresh dialog open is a fresh session.
+      // Without this, closing+reopening Create mode after a credential
+      // failure would still update-instead-of-create.
+      setPersistedProfileId(null);
 
       // Focus name input after a short delay
       setTimeout(() => nameInputRef.current?.focus(), 50);
@@ -326,10 +339,18 @@ export default function ProfileEditorDialog({
       };
 
       let savedProfile: CredentialProfile;
-      if (isEditing && profile) {
-        savedProfile = await updateProfile(profile.id, profileData);
+      // Three cases:
+      //   • parent passed `profile` → edit that
+      //   • we created one earlier this session (persistedProfileId) → edit it
+      //   • neither → first-time create
+      const updateId = profile?.id ?? persistedProfileId;
+      if (updateId) {
+        savedProfile = await updateProfile(updateId, profileData);
       } else {
         savedProfile = await createProfile(profileData);
+        // Remember the id so a retry after credential-storage failure
+        // updates instead of creating a duplicate (audit P1-11).
+        setPersistedProfileId(savedProfile.id);
       }
 
       // Store credentials in vault if provided

@@ -87,7 +87,18 @@ export default function SharedTerminal({ token, controllerUrl }: SharedTerminalP
 
     const fit = new FitAddon();
     xterm.loadAddon(fit);
-    xterm.loadAddon(new WebLinksAddon((_event, uri) => window.open(uri, '_blank')));
+    // Mirror the Terminal.tsx pattern: try the Tauri shell plugin first
+    // (works in the desktop app, opens in the OS default browser) and
+    // fall back to window.open for browser/dev mode. Without this,
+    // clicking a URL in the shared-session viewer did nothing in Tauri.
+    xterm.loadAddon(new WebLinksAddon(async (_event, uri) => {
+      try {
+        const { open } = await import('@tauri-apps/plugin-shell');
+        await open(uri);
+      } catch {
+        window.open(uri, '_blank');
+      }
+    }));
 
     xterm.open(terminalRef.current);
     fit.fit();

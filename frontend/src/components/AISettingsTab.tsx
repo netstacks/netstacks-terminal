@@ -754,9 +754,17 @@ export default function AISettingsTab() {
       setSaving(providerType);
       setError(null);
 
-      // Store API key in vault (not needed for ollama/litellm)
+      // Store API key in vault (not needed for ollama/litellm). Track
+      // whether the vault write succeeded so a downstream setAiConfig
+      // failure can still mark hasKey=true (audit P1-14: previously
+      // the vault could store the key, setAiConfig could fail, the
+      // catch would surface the error, but the providerStatus
+      // hasKey=true update was unreachable → user saw "unconfigured"
+      // even though the key was in the vault).
+      let vaultWriteSucceeded = false;
       if (key && providerType !== 'ollama' && providerType !== 'litellm') {
         await storeAiApiKey(providerType, key);
+        vaultWriteSucceeded = true;
       }
 
       // Build and save config - use first model from configured models list
@@ -786,9 +794,29 @@ export default function AISettingsTab() {
           }
         }
       }
-      await setAiConfig(config);
+      try {
+        await setAiConfig(config);
+      } catch (cfgErr) {
+        // Vault succeeded but config save failed. Reflect the
+        // partial-success in providerStatus so the UI is honest about
+        // what actually persisted, then re-throw so the user sees the
+        // error toast.
+        if (vaultWriteSucceeded) {
+          setProviderStatus(prev => ({
+            ...prev,
+            [providerType]: {
+              ...prev[providerType],
+              hasKey: true,
+              connectionStatus: 'unconfigured' as ConnectionStatus,
+              connectionMessage: 'Key saved to vault, but config save failed',
+            },
+          }));
+          setApiKeys(prev => ({ ...prev, [providerType]: '' }));
+        }
+        throw cfgErr;
+      }
 
-      // Update status
+      // Full success — update status, clear input, toast.
       setProviderStatus(prev => ({
         ...prev,
         [providerType]: {
