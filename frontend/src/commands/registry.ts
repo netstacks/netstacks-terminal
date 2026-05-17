@@ -67,6 +67,14 @@ const debug = (...args: unknown[]) => {
   }
 }
 
+// Token-scoped registration: each register() generates a unique symbol
+// for the {id, cmd} pair. The unregister returned to the caller closes
+// over that token and ONLY removes if the current registered entry is
+// still owned by it. Without this, dev-time duplicate-id sequences
+// (A registers → B overrides → A unmounts) had A's cleanup delete B's
+// active registration and silently leave the registry empty.
+const activeTokens = new Map<string, symbol>()
+
 export const useCommandStore = create<CommandStore>()(
   subscribeWithSelector((set, get) => ({
     commands: new Map<string, Command>(),
@@ -78,16 +86,33 @@ export const useCommandStore = create<CommandStore>()(
       if (existing) {
         debug(`Duplicate command id '${cmd.id}' — overriding previous registration.`)
       }
+      const token = Symbol(cmd.id)
+      activeTokens.set(cmd.id, token)
       // Map mutation needs a fresh Map instance so Zustand notifies subscribers.
       set((state) => {
         const next = new Map(state.commands)
         next.set(cmd.id, cmd)
         return { commands: next }
       })
-      return () => get().unregister(cmd.id)
+      // Token-scoped unregister: only delete if the current active
+      // token still matches ours. If a later register() under the
+      // same id replaced our entry, this is a no-op.
+      return () => {
+        if (activeTokens.get(cmd.id) !== token) return
+        activeTokens.delete(cmd.id)
+        set((state) => {
+          if (!state.commands.has(cmd.id)) return state
+          const next = new Map(state.commands)
+          next.delete(cmd.id)
+          return { commands: next }
+        })
+      }
     },
 
     unregister: (id) => {
+      // Explicit, non-token-scoped removal — used by callers who
+      // genuinely want the entry gone regardless of who owns it.
+      activeTokens.delete(id)
       set((state) => {
         if (!state.commands.has(id)) return state
         const next = new Map(state.commands)

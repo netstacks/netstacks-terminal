@@ -65,9 +65,15 @@ export default function WorkspaceSettingsTab() {
 
   useEffect(() => {
     // Best-effort: if the backend ever gains the endpoint, prefer the
-    // server-stored value (for cross-device sync). Until then this 404s
-    // and we keep the localStorage value already loaded above.
+    // server-stored value (for cross-device sync). Until then this
+    // 404s and we keep the localStorage value already loaded above.
+    // Mount guard via `cancelled` so a slow GET that resolves after
+    // the user closes the Settings panel doesn't setState on an
+    // unmounted component (React logs warnings, and the localStorage
+    // write becomes a phantom side effect).
+    let cancelled = false
     getClient().http.get('/settings/workspace-defaults').then(({ data }) => {
+      if (cancelled) return
       if (data && typeof data === 'object') {
         const merged = { ...loadWorkspaceDefaults(), ...data }
         setDefaults(merged)
@@ -76,6 +82,7 @@ export default function WorkspaceSettingsTab() {
         } catch { /* full disk etc. — fine to skip */ }
       }
     }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 
   const saveDefaults = useCallback(async (updated: WorkspaceDefaults) => {

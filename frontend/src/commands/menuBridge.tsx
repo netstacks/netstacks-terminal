@@ -112,36 +112,40 @@ export const MENU_ID_TO_COMMAND: Record<string, string> = {
  */
 export function MenuBridge(): null {
   useEffect(() => {
-    let unlisten: UnlistenFn | undefined
-
-    listen<unknown>('', async () => {
-      /* placeholder so TS doesn't strip the import */
-    }).catch(() => {})
-
     // Subscribe to every menu event we care about. listen() returns a
-    // promise that resolves to the unlisten function — we keep all of
-    // them and call them on unmount.
+    // promise that resolves to the unlisten function. We track a
+    // `cancelled` flag so unsubscribers that resolve AFTER unmount are
+    // invoked immediately — without this, StrictMode dev / hot reload
+    // would unmount before subscribe() finished and leave orphaned
+    // listeners that double-fire commands on subsequent menu clicks.
+    let cancelled = false
     const cleanups: UnlistenFn[] = []
-    const subscribe = async () => {
+    ;(async () => {
       for (const menuId of Object.keys(MENU_ID_TO_COMMAND)) {
+        if (cancelled) return
         try {
           const off = await listen(`menu://${menuId}`, () => {
             const commandId = MENU_ID_TO_COMMAND[menuId]
             if (!commandId) return
             void dispatchCommand(commandId, getActiveContext())
           })
+          if (cancelled) {
+            // Unmounted while we were awaiting — immediately tear down
+            // so we don't accumulate orphaned listeners.
+            off()
+            return
+          }
           cleanups.push(off)
         } catch {
           // Event subscription can fail if Tauri isn't fully booted;
           // we just lose the binding for this one item. Not fatal.
         }
       }
-    }
-    void subscribe()
+    })()
 
     return () => {
+      cancelled = true
       cleanups.forEach((off) => off())
-      if (unlisten) unlisten()
     }
   }, [])
 

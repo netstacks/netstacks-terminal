@@ -50,9 +50,14 @@ export function useCommand(cmd: Command): void {
     const unregister = register({
       ...cmd,
       run: () => cmdRef.current.run(),
-      when: cmd.when
-        ? (ctx) => (cmdRef.current.when ? cmdRef.current.when(ctx) : true)
-        : undefined,
+      // Always install the wrapper unconditionally. Previously this
+      // checked `cmd.when` at first-render and snapshot the truthiness
+      // forever — a command that started unconditional and later
+      // gained a `when` predicate would silently ignore the new gate
+      // because the registered command still had `when: undefined`.
+      // The wrapper delegates to cmdRef on every call so fresh closures
+      // always win.
+      when: (ctx) => (cmdRef.current.when ? cmdRef.current.when(ctx) : true),
     })
     return unregister
     // Intentionally only re-register on id change. The ref pattern

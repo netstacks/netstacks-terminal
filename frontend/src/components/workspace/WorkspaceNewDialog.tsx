@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listSessions } from '../../api/sessions'
 import { AgentGitOps } from '../../lib/gitOps'
@@ -55,10 +55,21 @@ export default function WorkspaceNewDialog({
   const [launchArgs, setLaunchArgs] = useState('')
   const [autoLaunch, setAutoLaunch] = useState(true)
   // Track which fields the user has manually touched so loading saved
-  // defaults doesn't clobber a value they're already typing.
-  const [touched, setTouched] = useState<{ aiTool: boolean; customCommand: boolean; launchArgs: boolean; autoLaunch: boolean }>({
-    aiTool: false, customCommand: false, launchArgs: false, autoLaunch: false,
-  })
+  // defaults doesn't clobber a value they're already typing. Stored in
+  // BOTH state (for rendering) and a ref (for the async backend-fetch
+  // callback below) — the state form has a stale-closure problem when
+  // read inside the deps-`[]` effect, but the ref always sees current
+  // values because we write through to both in every setTouched.
+  const touchedRef = useRef({ aiTool: false, customCommand: false, launchArgs: false, autoLaunch: false })
+  const [touched, setTouchedState] = useState(touchedRef.current)
+  const setTouched = useCallback(
+    (updater: (prev: typeof touchedRef.current) => typeof touchedRef.current) => {
+      const next = updater(touchedRef.current)
+      touchedRef.current = next
+      setTouchedState(next)
+    },
+    [],
+  )
   const [gitCheck, setGitCheck] = useState<{
     checking: boolean
     isRepo: boolean
@@ -82,11 +93,14 @@ export default function WorkspaceNewDialog({
   useEffect(() => {
     // Synchronous local-storage read first so the form fields don't
     // flash hardcoded defaults before the backend round-trip lands.
+    // Use touchedRef everywhere because the async .then() below would
+    // otherwise capture the initial `touched` state (all false) and
+    // clobber user typing that happened during the 50-200ms fetch.
     const local = loadWorkspaceDefaults()
-    if (!touched.aiTool) setAiTool(local.defaultAiTool)
-    if (!touched.customCommand) setCustomCommand(local.defaultCustomCommand)
-    if (!touched.launchArgs) setLaunchArgs(local.defaultLaunchArgs)
-    if (!touched.autoLaunch) setAutoLaunch(local.autoLaunchAi)
+    if (!touchedRef.current.aiTool) setAiTool(local.defaultAiTool)
+    if (!touchedRef.current.customCommand) setCustomCommand(local.defaultCustomCommand)
+    if (!touchedRef.current.launchArgs) setLaunchArgs(local.defaultLaunchArgs)
+    if (!touchedRef.current.autoLaunch) setAutoLaunch(local.autoLaunchAi)
 
     let cancelled = false
     getClient().http.get('/settings/workspace-defaults').then(({ data }) => {
@@ -97,14 +111,16 @@ export default function WorkspaceNewDialog({
         defaultLaunchArgs: string
         autoLaunchAi: boolean
       }>
-      if (d.defaultAiTool && !touched.aiTool) setAiTool(d.defaultAiTool)
-      if (typeof d.defaultCustomCommand === 'string' && !touched.customCommand) {
+      // Re-read the ref here, not the captured `touched` state — the
+      // user may have started typing between mount and this callback.
+      if (d.defaultAiTool && !touchedRef.current.aiTool) setAiTool(d.defaultAiTool)
+      if (typeof d.defaultCustomCommand === 'string' && !touchedRef.current.customCommand) {
         setCustomCommand(d.defaultCustomCommand)
       }
-      if (typeof d.defaultLaunchArgs === 'string' && !touched.launchArgs) {
+      if (typeof d.defaultLaunchArgs === 'string' && !touchedRef.current.launchArgs) {
         setLaunchArgs(d.defaultLaunchArgs)
       }
-      if (typeof d.autoLaunchAi === 'boolean' && !touched.autoLaunch) {
+      if (typeof d.autoLaunchAi === 'boolean' && !touchedRef.current.autoLaunch) {
         setAutoLaunch(d.autoLaunchAi)
       }
       // Mirror back to localStorage so the next dialog open hits the

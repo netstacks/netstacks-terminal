@@ -37,25 +37,37 @@ interface EditorFontSettings {
 }
 
 /**
- * Heuristic — most picks under Settings → Appearance → Font Family are
- * sans-serif (good for app chrome but unreadable in a code editor).
- * If the chosen family looks like a UI font, fall back to a monospace
- * stack for Monaco. Mono picks (SF Mono, Menlo, JetBrains Mono, Fira
- * Code) pass through unchanged.
+ * Decide whether the user's chosen Font Family is safe to pass to
+ * Monaco unchanged, or whether we should swap in a mono fallback.
+ *
+ * Previous heuristic ("does the name contain 'mono'?") had real false
+ * positives (Comic Mono, Monotype Corsiva — italic display!) and false
+ * negatives (Iosevka, Hack, JetBrains Mono — popular mono fonts whose
+ * name doesn't contain "mono"). Trying to enumerate every mono font
+ * is a losing battle.
+ *
+ * Cleaner: only intercept when the family is an exact match for one of
+ * the SETTINGS-DROPDOWN sans-serif presets. Anything else — including
+ * custom user input or fonts we don't recognise — passes through
+ * unchanged. The user is the authority on their font; we shouldn't
+ * second-guess.
+ *
+ * Hardcoded list because we control the Settings dropdown (see
+ * SettingsPanel.tsx Font Family options). If a new sans preset is
+ * ever added there, add it here too.
  */
+const KNOWN_SANS_PRESETS: ReadonlySet<string> = new Set([
+  "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif",
+  "-apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif",
+  "'Helvetica Neue', Helvetica, Arial, sans-serif",
+  'Inter, -apple-system, BlinkMacSystemFont, sans-serif',
+])
+
 function ensureMonoSafe(family: string): string {
-  const f = family.toLowerCase()
-  const looksMono =
-    f.includes('mono') ||
-    f.includes('menlo') ||
-    f.includes('consolas') ||
-    f.includes('fira code') ||
-    f.includes('cascadia') ||
-    f.includes('courier')
-  if (looksMono) return family
-  // Sans-serif setting — prepend a sensible mono so code stays
-  // readable while still respecting the user's overall preference.
-  return `'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace`
+  if (KNOWN_SANS_PRESETS.has(family)) {
+    return `'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace`
+  }
+  return family
 }
 
 export function useEditorFontSettings(): EditorFontSettings {

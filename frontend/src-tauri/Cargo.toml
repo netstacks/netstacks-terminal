@@ -36,8 +36,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-tokio = { version = "1", features = ["macros"] }
+tokio = { version = "1", features = ["macros", "fs"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# Poison-free mutexes for shared Tauri state — a panic in any
+# tauri::command handler can't permanently break the MenuItemRegistry
+# (and any future shared state should consume this too).
+parking_lot = "0.12"
 
 [profile.release]
 strip = false

@@ -18,7 +18,13 @@ use tauri_plugin_shell::ShellExt;
 ///
 /// Predefined items (cut/copy/paste/quit/etc.) are not tracked — the
 /// OS handles their enabled state natively based on focus.
-pub struct MenuItemRegistry(pub Mutex<HashMap<String, MenuItem<tauri::Wry>>>);
+///
+/// Uses parking_lot::Mutex so a panic in any tauri::command handler
+/// can't poison the lock and permanently break menu enable/disable
+/// (the frontend's MenuBridge silently swallows the resulting Err
+/// in set_menu_enabled_batch, leaving the user with stale menu state
+/// and no signal).
+pub struct MenuItemRegistry(pub parking_lot::Mutex<HashMap<String, MenuItem<tauri::Wry>>>);
 
 /// Stores the sidecar auth token so the frontend can retrieve it via IPC command.
 /// The token event may fire before the webview JS loads, so this provides a
@@ -766,7 +772,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SidecarToken(Mutex::new(None)))
         .manage(SidecarChild(Mutex::new(None)))
-        .manage(MenuItemRegistry(Mutex::new(HashMap::new())))
+        .manage(MenuItemRegistry(parking_lot::Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![get_sidecar_token, install_ca_certificate, fetch_controller_cert, open_new_window, open_quicklook, set_menu_enabled_batch, read_dropped_file])
         .setup(|app| {
             // Build the native menu bar (macOS/Windows/Linux) and
@@ -775,7 +781,9 @@ fn main() {
             let (menu, item_registry) = build_menu(app.handle())?;
             {
                 let state: tauri::State<MenuItemRegistry> = app.state();
-                let mut guard = state.0.lock().expect("MenuItemRegistry mutex poisoned");
+                // parking_lot::Mutex.lock() doesn't return Result —
+                // can't be poisoned.
+                let mut guard = state.0.lock();
                 *guard = item_registry;
             }
             app.set_menu(menu)?;
@@ -1225,7 +1233,8 @@ fn set_menu_enabled_batch(
     state: tauri::State<'_, MenuItemRegistry>,
     items: Vec<MenuEnabledUpdate>,
 ) -> Result<(), String> {
-    let registry = state.0.lock().map_err(|e| e.to_string())?;
+    // parking_lot::Mutex — infallible lock, no poison handling.
+    let registry = state.0.lock();
     for update in items {
         if let Some(item) = registry.get(&update.id) {
             // Tauri's set_enabled returns Result; we ignore individual
