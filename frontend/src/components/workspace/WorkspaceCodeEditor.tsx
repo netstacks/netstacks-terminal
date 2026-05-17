@@ -80,6 +80,9 @@ export default function WorkspaceCodeEditor({
     setError(null)
     editorRef.current = null
     modelRef.current = null
+    // Tear down any open copilot state so the widget doesn't linger
+    // pointing at the previous file's editor instance.
+    copilot.reset()
     fileOps.readFile(filePath).then(text => {
       if (cancelled) return
       savedContentRef.current = text

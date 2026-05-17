@@ -23,6 +23,7 @@ export default function MonacoCopilotWidget({
 }: MonacoCopilotWidgetProps) {
   const [prompt, setPrompt] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const widgetRef = useRef<HTMLDivElement>(null);
 
   // Auto-focus input
   useEffect(() => {
@@ -42,6 +43,26 @@ export default function MonacoCopilotWidget({
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [onCancel]);
 
+  // Close on click outside the widget. Don't dismiss while a request
+  // is in flight — the user is likely waiting for the response and
+  // any stray click shouldn't abandon their prompt.
+  useEffect(() => {
+    if (loading) return;
+    const handleClick = (e: MouseEvent) => {
+      if (widgetRef.current && !widgetRef.current.contains(e.target as Node)) {
+        onCancel();
+      }
+    };
+    // Defer to next tick so the open click itself doesn't dismiss.
+    const id = window.setTimeout(() => {
+      document.addEventListener('mousedown', handleClick);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      document.removeEventListener('mousedown', handleClick);
+    };
+  }, [onCancel, loading]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() || loading) return;
@@ -54,6 +75,7 @@ export default function MonacoCopilotWidget({
 
   return (
     <div
+      ref={widgetRef}
       className="copilot-widget"
       style={{ top: clampedTop, left: clampedLeft }}
     >

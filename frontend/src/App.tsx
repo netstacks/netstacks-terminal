@@ -63,6 +63,7 @@ import { executeQuickAction } from './api/quickActions'
 import type { GlobalSnippet } from './api/snippets'
 import { useMultiSend } from './hooks/useMultiSend'
 import { useKeyboard } from './hooks/useKeyboard'
+import { COPILOT_OPEN_AI_POPUP_EVENT, type CopilotOpenAIPopupDetail } from './hooks/useMonacoCopilot'
 import { TabSelectionProvider, useTabSelection } from './hooks/useTabSelection'
 import { useEnrichment } from './hooks/useEnrichment'
 // useMenuEvents is no longer mounted — every native-menu item is
@@ -1302,6 +1303,26 @@ function AppContent() {
       sessionId,
       sessionName,
     })
+  }, [])
+
+  // Cmd+I inside a prose Monaco editor (markdown / plaintext / log /
+  // text / rst) dispatches a window event instead of opening the
+  // inline-edit copilot — code rewrites in prose docs are useless.
+  // Listen here and route to the same AIInlinePopup the terminal
+  // "Ask AI" context menu uses, with full agent capability.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<CopilotOpenAIPopupDetail>).detail
+      if (!detail) return
+      setAiPopup({
+        isOpen: true,
+        position: detail.position,
+        action: 'explain',
+        selectedText: detail.selectedText,
+      })
+    }
+    window.addEventListener(COPILOT_OPEN_AI_POPUP_EVENT, handler as EventListener)
+    return () => window.removeEventListener(COPILOT_OPEN_AI_POPUP_EVENT, handler as EventListener)
   }, [])
 
   // Handle floating AI chat from terminal context menu

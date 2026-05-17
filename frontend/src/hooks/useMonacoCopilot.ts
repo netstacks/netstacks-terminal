@@ -42,6 +42,27 @@ export interface UseMonacoCopilotReturn {
   close: () => void;
   accept: () => void;
   reject: () => void;
+  /** Fully clear copilot state. Call when the host editor changes
+   *  (e.g. user switched files in the workspace) so the widget
+   *  doesn't linger pointing at a disposed editor. */
+  reset: () => void;
+}
+
+/** Languages where Cmd+I should defer to the full AI popup (same one
+ *  the terminal "Ask AI" context menu uses) instead of the inline-edit
+ *  widget. Editing prose with a "output only raw code" prompt produces
+ *  nonsense rewrites — users want an answer, not a replacement. */
+const PROSE_LANGUAGES = new Set([
+  'markdown', 'plaintext', 'text', 'log', 'restructuredtext',
+]);
+
+/** Custom event the App listens to in order to surface the AIInlinePopup
+ *  from anywhere in the tree. Sidesteps prop-drilling through workspace
+ *  layers. */
+export const COPILOT_OPEN_AI_POPUP_EVENT = 'netstacks:copilot-open-ai-popup';
+export interface CopilotOpenAIPopupDetail {
+  selectedText: string;
+  position: { x: number; y: number };
 }
 
 export function useMonacoCopilot(): UseMonacoCopilotReturn {
@@ -79,15 +100,34 @@ export function useMonacoCopilot(): UseMonacoCopilotReturn {
         if (!coords || !domNode) return;
 
         const rect = domNode.getBoundingClientRect();
+        const x = rect.left + coords.left;
+        const y = rect.top + coords.top + coords.height;
+
+        // Prose docs (markdown, plaintext, log, etc.) defer to the
+        // full AI popup so the user gets a real answer instead of a
+        // forced "rewrite as code" edit. Same popup the terminal
+        // right-click → Ask AI uses, with full agent capability.
+        const model = editor.getModel();
+        const lang = model?.getLanguageId() ?? '';
+        if (PROSE_LANGUAGES.has(lang)) {
+          const selection = editor.getSelection();
+          const selectedText = selection && !selection.isEmpty() && model
+            ? model.getValueInRange(selection)
+            : '';
+          const detail: CopilotOpenAIPopupDetail = {
+            selectedText,
+            position: { x, y },
+          };
+          window.dispatchEvent(new CustomEvent(COPILOT_OPEN_AI_POPUP_EVENT, { detail }));
+          return;
+        }
+
         setState(prev => ({
           ...prev,
           isOpen: true,
           loading: false,
           error: null,
-          widgetPosition: {
-            top: rect.top + coords.top + coords.height,
-            left: rect.left + coords.left,
-          },
+          widgetPosition: { top: y, left: x },
         }));
       },
     });
@@ -269,6 +309,21 @@ RULES:
     }));
   }, []);
 
+  const reset = useCallback(() => {
+    decorationsRef.current?.clear();
+    decorationsRef.current = null;
+    pendingEditRef.current = null;
+    originalContentRef.current = '';
+    editorRef.current = null;
+    setState({
+      isOpen: false,
+      loading: false,
+      error: null,
+      widgetPosition: null,
+      hasPendingEdit: false,
+    });
+  }, []);
+
   return {
     isOpen: state.isOpen,
     loading: state.loading,
@@ -280,5 +335,6 @@ RULES:
     close,
     accept,
     reject,
+    reset,
   };
 }
