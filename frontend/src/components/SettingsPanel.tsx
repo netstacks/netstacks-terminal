@@ -43,6 +43,12 @@ interface Setting {
   type: 'boolean' | 'string' | 'number' | 'select'
   value: unknown
   options?: { label: string; value: string }[]
+  /** For type: 'number' — min/max/step passed to <input>. Optional;
+   *  callers should provide sensible bounds so users can't spinner the
+   *  Font Size to 9999 (audit P1-17). */
+  min?: number
+  max?: number
+  step?: number
 }
 
 export type SettingsTab = 'general' | 'ai' | 'aiEngineer' | 'prompts' | 'snippets' | 'customCommands' | 'quickCalls' | 'keyboard' | 'mappedKeys' | 'profiles' | 'jumpHosts' | 'tunnels' | 'highlighting' | 'security' | 'hostKeys' | 'recordings' | 'layouts' | 'sessionLogs' | 'integrations' | 'apiResources' | 'troubleshooting' | 'enterprise' | 'account' | 'myCredentials' | 'sshCerts' | 'workspaces'
@@ -92,6 +98,12 @@ const defaultSettings: Setting[] = [
     description: 'Controls the base font size in pixels for the entire application',
     type: 'number',
     value: 13,
+    // Hard bounds prevent absurd settings (font-size: -5 hides UI,
+    // font-size: 99999 explodes layout). Range covers comfortable
+    // reading on every supported display size.
+    min: 8,
+    max: 32,
+    step: 1,
   },
   {
     id: 'fontFamily',
@@ -278,6 +290,9 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
                   type="number"
                   className="setting-input setting-input-number"
                   value={setting.value as number}
+                  min={setting.min}
+                  max={setting.max}
+                  step={setting.step}
                   onChange={(e) => handleChange(setting.id, parseInt(e.target.value, 10))}
                 />
               )}

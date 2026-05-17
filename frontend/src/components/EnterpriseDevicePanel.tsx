@@ -517,7 +517,14 @@ export default function EnterpriseDevicePanel({
                 </div>
                 <div className="device-edit-field" style={{ maxWidth: 80 }}>
                   <label>Port</label>
-                  <input type="number" value={editForm.port} onChange={(e) => setEditForm(prev => ({ ...prev, port: parseInt(e.target.value) || 22 }))} />
+                  <input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    step={1}
+                    value={editForm.port}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, port: parseInt(e.target.value) || 22 }))}
+                  />
                 </div>
               </div>
               <div className="device-edit-field">

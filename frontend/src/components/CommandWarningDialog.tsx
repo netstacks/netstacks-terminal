@@ -1,5 +1,7 @@
+import { useRef } from 'react';
 import type { SafetyAnalysis } from '../types/commandSafety';
 import { getSafetyColor, getSafeAlternatives } from '../lib/commandSafetyEngine';
+import { useModalKeyboard } from '../hooks/useModalKeyboard';
 import './CommandWarningDialog.css';
 
 interface CommandWarningDialogProps {
@@ -18,9 +20,27 @@ export function CommandWarningDialog({
   const alternatives = getSafeAlternatives(analysis.command, analysis.context?.cliFlavor || 'auto');
   const borderColor = getSafetyColor(analysis.level);
 
+  // P1-16: this is the destructive-command warning. Without keyboard
+  // discipline, a stray Enter could trigger Proceed Anyway. We
+  // explicitly DON'T pass onEnter — Enter is a no-op here. Escape
+  // maps to Cancel (the safe default). Focus traps onto Cancel.
+  const containerRef = useRef<HTMLDivElement>(null);
+  useModalKeyboard({
+    isOpen: true,
+    containerRef,
+    onEscape: onCancel,
+    autoFocusSelector: '.btn-secondary', // Cancel button
+  });
+
   return (
     <div className="command-warning-overlay">
-      <div className="command-warning-dialog" style={{ borderTopColor: borderColor }}>
+      <div
+        className="command-warning-dialog"
+        style={{ borderTopColor: borderColor }}
+        ref={containerRef}
+        role="alertdialog"
+        aria-modal="true"
+      >
         <div className="command-warning-header">
           <span className="command-warning-icon">
             {analysis.level === 'dangerous' ? '\u26A0\uFE0F' : '\u26A0'}
