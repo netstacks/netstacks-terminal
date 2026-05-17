@@ -142,7 +142,7 @@ const AIInlineChat = ({
       } else if (context?.device) {
         contextMessage = `I'm looking at ${context.device.name} (${context.device.vendor || context.device.type}${context.device.primaryIp ? `, ${context.device.primaryIp}` : ''}).\n\nHow can I help you with this device?`
       } else if (context?.connection) {
-        contextMessage = `I can see the link between ${context.connection.sourceDevice.name} (${context.connection.sourceInterface}) and ${context.connection.targetDevice.name} (${context.connection.targetInterface}). Status: ${context.connection.status}.\n\nHow can I help you with this connection?`
+        contextMessage = `I can see the link between ${context.connection.sourceDevice.name} (${context.connection.sourceInterface}) and ${context.connection.targetDevice.name} (${context.connection.targetInterface}).\n\nHow can I help you with this connection?`
       } else if (context?.terminal?.recentOutput) {
         contextMessage = `I can see your recent terminal output. How can I help you with what you're working on?`
       } else if (context?.sessionName) {
