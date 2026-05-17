@@ -87,17 +87,32 @@ export default function WorkspacesPanel({
     'workspacesPanel.explorerCollapsed', false,
   )
 
+  // Resilient load: fetches directly so a transient 5xx doesn't blank
+  // the panel. loadSavedWorkspaces() returns [] on error (callers like
+  // addSavedWorkspace rely on that), so we can't use it here without
+  // wiping the visible list every time the network blips.
   const load = useCallback(async () => {
-    setSavedWorkspaces(await loadSavedWorkspaces())
+    try {
+      const { data } = await getClient().http.get('/settings/workspaces')
+      let parsed: WorkspaceConfig[] = []
+      if (typeof data === 'string') parsed = JSON.parse(data)
+      else if (Array.isArray(data)) parsed = data
+      else if (data?.value) parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value
+      setSavedWorkspaces(parsed)
+    } catch {
+      // Keep whatever we already had. A transient backend error
+      // shouldn't visually delete the user's workspace list.
+    }
   }, [])
 
   useEffect(() => {
     load()
+    // Audit P2-2: removed the openWorkspaceIds.size-dependent reload
+    // effect. Tab open/close is not a workspaces-list change, and the
+    // late-resolving fetch raced with deleteWorkspace's local
+    // setSavedWorkspaces — repopulating the deleted row until the next
+    // interaction.
   }, [load])
-
-  useEffect(() => {
-    load()
-  }, [openWorkspaceIds.size, load])
 
   const deleteWorkspace = useCallback(async (id: string, name: string) => {
     const isOpen = openWorkspaceIds.has(id)
