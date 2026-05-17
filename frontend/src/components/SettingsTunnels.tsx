@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useTunnelStore } from '../stores/tunnelStore'
 import {
   createTunnel, updateTunnel, deleteTunnel,
@@ -57,12 +57,19 @@ export default function SettingsTunnels() {
   const [autoReconnect, setAutoReconnect] = useState(true)
   const [maxRetries, setMaxRetries] = useState(5)
 
-  useEffect(() => {
-    fetchTunnels()
+  // Refresh dropdown sources. Called on mount AND on form-open so a
+  // newly-created credential profile / jump host / session shows up
+  // without the user having to reload the app.
+  const refreshDropdownSources = useCallback(() => {
     listProfiles().then(setProfiles).catch(() => {})
     listJumpHosts().then(setJumpHosts).catch(() => {})
     listSessions().then(setJumpSessions).catch(() => {})
-  }, [fetchTunnels])
+  }, [])
+
+  useEffect(() => {
+    fetchTunnels()
+    refreshDropdownSources()
+  }, [fetchTunnels, refreshDropdownSources])
 
   function resetForm() {
     setName('')
@@ -83,6 +90,7 @@ export default function SettingsTunnels() {
   }
 
   function handleEdit(tunnel: TunnelWithState) {
+    refreshDropdownSources()
     setEditingId(tunnel.id)
     setName(tunnel.name)
     setHost(tunnel.host)
@@ -212,7 +220,7 @@ export default function SettingsTunnels() {
           <h3 className="settings-category-title">SSH Tunnels</h3>
           <button
             className="settings-btn settings-btn-primary"
-            onClick={() => { resetForm(); setShowForm(true) }}
+            onClick={() => { resetForm(); refreshDropdownSources(); setShowForm(true) }}
           >
             + New Tunnel
           </button>
