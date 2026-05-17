@@ -402,34 +402,43 @@ export default function TemplateDetailTab({
             <span className="tdt-section-lang">{monacoLang}</span>
           </div>
           <div className="tdt-editor-wrapper">
-            <Editor
-              height="100%"
-              language={monacoLang}
-              value={source}
-              onChange={handleSourceChange}
-              onMount={(editor) => copilot.register(editor)}
-              theme="vs-dark"
-              options={{
-                readOnly,
-                minimap: { enabled: false },
-                lineNumbers: 'on',
-                wordWrap: 'on',
-                tabSize: 2,
-                // fontSize / fontFamily honor Settings → Appearance.
-                ...editorFont,
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                padding: { top: 8, bottom: 8 },
-              }}
-            />
-            {copilot.isOpen && copilot.widgetPosition && (
-              <MonacoCopilotWidget
-                position={copilot.widgetPosition}
-                onSubmit={copilot.handleSubmit}
-                onCancel={copilot.close}
-                loading={copilot.loading}
-                error={copilot.error}
+            <div className="tdt-editor-monaco">
+              <Editor
+                height="100%"
+                language={monacoLang}
+                value={source}
+                onChange={handleSourceChange}
+                onMount={(editor) => copilot.register(editor)}
+                theme="vs-dark"
+                options={{
+                  readOnly,
+                  minimap: { enabled: false },
+                  lineNumbers: 'on',
+                  wordWrap: 'on',
+                  tabSize: 2,
+                  // fontSize / fontFamily honor Settings → Appearance.
+                  ...editorFont,
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  padding: { top: 8, bottom: 8 },
+                }}
               />
+              {copilot.isOpen && copilot.widgetPosition && (
+                <MonacoCopilotWidget
+                  position={copilot.widgetPosition}
+                  onSubmit={copilot.handleSubmit}
+                  onCancel={copilot.close}
+                  loading={copilot.loading}
+                  error={copilot.error}
+                />
+              )}
+            </div>
+            {copilot.hasPendingEdit && (
+              <div className="copilot-accept-bar">
+                <span>AI edit applied — review the highlighted changes</span>
+                <button className="copilot-accept-btn" onClick={copilot.accept}>Accept</button>
+                <button className="copilot-reject-btn" onClick={copilot.reject}>Reject</button>
+              </div>
             )}
           </div>
         </div>

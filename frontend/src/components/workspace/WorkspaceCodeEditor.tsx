@@ -177,32 +177,44 @@ export default function WorkspaceCodeEditor({
           workspace={workspaceRoot}
         />
       )}
-      <Editor
-        defaultValue={initialContent || ''}
-        language={language}
-        theme="vs-dark"
-        onMount={handleEditorMount}
-        options={{
-          minimap: { enabled: false },
-          // fontSize / fontFamily honor Settings → Appearance.
-          ...editorFont,
-          lineNumbers: 'on',
-          scrollBeyondLastLine: false,
-          automaticLayout: true,
-          tabSize: 2,
-          wordWrap: 'off',
-          renderWhitespace: 'selection',
-          padding: { top: 4 },
-        }}
-      />
-      {copilot.isOpen && copilot.widgetPosition && editorRef.current && (
-        <MonacoCopilotWidget
-          position={copilot.widgetPosition}
-          onSubmit={copilot.handleSubmit}
-          onCancel={copilot.close}
-          loading={copilot.loading}
-          error={copilot.error}
+      {/* Wrapper takes the remaining flex height so the accept bar
+          below can claim its natural content height without fighting
+          the Editor's default height:100%. */}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        <Editor
+          defaultValue={initialContent || ''}
+          language={language}
+          theme="vs-dark"
+          onMount={handleEditorMount}
+          options={{
+            minimap: { enabled: false },
+            // fontSize / fontFamily honor Settings → Appearance.
+            ...editorFont,
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 2,
+            wordWrap: 'off',
+            renderWhitespace: 'selection',
+            padding: { top: 4 },
+          }}
         />
+        {copilot.isOpen && copilot.widgetPosition && editorRef.current && (
+          <MonacoCopilotWidget
+            position={copilot.widgetPosition}
+            onSubmit={copilot.handleSubmit}
+            onCancel={copilot.close}
+            loading={copilot.loading}
+            error={copilot.error}
+          />
+        )}
+      </div>
+      {copilot.hasPendingEdit && (
+        <div className="copilot-accept-bar">
+          <span>AI edit applied — review the highlighted changes</span>
+          <button className="copilot-accept-btn" onClick={copilot.accept}>Accept</button>
+          <button className="copilot-reject-btn" onClick={copilot.reject}>Reject</button>
+        </div>
       )}
     </div>
   )

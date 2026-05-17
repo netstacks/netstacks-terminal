@@ -230,6 +230,15 @@
 .tdt-editor-wrapper {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.tdt-editor-monaco {
+  flex: 1;
+  min-height: 0;
+  position: relative;
 }
 
 /* === Side panel === */
