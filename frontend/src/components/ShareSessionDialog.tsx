@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { copyToClipboard } from '../lib/clipboard';
 import './ShareSessionDialog.css';
 import {
   createSessionShare,
@@ -135,17 +136,7 @@ export default function ShareSessionDialog({
   }, [sessionId, existingShares, fetchShares, onShareStatusChange]);
 
   const handleCopy = useCallback(async (url: string, token: string) => {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(token);
-      setTimeout(() => setCopied(null), 2000);
-    } catch {
-      const input = document.createElement('input');
-      input.value = url;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      document.body.removeChild(input);
+    if (await copyToClipboard(url)) {
       setCopied(token);
       setTimeout(() => setCopied(null), 2000);
     }

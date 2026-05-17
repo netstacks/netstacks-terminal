@@ -4,6 +4,7 @@ import type { ExtractedVariable } from '../lib/jinjaVariableExtractor';
 import { renderTemplate } from '../api/docs';
 import type { RenderTemplateResponse } from '../api/docs';
 import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
+import { copyToClipboard } from '../lib/clipboard';
 import './TemplateRenderModal.css';
 
 interface TemplateRenderModalProps {
@@ -133,22 +134,10 @@ export function TemplateRenderModal({
   };
 
   const handleCopy = async () => {
-    if (renderedOutput) {
-      try {
-        await navigator.clipboard.writeText(renderedOutput);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      } catch {
-        // Fallback for older browsers
-        const textarea = document.createElement('textarea');
-        textarea.value = renderedOutput;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }
+    if (!renderedOutput) return;
+    if (await copyToClipboard(renderedOutput)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     }
   };
 

@@ -770,6 +770,7 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(SidecarToken(Mutex::new(None)))
         .manage(SidecarChild(Mutex::new(None)))
         .manage(MenuItemRegistry(parking_lot::Mutex::new(HashMap::new())))

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { listDeviceConfigs, getDeviceConfigVersion, pullDeviceConfig, diffConfigVersions, type DeviceConfig, type DeviceConfigFull, type VersionDiffResponse } from '../api/configManagement'
+import { copyToClipboard } from '../lib/clipboard'
 import './BackupHistoryTab.css'
 
 interface BackupHistoryTabProps {
@@ -288,18 +289,10 @@ export default function BackupHistoryTab({ deviceId, deviceName, onAskAI }: Back
 
   const handleCopy = async () => {
     if (!selectedConfig?.config_text) return
-    try {
-      await navigator.clipboard.writeText(selectedConfig.config_text)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = selectedConfig.config_text
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
+    if (await copyToClipboard(selectedConfig.config_text)) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
     }
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
   }
 
   // Config lines and search matches

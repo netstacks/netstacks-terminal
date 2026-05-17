@@ -21,6 +21,7 @@ import {
 } from '../api/netboxSources';
 import { listProfiles, type CredentialProfile } from '../api/profiles';
 import { PasswordInput } from './PasswordInput';
+import { copyToClipboard } from '../lib/clipboard';
 
 // Helper to format device filters for display
 function formatDeviceFilters(filters: DeviceFilters): string {
@@ -127,18 +128,9 @@ function ImportReport({ result }: ImportReportProps) {
   };
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(buildReportText(result));
+    if (await copyToClipboard(buildReportText(result))) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard API can fail in some webviews — fall back to a textarea trick.
-      const ta = document.createElement('textarea');
-      ta.value = buildReportText(result);
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
-      document.body.removeChild(ta);
     }
   };
 
