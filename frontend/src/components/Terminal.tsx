@@ -1351,15 +1351,59 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
     clearCountdownInterval()
   }, [clearCountdownInterval])
 
-  // Search handlers
+  // ── Search ──────────────────────────────────────────────────────
+  // SearchAddon doesn't expose match count, so the "1 of 1" counter
+  // was completely fake. Two real problems audit P1-6 flagged:
+  //   1. Prev/Next called findNext('') without options, so case/regex
+  //      toggles only affected the initial Find — Prev/Next reverted
+  //      to defaults mid-search.
+  //   2. Counter always showed "1 of 1" regardless of actual matches.
+  //
+  // Fix:
+  //   • Capture the current term + options in a ref so Prev/Next pass
+  //     the same options as the initial search.
+  //   • Compute total match count by scanning the terminal buffer
+  //     ourselves on each new search; current-index advances on
+  //     Prev/Next.
+  const searchStateRef = useRef<{ term: string; options: SearchOptions }>({
+    term: '',
+    options: { caseSensitive: false, regex: false, wholeWord: false },
+  })
+
+  const countMatches = useCallback((term: string, options: SearchOptions): number => {
+    const term0 = term
+    if (!term0 || !xtermRef.current) return 0
+    let regex: RegExp
+    try {
+      const flags = options.caseSensitive ? 'g' : 'gi'
+      const pattern = options.regex
+        ? term0
+        : term0.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const wrapped = options.wholeWord ? `\\b${pattern}\\b` : pattern
+      regex = new RegExp(wrapped, flags)
+    } catch {
+      // Invalid regex — treat as zero matches rather than throwing.
+      return 0
+    }
+    const buf = xtermRef.current.buffer.active
+    let count = 0
+    // Scan every line in the active buffer (visible viewport + scrollback).
+    for (let y = 0; y < buf.length; y++) {
+      const line = buf.getLine(y)?.translateToString(true) ?? ''
+      const matches = line.match(regex)
+      if (matches) count += matches.length
+    }
+    return count
+  }, [])
+
   const handleSearch = useCallback((term: string, options: SearchOptions) => {
+    searchStateRef.current = { term, options }
     if (!searchAddonRef.current || !term) {
       setSearchMatchCount(0)
       setCurrentSearchMatch(0)
       return
     }
 
-    // Find all matches
     const result = searchAddonRef.current.findNext(term, {
       caseSensitive: options.caseSensitive,
       regex: options.regex,
@@ -1373,22 +1417,27 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
       }
     })
 
-    // Note: SearchAddon doesn't expose match count directly
-    // We'll track it through the find results
     if (result) {
-      // Since we can't get exact count, we'll simulate by counting visible matches
-      setSearchMatchCount(1) // At least 1 match
-      setCurrentSearchMatch(1)
+      const total = countMatches(term, options)
+      setSearchMatchCount(total)
+      // First match is the one xterm just highlighted.
+      setCurrentSearchMatch(total > 0 ? 1 : 0)
     } else {
       setSearchMatchCount(0)
       setCurrentSearchMatch(0)
     }
-  }, [])
+  }, [countMatches])
 
   const handleSearchNext = useCallback(() => {
     if (!searchAddonRef.current) return
-    // findNext with empty string continues the previous search
-    const result = searchAddonRef.current.findNext('')
+    const { term, options } = searchStateRef.current
+    if (!term) return
+    // Pass term + options so the search keeps respecting Aa / regex
+    // toggles. findNext continues forward from the current highlight.
+    const result = searchAddonRef.current.findNext(term, {
+      caseSensitive: options.caseSensitive,
+      regex: options.regex,
+    })
     if (result && searchMatchCount > 0) {
       setCurrentSearchMatch(prev => prev < searchMatchCount ? prev + 1 : 1)
     }
@@ -1396,8 +1445,12 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
 
   const handleSearchPrev = useCallback(() => {
     if (!searchAddonRef.current) return
-    // findPrevious with empty string continues the previous search
-    const result = searchAddonRef.current.findPrevious('')
+    const { term, options } = searchStateRef.current
+    if (!term) return
+    const result = searchAddonRef.current.findPrevious(term, {
+      caseSensitive: options.caseSensitive,
+      regex: options.regex,
+    })
     if (result && searchMatchCount > 0) {
       setCurrentSearchMatch(prev => prev > 1 ? prev - 1 : searchMatchCount)
     }
