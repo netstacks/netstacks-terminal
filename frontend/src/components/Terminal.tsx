@@ -1367,25 +1367,24 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({
   //     Prev/Next.
   const searchStateRef = useRef<{ term: string; options: SearchOptions }>({
     term: '',
-    options: { caseSensitive: false, regex: false, wholeWord: false },
+    options: { caseSensitive: false, regex: false },
   })
 
   const countMatches = useCallback((term: string, options: SearchOptions): number => {
     const term0 = term
-    if (!term0 || !xtermRef.current) return 0
+    if (!term0 || !terminalRef.current) return 0
     let regex: RegExp
     try {
       const flags = options.caseSensitive ? 'g' : 'gi'
       const pattern = options.regex
         ? term0
         : term0.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const wrapped = options.wholeWord ? `\\b${pattern}\\b` : pattern
-      regex = new RegExp(wrapped, flags)
+      regex = new RegExp(pattern, flags)
     } catch {
       // Invalid regex — treat as zero matches rather than throwing.
       return 0
     }
-    const buf = xtermRef.current.buffer.active
+    const buf = terminalRef.current.buffer.active
     let count = 0
     // Scan every line in the active buffer (visible viewport + scrollback).
     for (let y = 0; y < buf.length; y++) {

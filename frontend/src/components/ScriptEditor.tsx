@@ -392,11 +392,13 @@ const ScriptEditor = forwardRef<ScriptEditorHandle, ScriptEditorProps>(function 
       setStreamStderr([]);
       setStreamStdout([]);
 
+      // Hoisted so the catch block can render whatever streamed in
+      // before the abort/error.
+      const collectedStdout: string[] = [];
+      const collectedStderr: string[] = [];
       try {
         let finalExitCode = -1;
         let finalDuration = 0;
-        const collectedStdout: string[] = [];
-        const collectedStderr: string[] = [];
 
         const abort = new AbortController();
         runAbortRef.current = abort;

@@ -536,7 +536,10 @@ export const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       for (const absPath of paths) {
         try {
           const bytes = await invoke<number[] | Uint8Array>('read_dropped_file', { path: absPath });
-          const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          // Always copy into a fresh Uint8Array so the buffer is a
+          // concrete ArrayBuffer (not ArrayBufferLike) — BlobPart
+          // rejects the generic form under strict TS settings.
+          const u8 = new Uint8Array(bytes);
           const name = absPath.split(/[\\/]/).pop() || 'file';
           fileList.push(new File([u8], name));
         } catch (err) {

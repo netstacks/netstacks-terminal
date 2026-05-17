@@ -293,21 +293,6 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
     }
   };
 
-  // --- Double-click actions ---
-
-  const handleDoubleClick = useCallback(
-    (entry: FileEntry) => {
-      if (entry.is_dir) {
-        toggleDir(entry.path);
-      } else if (sftpId && activeConnection && isTextFile(entry.name, entry.size)) {
-        onOpenFile(sftpId, entry.path, entry.name, activeConnection.deviceName);
-      } else if (sftpId) {
-        handleDownload(entry);
-      }
-    },
-    [sftpId, activeConnection, toggleDir, onOpenFile, handleDownload]
-  );
-
   // --- Download ---
 
   const handleDownload = useCallback(async (entry: FileEntry) => {
@@ -374,6 +359,21 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
       clearInterval(progressInterval);
     }
   }, [sftpId]);
+
+  // --- Double-click actions ---
+
+  const handleDoubleClick = useCallback(
+    (entry: FileEntry) => {
+      if (entry.is_dir) {
+        toggleDir(entry.path);
+      } else if (sftpId && activeConnection && isTextFile(entry.name, entry.size)) {
+        onOpenFile(sftpId, entry.path, entry.name, activeConnection.deviceName);
+      } else if (sftpId) {
+        handleDownload(entry);
+      }
+    },
+    [sftpId, activeConnection, toggleDir, onOpenFile, handleDownload]
+  );
 
   // --- Upload ---
 
@@ -605,9 +605,10 @@ const SftpPanel: React.FC<SftpPanelProps> = ({ onOpenFile }) => {
       for (const absPath of paths) {
         try {
           const bytes = await invoke<number[] | Uint8Array>('read_dropped_file', { path: absPath });
-          // Invoke serializes Vec<u8> as Uint8Array (newer Tauri) or
-          // number[] (older bridges); normalize.
-          const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          // Always copy into a fresh Uint8Array so the buffer is a
+          // concrete ArrayBuffer (BlobPart rejects ArrayBufferLike
+          // under strict TS).
+          const u8 = new Uint8Array(bytes);
           // Basename only — sftpUpload doesn't recurse directories,
           // and read_dropped_file already rejects non-regular files.
           const name = absPath.split(/[\\/]/).pop() || 'file';

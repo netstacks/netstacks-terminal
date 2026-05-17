@@ -61,7 +61,9 @@ export default function WorkspaceNewDialog({
   // read inside the deps-`[]` effect, but the ref always sees current
   // values because we write through to both in every setTouched.
   const touchedRef = useRef({ aiTool: false, customCommand: false, launchArgs: false, autoLaunch: false })
-  const [touched, setTouchedState] = useState(touchedRef.current)
+  // _touched intentionally unread — state exists solely to trigger
+  // re-renders when touchedRef changes; render code reads the ref.
+  const [, setTouchedState] = useState(touchedRef.current)
   const setTouched = useCallback(
     (updater: (prev: typeof touchedRef.current) => typeof touchedRef.current) => {
       const next = updater(touchedRef.current)
