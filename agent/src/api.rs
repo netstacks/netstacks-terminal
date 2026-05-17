@@ -4289,6 +4289,9 @@ pub async fn import_mop_package(
             paired_step_id: s.paired_step_id.clone(),
             output_format: s.output_format.clone(),
             ai_feedback: None,
+            device_scope: None,
+            device_ids: None,
+            deploy_metadata: None,
         })
         .collect();
     let steps_imported = mop_steps.len();
@@ -4321,6 +4324,9 @@ pub async fn import_mop_package(
                         paired_step_id: s.paired_step_id.clone(),
                         output_format: s.output_format.clone(),
                         ai_feedback: None,
+                        device_scope: None,
+                        device_ids: None,
+                        deploy_metadata: None,
                     })
                     .collect();
                 overrides_imported += 1;

@@ -1500,6 +1500,16 @@ pub struct MopStep {
     pub output_format: Option<String>, // "text" | "json"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_feedback: Option<String>,
+    // Device targeting: which devices in the change session this step runs on.
+    // Absent / "all" → all devices. "specific" → restricted to device_ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_ids: Option<Vec<String>>,
+    // Config-deploy source payload: { template_id, deployment_id, instance_id, variables }.
+    // Opaque to the backend; round-tripped so the UI can re-hydrate the deploy-template card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_metadata: Option<serde_json::Value>,
 }
 
 /// A change control record
