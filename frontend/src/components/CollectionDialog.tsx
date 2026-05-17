@@ -119,11 +119,6 @@ export default function CollectionDialog({
   const [integrationSources, setIntegrationSources] = useState<IntegrationSource[]>([]);
   const [loadingIntegrations, setLoadingIntegrations] = useState(false);
 
-  // MCP state
-  const [mcpServers, setMcpServers] = useState<{ id: string; name: string; hasTopologyTools: boolean }[]>([]);
-  const [selectedMcpServer, setSelectedMcpServer] = useState<string>('');
-  const [mcpDiscovering, setMcpDiscovering] = useState(false);
-
   // Reset state when dialog opens
   useEffect(() => {
     if (isOpen) {
@@ -134,8 +129,6 @@ export default function CollectionDialog({
       setCLIProgress(null);
       // Load integration sources
       loadIntegrationSources();
-      // Check for MCP servers with topology tools
-      checkMcpServers();
     }
   }, [isOpen]);
 
@@ -189,27 +182,6 @@ export default function CollectionDialog({
       console.error('Failed to load integration sources:', err);
     } finally {
       setLoadingIntegrations(false);
-    }
-  };
-
-  // Check for MCP servers with topology tools
-  const checkMcpServers = async () => {
-    try {
-      // Try to get MCP server list from settings
-      const { data: mcpSettings } = await getClient().http.get('/settings/mcp');
-      if (mcpSettings?.servers) {
-        // For now, mark all servers as potentially having topology tools
-        // Real implementation would query each server's tool list
-        const servers = Object.entries(mcpSettings.servers).map(([id, config]: [string, unknown]) => ({
-          id,
-          name: (config as { name?: string }).name || id,
-          hasTopologyTools: true, // Would need to check actual tools
-        }));
-        setMcpServers(servers);
-      }
-    } catch {
-      // MCP not configured
-      setMcpServers([]);
     }
   };
 
@@ -475,21 +447,6 @@ export default function CollectionDialog({
     }
   };
 
-  // MCP discovery (placeholder - would need actual MCP integration)
-  const discoverFromMcp = async () => {
-    if (!selectedMcpServer) return;
-
-    setMcpDiscovering(true);
-    try {
-      // This would call the MCP server's topology discovery tool
-      // For now, show a message that MCP discovery is not yet implemented
-      console.log('MCP discovery not yet implemented');
-      setImportErrors(['MCP topology discovery requires MCP server configuration with topology tools.']);
-    } finally {
-      setMcpDiscovering(false);
-    }
-  };
-
   // Import from integration source
   const importFromIntegration = async (source: IntegrationSource) => {
     setImporting(true);
@@ -634,42 +591,23 @@ export default function CollectionDialog({
             </div>
           )}
 
-          {/* MCP Server Tab */}
+          {/* MCP Server Tab — discovery wiring not yet implemented. The
+              discoverFromMcp handler was a placeholder that surfaced a
+              misleading "requires MCP server configuration" error even
+              when servers WERE configured. Surface the real status until
+              real discovery lands. */}
           {activeTab === 'mcp' && (
             <div className="mcp-tab">
               <p className="tab-description">
                 Discover topology from MCP servers with topology tools.
               </p>
-              {mcpServers.length === 0 ? (
-                <div className="empty-state">
-                  <p>No MCP servers configured.</p>
-                  <p className="hint">Configure MCP servers in Settings &gt; MCP to enable topology discovery.</p>
-                </div>
-              ) : (
-                <>
-                  <div className="form-field">
-                    <label>MCP Server</label>
-                    <select
-                      value={selectedMcpServer}
-                      onChange={e => setSelectedMcpServer(e.target.value)}
-                    >
-                      <option value="">Select a server...</option>
-                      {mcpServers.filter(s => s.hasTopologyTools).map(server => (
-                        <option key={server.id} value={server.id}>
-                          {server.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    className="discover-btn"
-                    onClick={discoverFromMcp}
-                    disabled={!selectedMcpServer || mcpDiscovering}
-                  >
-                    {mcpDiscovering ? 'Discovering...' : 'Discover Topology'}
-                  </button>
-                </>
-              )}
+              <div className="empty-state">
+                <p><strong>Coming soon.</strong></p>
+                <p className="hint">
+                  MCP-driven topology discovery isn't wired up yet. Use the
+                  Integrations tab (NetBox / LibreNMS / Netdisco) for now.
+                </p>
+              </div>
             </div>
           )}
 

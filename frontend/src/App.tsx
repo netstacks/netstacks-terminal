@@ -123,8 +123,7 @@ import { useTroubleshootingSession, type OnTimeoutCallback } from './hooks/useTr
 import { useCertRenewal } from './hooks/useCertRenewal'
 import { useDriftAlerts } from './hooks/useDriftAlerts'
 import type { TroubleshootingSession } from './types/troubleshooting'
-// getTroubleshootingSettings imported for future use
-// import { getTroubleshootingSettings } from './api/troubleshootingSettings'
+import { getTroubleshootingSettings } from './api/troubleshootingSettings'
 import {
   summarizeTroubleshootingSession,
   saveTroubleshootingSummary,
@@ -803,7 +802,12 @@ function AppContent() {
 
   // Troubleshooting session state (Phase 26)
   const [troubleshootingDialogOpen, setTroubleshootingDialogOpen] = useState(false)
-  const [captureAIConversations, setCaptureAIConversations] = useState(true)
+  // Honor the user's troubleshooting setting at boot — the panel's
+  // checkbox feeds the same flag, so hardcoding `true` here made the
+  // setting silently no-op for the app-level quick-start flow.
+  const [captureAIConversations, setCaptureAIConversations] = useState(
+    () => getTroubleshootingSettings().captureAIConversations
+  )
   const [_isSummarizingSession, setIsSummarizingSession] = useState(false)
 
   // Status bar color state (customizable, defaults to VS Code blue)
