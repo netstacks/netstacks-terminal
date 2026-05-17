@@ -10,6 +10,7 @@ import { useState, useEffect, useMemo, useCallback, useRef, type ReactNode } fro
 import type { Device, DeviceType } from '../types/topology';
 import type { DeviceEnrichment, InterfaceEnrichment } from '../types/enrichment';
 import { listHistory, listSessions, type ConnectionHistory, type Session } from '../api/sessions';
+import { listProfiles, type CredentialProfile } from '../api/profiles';
 import { listChanges } from '../api/changes';
 import type { Change, ChangeStatus } from '../types/change';
 import { changeStatusLabels } from '../types/change';
@@ -371,11 +372,15 @@ export default function DeviceDetailTab({
   useEffect(() => {
     if (!host && !sessionId) return;
 
-    // Fetch saved sessions AND connection history in parallel
+    // Fetch saved sessions, connection history, and credential profiles in
+    // parallel. Profiles are joined to synthetic history rows so the
+    // "Username" column shows the SSH user, not the session display name.
     const sessionsPromise = listSessions().catch(() => [] as Session[]);
     const historyPromise = listHistory().catch(() => [] as ConnectionHistory[]);
+    const profilesPromise = listProfiles().catch(() => [] as CredentialProfile[]);
 
-    Promise.all([sessionsPromise, historyPromise]).then(([sessions, historyEntries]) => {
+    Promise.all([sessionsPromise, historyPromise, profilesPromise]).then(([sessions, historyEntries, profiles]) => {
+      const profileById = new Map(profiles.map((p) => [p.id, p]));
       // Find sessions matching this host
       const matching = sessions.filter(
         (s) => (host && s.host === host) || (sessionId && s.id === sessionId)
@@ -402,12 +407,13 @@ export default function DeviceDetailTab({
       const connIds = new Set(connEntries.map((e) => e.session_id).filter(Boolean));
       for (const sess of matching) {
         if (sess.last_connected_at && !connIds.has(sess.id)) {
+          const profile = profileById.get(sess.profile_id);
           connEntries.push({
             id: `session-${sess.id}`,
             session_id: sess.id,
             host: sess.host,
             port: sess.port,
-            username: sess.name,
+            username: profile?.username ?? sess.name,
             connected_at: sess.last_connected_at,
             disconnected_at: null,
             duration_seconds: null,
