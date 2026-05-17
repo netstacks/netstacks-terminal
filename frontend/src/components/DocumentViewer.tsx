@@ -6,7 +6,9 @@ import JinjaViewer from './JinjaViewer';
 import MarkdownViewer from './MarkdownViewer';
 import RecordingPlayer from './RecordingPlayer';
 import type { Document, DocumentVersionMeta, DocumentVersion } from '../api/docs';
-import { listVersions, getVersion, restoreVersion, updateDocument } from '../api/docs';
+import { listVersions, getVersion, restoreVersion, updateDocument, deleteDocument } from '../api/docs';
+import { confirmDialog } from './ConfirmDialog';
+import { showToast } from './Toast';
 import { downloadFile } from '../lib/formatters';
 
 interface DocumentViewerProps {
@@ -238,9 +240,26 @@ function DocumentViewer({ document, onClose, onDocumentUpdate }: DocumentViewerP
     downloadFile(document.content, document.name, 'text/plain');
   };
 
-  const handleDelete = () => {
-    console.log('Delete document:', document.id);
-    // TODO: Implement delete with confirmation
+  const handleDelete = async () => {
+    const ok = await confirmDialog({
+      title: 'Delete document?',
+      body: (
+        <>
+          Permanently delete <strong>{document.name}</strong>? Version
+          history is removed and cannot be recovered.
+        </>
+      ),
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteDocument(document.id);
+      showToast(`Deleted "${document.name}"`, 'success');
+      onClose();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Failed to delete document', 'error');
+    }
   };
 
   // Render content based on content_type
