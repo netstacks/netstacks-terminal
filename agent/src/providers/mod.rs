@@ -81,8 +81,10 @@ pub trait DataProvider: Send + Sync {
         Ok((deleted, failed))
     }
 
-    /// Update last connected timestamp
-    async fn _touch_session(&self, id: &str) -> Result<(), ProviderError>;
+    /// Update last connected timestamp. Called from the WebSocket SSH/Telnet
+    /// connect path after the channel opens — drives DeviceDetailTab "Session
+    /// History" rows and the `last_connected` field surfaced to the AI agent.
+    async fn touch_session(&self, id: &str) -> Result<(), ProviderError>;
 
     /// Find every session/tunnel/profile that uses the given session as
     /// its `jump_session_id`. Used by the SessionSettingsDialog to render

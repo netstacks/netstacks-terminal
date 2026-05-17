@@ -1749,7 +1749,7 @@ impl DataProvider for LocalDataProvider {
         Ok((deleted, 0))
     }
 
-    async fn _touch_session(&self, id: &str) -> Result<(), ProviderError> {
+    async fn touch_session(&self, id: &str) -> Result<(), ProviderError> {
         let now = format_datetime(&Utc::now());
 
         let result = sqlx::query("UPDATE sessions SET last_connected_at = ? WHERE id = ?")
@@ -7049,7 +7049,7 @@ mod tests {
         assert_eq!(updated.host, "10.0.0.1");
 
         // Touch
-        provider._touch_session(&created.id).await.unwrap();
+        provider.touch_session(&created.id).await.unwrap();
         let touched = provider.get_session(&created.id).await.unwrap();
         assert!(touched.last_connected_at.is_some());
 

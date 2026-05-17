@@ -206,6 +206,17 @@ async fn handle_ssh_terminal(socket: WebSocket, query: WsQuery, manager: Arc<Ter
 
     tracing::info!("Created SSH session {} to {}", session_id, host_for_log);
 
+    // Stamp last_connected_at on the saved-session row. Best-effort: a DB
+    // hiccup mustn't break the connect path, so we spawn and log.
+    if let Some(saved_id) = query.session_id.clone() {
+        let provider = app_state.provider.clone();
+        tokio::spawn(async move {
+            if let Err(e) = provider.touch_session(&saved_id).await {
+                tracing::warn!("touch_session({}) failed: {}", saved_id, e);
+            }
+        });
+    }
+
     // Start session port forwards via TunnelManager
     if !session_port_forwards.is_empty() {
         let enabled_forwards: Vec<_> = session_port_forwards.iter()
@@ -1014,6 +1025,16 @@ async fn handle_telnet_terminal(
     };
 
     tracing::info!("Created Telnet session {} to {}", session_id, host_for_log);
+
+    // Stamp last_connected_at on the saved-session row. Best-effort.
+    if let Some(saved_id) = query.session_id.clone() {
+        let provider = app_state.provider.clone();
+        tokio::spawn(async move {
+            if let Err(e) = provider.touch_session(&saved_id).await {
+                tracing::warn!("touch_session({}) failed: {}", saved_id, e);
+            }
+        });
+    }
 
     // Send connected message (telnet has no jump concept).
     let connected_msg = ServerMessage::Connected {
