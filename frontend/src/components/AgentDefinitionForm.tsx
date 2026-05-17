@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import type { AgentDefinition, CreateAgentDefinitionRequest, UpdateAgentDefinitionRequest } from '../api/agentDefinitions';
 import AITabInput from './AITabInput';
 import { useDirtyGuard } from '../hooks/useDirtyGuard';
@@ -25,6 +25,23 @@ export function AgentDefinitionForm({ definition, onSave, onCancel, isSaving }: 
   const [maxIterations, setMaxIterations] = useState(definition?.max_iterations ?? 15);
   const [maxTokens, setMaxTokens] = useState(definition?.max_tokens ?? 4096);
   const [enabled, setEnabled] = useState(definition?.enabled ?? true);
+
+  // Audit P2-8: resync form fields when the parent switches `definition`
+  // without unmounting (edit A → edit B in-place). Today's parent
+  // conditionally renders so the bug is dormant, but the useDirtyGuard
+  // resetKey above signals the author already expected resync. Without
+  // this, edit B would show A's values.
+  useEffect(() => {
+    setName(definition?.name ?? '');
+    setDescription(definition?.description ?? '');
+    setSystemPrompt(definition?.system_prompt ?? '');
+    setProvider(definition?.provider ?? '');
+    setModel(definition?.model ?? '');
+    setTemperature(definition?.temperature != null ? String(definition.temperature) : '');
+    setMaxIterations(definition?.max_iterations ?? 15);
+    setMaxTokens(definition?.max_tokens ?? 4096);
+    setEnabled(definition?.enabled ?? true);
+  }, [definition?.id]);
 
   // Dirty guard so Cancel doesn't silently discard a half-typed agent
   // definition — system prompts in particular can be many minutes of work.

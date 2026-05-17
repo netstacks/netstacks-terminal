@@ -77,18 +77,21 @@ export default function ReconnectOverlay({
           </button>
         </div>
 
+        {/* Audit P2-6: this was a checkbox with no `checked` prop and an
+          * onChange that only fired on `e.target.checked === true`.
+          * Unchecking did nothing, and after the user opted in the
+          * `!autoReconnectDisabled` gate hid the whole block. A one-shot
+          * button matches the actual semantics (the action is
+          * irreversible from this UI — the user has to reopen Session
+          * Settings to flip it back on). */}
         {!autoReconnectDisabled && (
-          <label className="reconnect-overlay-checkbox">
-            <input
-              type="checkbox"
-              onChange={(e) => {
-                if (e.target.checked) {
-                  onDisableAutoReconnect()
-                }
-              }}
-            />
-            <span>Don't auto-reconnect this session</span>
-          </label>
+          <button
+            type="button"
+            className="reconnect-overlay-disable-btn"
+            onClick={onDisableAutoReconnect}
+          >
+            Don't auto-reconnect this session
+          </button>
         )}
       </div>
     </div>

@@ -257,7 +257,6 @@ export default function TabContextMenu({
 
           {onSplitRight && (
             <button className="tab-context-menu-item" onClick={() => {
-              console.log('[TabContextMenu] Split Right clicked');
               onSplitRight();
               onClose();
             }}>
@@ -273,7 +272,6 @@ export default function TabContextMenu({
 
           {onSplitDown && (
             <button className="tab-context-menu-item" onClick={() => {
-              console.log('[TabContextMenu] Split Down clicked');
               onSplitDown();
               onClose();
             }}>

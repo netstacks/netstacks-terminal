@@ -718,8 +718,15 @@ export default function SettingsPanel({ onSettingChange, initialTab }: SettingsP
                     </ul>
                     <a
                       href="https://netstacks.net"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      onClick={async (e) => {
+                        e.preventDefault()
+                        try {
+                          const { open } = await import('@tauri-apps/plugin-shell')
+                          await open('https://netstacks.net')
+                        } catch {
+                          window.open('https://netstacks.net', '_blank')
+                        }
+                      }}
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',

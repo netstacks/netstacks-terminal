@@ -1712,8 +1712,16 @@ export default function DeviceDetailTab({
                         <td className="value">
                           <a
                             href={`${netboxUrl}/dcim/devices/${netboxDevice.id}/`}
-                            target="_blank"
-                            rel="noopener noreferrer"
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              const url = `${netboxUrl}/dcim/devices/${netboxDevice.id}/`;
+                              try {
+                                const { open } = await import('@tauri-apps/plugin-shell');
+                                await open(url);
+                              } catch {
+                                window.open(url, '_blank');
+                              }
+                            }}
                             className="device-detail-tab-netbox-link"
                           >
                             Open in NetBox

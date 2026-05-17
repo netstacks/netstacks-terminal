@@ -72,12 +72,24 @@ export default function MarkdownViewer({
               </code>
             );
           },
-          // Custom link handling - open in external browser
+          // Audit P1-19: target="_blank" is unreliable in Tauri v2 —
+          // it sometimes opens inside the WebView (broken back/forward)
+          // or no-ops depending on platform. Explicit shell-plugin
+          // dispatch matches the Terminal.tsx pattern and works
+          // everywhere.
           a: ({ href, children, ...props }) => (
             <a
               href={href}
-              target="_blank"
-              rel="noopener noreferrer"
+              onClick={async (e) => {
+                if (!href || href.startsWith('#')) return // anchor links → default
+                e.preventDefault()
+                try {
+                  const { open } = await import('@tauri-apps/plugin-shell')
+                  await open(href)
+                } catch {
+                  window.open(href, '_blank')
+                }
+              }}
               {...props}
             >
               {children}

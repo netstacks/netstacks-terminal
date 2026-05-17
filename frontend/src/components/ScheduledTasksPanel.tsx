@@ -331,6 +331,12 @@ function ScheduleTaskDialog({ task, onClose, onSave }: ScheduleTaskDialogProps) 
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally {
+      // Audit P2-7: always clear saving even on a silently-handled
+      // parent error. Without finally, parent catching its OWN error
+      // (and not re-throwing) left this dialog stuck on "Saving…"
+      // forever. The parent normally unmounts on success, so the
+      // setSaving(false) is a no-op in the happy path.
       setSaving(false);
     }
   };

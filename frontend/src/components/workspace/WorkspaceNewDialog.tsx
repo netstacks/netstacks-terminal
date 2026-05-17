@@ -183,6 +183,13 @@ export default function WorkspaceNewDialog({
   }, [localPath, mode])
 
   const handleSubmit = useCallback(async () => {
+    // Audit P2-10: double-submit guard. Previously the button was only
+    // disabled with `disabled={!isValid || cloning}`, but `cloning` is
+    // only true in clone mode. Two quick clicks on Open Workspace in
+    // local/remote mode would create two workspace records with
+    // different UUIDs but identical config. Short-circuit at the
+    // handler so the second click is a no-op regardless of mode.
+    if (cloning) return
     if (mode === 'clone') {
       if (!cloneUrl.trim() || !clonePath.trim()) return
       setCloning(true)
@@ -232,6 +239,12 @@ export default function WorkspaceNewDialog({
     const rootPath = mode === 'local' ? localPath : remotePath
     if (!rootPath.trim()) return
 
+    // Reuse `cloning` as the generic in-flight flag for the local/
+    // remote branch too. The early-return guard at the top of
+    // handleSubmit already prevents re-entry; this just makes the
+    // button label + disabled state match the actual state.
+    setCloning(true)
+
     const name = rootPath.split('/').filter(Boolean).pop() || 'workspace'
 
     if (initGit && mode === 'local') {
@@ -265,7 +278,14 @@ export default function WorkspaceNewDialog({
       activeTerminalIndex: null,
     }
 
-    onSubmit(config)
+    try {
+      onSubmit(config)
+    } finally {
+      // Parent normally unmounts on success, so this is a no-op then.
+      // If onSubmit throws synchronously the user can recover by
+      // tweaking + re-submitting.
+      setCloning(false)
+    }
   }, [mode, localPath, remotePath, remoteSessionId, aiTool, customCommand, launchArgs, autoLaunch, initGit, cloneUrl, clonePath, cloning, onSubmit])
 
   const isValid = mode === 'local'
